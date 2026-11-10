@@ -38,9 +38,9 @@ jobs:
         shell: bash # 明確指定 → GitHub 會加上 -eo pipefail / explicit bash adds -eo pipefail
         working-directory: infra/app
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -50,7 +50,7 @@ jobs:
       - run: npm test
 
       - name: Configure AWS credentials (OIDC → gha-deploy-dev)
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::610935435571:role/gha-deploy-dev
           role-session-name: gha-deploy-dev-${{ github.run_id }}
@@ -91,9 +91,9 @@ jobs:
         shell: bash # 明確指定 → GitHub 會加上 -eo pipefail / explicit bash adds -eo pipefail
         working-directory: infra/app
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -102,7 +102,7 @@ jobs:
       - run: npm ci
 
       - name: Configure AWS credentials (OIDC → gha-deploy-prod)
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::062868712468:role/gha-deploy-prod
           role-session-name: gha-deploy-prod-${{ github.run_id }}
