@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成 / P0 complete**（2026-11-10）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架完成 / P0 complete; P1 CI/CD skeleton complete**（2026-11-10）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -324,11 +324,12 @@
 | 項目 | 值 |
 |---|---|
 | Repo | `chesteran321/brewline`（**公開**） |
-| Ruleset `protect-main` | 預設分支；禁止刪除；必須 PR（核准數 0，單人無法自我核准）；禁止 force push；status checks 待 CI 建好後加入 |
+| Ruleset `protect-main` | 預設分支；禁止刪除；必須 PR（核准數 0，單人無法自我核准）；禁止 force push；**required status check：`checks`**（`PR checks` workflow，2026-11-10 加入） |
 | Environment `production` | Required reviewers：chesteran321；Prevent self-review 關；**不允許管理員繞過**；部署分支只有 `main` |
 | Advanced Security | Dependency graph、Dependabot alerts、Dependabot security updates、Secret scanning、Push protection |
 | Actions | Workflow permissions 預設**唯讀**；不允許 Actions 建立或核准 PR |
 | Secrets | **不存任何 AWS 金鑰**（用 OIDC） |
+| Dependabot version updates | `.github/dependabot.yml`：npm（`/infra/app`，CDK 相關套件分組）＋ github-actions；每週一（Asia/Taipei） |
 
 ### 10.2 OIDC 角色
 
@@ -356,6 +357,37 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 - `cfn-exec-role` 使用預設 AdministratorAccess（ADR-016），仍受 SCP 限制。
 - us-east-1 是為了 CloudFront ACM 憑證（edge-stack）。
 - 執行時 CDK CLI 版本 2.1148.0。**本機開發用 Node 22 LTS；Lambda 用 `Runtime.NODEJS_22_X`**（AWS SDK v3 自 2027-01 起要求 Node ≥ 22）。
+
+### 10.4 CI/CD 管線 / Pipeline（P1，2026-11-10）
+
+| Workflow | 觸發 | Job | OIDC 角色 | 做什麼 |
+|---|---|---|---|---|
+| `pr.yml`（PR checks） | PR → `main` | `checks` | `gha-readonly`（Dev） | typecheck → Jest → `cdk synth` dev/prod（cdk-nag）→ `cdk diff --no-change-set`（Dev），diff 寫入 Job Summary；fork PR 跳過 AWS 步驟 |
+| `deploy.yml`（Deploy） | push → `main` | `Deploy Dev` | `gha-deploy-dev` | `cdk deploy` → 驗證 SSM 值 = commit SHA |
+| | | `Deploy Prod`（`environment: production`，需核准） | `gha-deploy-prod` | 同上 |
+
+| CDK app `infra/app` | 值 |
+|---|---|
+| 工具鏈 | TypeScript 7（`noEmit`）、tsx、Jest + swc、Node 22（`.nvmrc`） |
+| 環境選擇 | `-c env=dev\|prod` **必填**，缺漏或拼錯 synth 失敗；帳號與 ap-east-2 寫在 `lib/config.ts` |
+| cdk-nag | **v3**：`Validations.of(app).addPlugins(new AwsSolutionsChecks(app))`，違規 synth 失敗；例外用 `Validations.of(construct).acknowledge()`（v2 的 `NagSuppressions` 已移除） |
+| 標籤 | `project`、`env`、`module`、`owner`；`RequiredTagsChecker`（READONLY Aspect）缺標籤即報錯 |
+| 測試 | 14 項，含反向：不安全 S3 bucket 讓 synth 失敗、缺標籤報錯、env 缺漏失敗 |
+
+| Stack | 帳號 | 資源 | 終止保護 | 首次部署 commit |
+|---|---|---|---|---|
+| `brewline-dev-pipeline-check` | Dev | SSM `/brewline/dev/pipeline-check`（Standard，免費），值 = 部署的 commit SHA | 否 | `237fb3d` ✅ |
+| `brewline-prod-pipeline-check` | Prod | SSM `/brewline/prod/pipeline-check` | **是** | `237fb3d` ✅（核准後） |
+
+已驗證（正向＋反向）：
+- PR：`gha-readonly` 成功扮演並跑 `cdk diff`；合併前 Dev 查無參數 → PR 無法部署。
+- Dev：合併後自動部署，參數值 = `main` 的 commit。
+- Prod：核准前查無 stack → 核准關卡有效；核准後參數值與 Dev 相同、終止保護 `true`。
+
+教訓 / Lessons：
+- `Deploy Dev` job **不可**宣告 `environment`，否則 `sub` 變成 `environment:...`，對不上 `gha-deploy-dev`。
+- 唯讀角色跑 `cdk diff` 要加 `--no-change-set`（建立 change set 需要 deploy-role）。
+- OIDC `AccessDenied` 時，CloudTrail `AssumeRoleWithWebIdentity` 事件的 `principalId` 會顯示 GitHub 實際送來的 `sub`（見 §10.2）。
 
 ---
 
@@ -407,8 +439,11 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | 有空時 | break-glass 第二個 MFA 裝置、紙本備份 |
 | 有空時 | 手動建立的預算日後改由 CDK 管理（或匯入） |
 | **2026-12-04** | 試用期決策點：GuardDuty、Security Hub CSPM 用量頁；確認管理帳號 EBS Malware 費用為 0；依 11 §7 定案 ADR-008 |
-| P1 開始 | 補強 `.gitignore` 後推送 `D:\brewline`；初始化 `infra/app`（Node 22、TypeScript、cdk-nag）；第一個 workflow（PR → `gha-readonly` `cdk diff`；main → `gha-deploy-dev` 部署）；最小 stack 驗證整條管線 |
-| P1 開始 | 建立 ruleset 的 required status checks；`.github/dependabot.yml` |
+| ✅ 2026-11-10 | `.gitignore` 補強；`infra/app` 初始化；PR／Deploy workflow；pipeline-check stack 驗證 Dev、Prod 整條管線（§10.4，PR #1） |
+| ✅ 2026-11-10 | ruleset required status check `checks`；`.github/dependabot.yml` |
+| 盡快 | 本機 `D:\brewline` 改為 `git clone` GitHub repo（或 `git pull`），**不要**把本機舊內容 force push 上去 |
+| P1 | 處理 Dependabot 開的更新 PR（確認 `checks` 綠燈再合併） |
+| P1 | 第一個業務模組前：建立 `Developer` 許可集（§3）、決定是否由 CDK 管理 OIDC 角色（目前為手動，ADR-017） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
 ---
