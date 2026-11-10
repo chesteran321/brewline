@@ -1,0 +1,423 @@
+# Landing Zone 實際狀態 / Landing Zone As-Built Status
+
+> 狀態 Status：**P0 完成 / P0 complete**（2026-11-10）
+> 作者 Author：Chester Huang
+> **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
+> This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
+>
+> **公開版遮蔽 Public redaction**：本 repo 為公開，root Email、Identity Center 存取入口網址、break-glass 使用者名稱以 `<redacted>` 取代；完整版保存在私人文件中。帳號 ID、OU ID、政策內容依 AWS 說明不屬機密，予以保留。
+> Root emails, the Identity Center access portal URL, and the break-glass user name are redacted in this public copy. Account IDs, OU IDs, and policies are kept.
+
+---
+
+## 1. 帳號與組織 / Accounts & Organization
+
+| 項目 Item | ID | 備註 Notes |
+|---|---|---|
+| Organization | `o-3lctsv05rd` | 全部功能 All features |
+| Root | `r-3oy9` | |
+| OU: Security | `ou-3oy9-j0ujd8wf` | |
+| OU: Workloads | `ou-3oy9-uay8f4cz` | |
+| OU: Workloads › Prod | `ou-3oy9-wgtgiqg0` | **v0.1 沒有此子 OU** / not in v0.1 |
+| OU: Workloads › Dev | `ou-3oy9-n4jncsis` | **v0.1 沒有此子 OU** / not in v0.1 |
+
+| 帳號 Account | ID | Root email | OU |
+|---|---|---|---|
+| Management（chester huang） | `324200381393` | `<redacted>` | Root |
+| brewline-security | `978684888186` | `<redacted>` | Security |
+| brewline-prod | `062868712468` | `<redacted>` | Workloads › Prod |
+| brewline-dev | `610935435571` | `<redacted>` | Workloads › Dev |
+
+**為什麼拆 Prod / Dev 子 OU**：讓 SCP 能先掛 Dev OU 試套用；讓 `scp-budget-lockdown` 能分別鎖 Dev 與 Prod。
+
+成員帳號皆有 `OrganizationAccountAccessRole`（AdministratorAccess，信任管理帳號），保留作為 Identity Center 失效時的備援進入路徑。
+
+---
+
+## 2. 區域 / Regions（ADR-009 已定案）
+
+| 用途 Use | 區域 Region |
+|---|---|
+| 主要工作負載 Primary | **ap-east-2（台北）** |
+| 全域服務 Global（CloudFront ACM、帳單） | us-east-1 |
+| DR 演練 Drill | **ap-northeast-1（東京）**，僅演練時暫時開放 |
+| IAM Identity Center | ap-east-2 |
+
+- 三個成員帳號已透過 AWS Account Management 啟用 ap-east-2（opt-in 區域）。
+- **台北區服務限制（ADR-009 例外）**：
+  - ❌ Macie 不提供 → 不啟用（RSK-013）
+  - ❌ CloudShell 不提供 → 操作時在東京開 CloudShell，指令一律加 `--region ap-east-2`
+  - ❌ Security Hub CSPM 的 finding aggregator 不支援 → 不能用中央組態（ADR-015）
+  - ✅ 已確認可用：Lambda、API Gateway、DynamoDB、Step Functions、EventBridge、Scheduler、SQS、SNS、SES、Cognito、S3、Firehose、Glue、Athena、SSM、KMS、X-Ray、CloudWatch、CodeDeploy、CloudFormation、Bedrock（模型清單需另查）、GuardDuty、Security Hub、Config、CloudTrail、Access Analyzer
+
+---
+
+## 3. 身分 / Identity
+
+| 項目 Item | 值 Value |
+|---|---|
+| Identity Center instance | `ssoins-83273ce534e6d6c8`（組織執行個體、**單一區域** ap-east-2，ADR-013） |
+| 存取入口網站 Access portal | `<redacted>` |
+| 使用者 User | `chester`（MFA 每次登入） |
+| 群組 Group | `admins` |
+
+| 許可集 Permission set | 政策 Policy | 工作階段 Session | 指派 Assigned to |
+|---|---|---|---|
+| Admin | AdministratorAccess | 1 h | 全部 4 個帳號 |
+| ReadOnly | ViewOnlyAccess | 4 h | 全部 4 個帳號 |
+| BillingViewer | Billing | 4 h | 僅 Management |
+| Developer | — | — | **尚未建立**（等 P1 需要時再建） |
+
+- **Root**：管理帳號 root 有 MFA、無存取金鑰；成員帳號 root 憑證「不存在」，已啟用集中式根存取管理（根憑證管理 + 特權根動作）。
+- **Break-glass**：IAM User `<redacted>`（管理帳號，AdministratorAccess，無存取金鑰，密碼存密碼管理器）。用途與流程見 §11 RB-SEC-03。
+- 舊的 IAM User `developer1` 與群組 `devteam` 已刪除。
+
+---
+
+## 4. 組織政策 / Organization Policies
+
+| 政策 Policy | 類型 | ID | 掛載 Attached |
+|---|---|---|---|
+| FullAWSAccess | SCP（AWS 內建） | — | Root |
+| `scp-baseline` | SCP | `p-jzberlon` | Root |
+| `scp-deny-expensive` | SCP | `p-1iinm3yf` | Root |
+| `scp-region-restrict` | SCP | `p-ru77otvs` | Root |
+| `scp-budget-lockdown` | SCP | `p-mljh1epv` | **不掛**，只由 Budget Actions 掛載 |
+| `rcp-data-perimeter` | RCP | `p-02ami4dm4w` | Root |
+
+**設計決策**：每個節點最多 5 條 SCP（含 FullAWSAccess），所以 v0.1 的 leave-org、deny-root、protect-s3-bpa、protect-security-services 合併成 `scp-baseline`，以 `Sid` 區分。Root 目前 4/5。
+
+所有政策都先掛 Dev OU 測試、驗證後再改掛 Root。**政策變更後需等 1–2 分鐘才生效（最終一致）。**
+
+### 4.1 `scp-baseline`
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "DenyLeaveOrganization", "Effect": "Deny", "Action": "organizations:LeaveOrganization", "Resource": "*" },
+    { "Sid": "DenyRootUser", "Effect": "Deny", "Action": "*", "Resource": "*",
+      "Condition": { "StringLike": { "aws:PrincipalArn": "arn:aws:iam::*:root" } } },
+    { "Sid": "ProtectS3AccountBlockPublicAccess", "Effect": "Deny", "Action": "s3:PutAccountPublicAccessBlock", "Resource": "*" },
+    { "Sid": "DenyObjectLockBypass", "Effect": "Deny", "Action": "s3:BypassGovernanceRetention", "Resource": "*" },
+    { "Sid": "ProtectAuditLogBucket", "Effect": "Deny",
+      "Action": ["s3:DeleteBucket", "s3:PutBucketPolicy", "s3:DeleteBucketPolicy", "s3:PutBucketVersioning",
+                 "s3:PutBucketObjectLockConfiguration", "s3:PutLifecycleConfiguration"],
+      "Resource": "arn:aws:s3:::brewline-security-cloudtrail-978684888186" },
+    { "Sid": "ProtectSecurityServices", "Effect": "Deny",
+      "Action": ["cloudtrail:StopLogging", "cloudtrail:DeleteTrail", "cloudtrail:UpdateTrail", "cloudtrail:PutEventSelectors",
+                 "guardduty:DeleteDetector", "guardduty:DisassociateFromAdministratorAccount", "guardduty:DisassociateFromMasterAccount",
+                 "securityhub:DisableSecurityHub", "securityhub:DisassociateFromAdministratorAccount",
+                 "securityhub:DisassociateFromMasterAccount", "securityhub:BatchDisableStandards",
+                 "config:StopConfigurationRecorder", "config:DeleteConfigurationRecorder", "config:DeleteDeliveryChannel"],
+      "Resource": "*" }
+  ]
+}
+```
+
+刻意**不**禁止：`guardduty:UpdateDetector`（委派管理員要調整自己的設定）、`config:PutConfigurationRecorder`（之後要增加記錄類型）。
+前提：各帳號的 S3 帳號層級 Block Public Access 已在掛政策前全部開啟。
+
+### 4.2 `scp-deny-expensive`
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "DenyExpensiveServices", "Effect": "Deny",
+      "Action": ["ec2:CreateNatGateway", "eks:CreateCluster", "eks:CreateNodegroup",
+                 "sagemaker:CreateEndpoint", "sagemaker:CreateNotebookInstance",
+                 "redshift:CreateCluster", "redshift-serverless:CreateWorkgroup",
+                 "es:CreateDomain", "es:CreateElasticsearchDomain", "aoss:CreateCollection",
+                 "kafka:CreateCluster", "kafka:CreateClusterV2", "kinesis:CreateStream",
+                 "shield:CreateSubscription"],
+      "Resource": "*" },
+    { "Sid": "DenyLongTermCommitments", "Effect": "Deny",
+      "Action": ["ec2:PurchaseReservedInstancesOffering", "savingsplans:CreateSavingsPlan",
+                 "rds:PurchaseReservedDBInstancesOffering", "dynamodb:PurchaseReservedCapacityOfferings"],
+      "Resource": "*" },
+    { "Sid": "DenyLargeEc2Instances", "Effect": "Deny", "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": { "StringNotLike": { "ec2:InstanceType": ["t4g.nano", "t4g.micro", "t4g.small", "t3.nano", "t3.micro", "t3.small"] } } }
+  ]
+}
+```
+
+相對 v0.1 新增：MSK、Kinesis Data Streams（對應 SHP-N-002）、Shield Advanced、長期承諾購買。
+
+### 4.3 `scp-region-restrict`
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "DenyOutsideAllowedRegions", "Effect": "Deny",
+    "NotAction": ["a4b:*", "account:*", "acm:*", "aws-marketplace-management:*", "aws-marketplace:*", "aws-portal:*",
+                  "bcm-data-exports:*", "billing:*", "budgets:*", "ce:*", "chime:*", "cloudfront:*", "cloudshell:*",
+                  "config:*", "cost-optimization-hub:*", "cur:*", "directconnect:*",
+                  "ec2:DescribeRegions", "ec2:DescribeTransitGateways", "ec2:DescribeVpnGateways",
+                  "fms:*", "freetier:*", "globalaccelerator:*", "health:*", "iam:*", "importexport:*", "invoicing:*",
+                  "kms:*", "mobileanalytics:*", "networkmanager:*", "notifications:*", "organizations:*", "payments:*",
+                  "pricing:*", "route53:*", "route53domains:*", "route53-recovery-cluster:*",
+                  "route53-recovery-control-config:*", "route53-recovery-readiness:*",
+                  "s3:GetAccountPublic*", "s3:ListAllMyBuckets", "s3:ListMultiRegionAccessPoints", "s3:PutAccountPublic*",
+                  "shield:*", "sts:*", "support:*", "tax:*", "trustedadvisor:*", "waf-regional:*", "waf:*", "wafv2:*",
+                  "wellarchitected:*"],
+    "Resource": "*",
+    "Condition": { "StringNotEquals": { "aws:RequestedRegion": ["ap-east-2", "us-east-1"] } }
+  }]
+}
+```
+
+- 允許 ap-east-2、us-east-1。**東京平時不允許**。
+- v0.1 的「`env=drill` 標籤例外」改為：**DR 演練前暫時把 `ap-northeast-1` 加入允許清單，演練後移除**（寫入 RB-DR-01）。
+- `cloudshell:*` 在 NotAction 裡，所以東京 CloudShell 環境能開，但裡面的 `aws` 指令要加 `--region ap-east-2`。
+
+### 4.4 `scp-budget-lockdown`（平時不掛）
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "DenyNewResourcesDuringBudgetLockdown", "Effect": "Deny",
+    "Action": ["cloudformation:CreateStack", "cloudformation:UpdateStack", "cloudformation:CreateChangeSet",
+               "cloudformation:ExecuteChangeSet", "lambda:CreateFunction", "lambda:UpdateFunctionCode",
+               "ec2:RunInstances", "s3:CreateBucket", "dynamodb:CreateTable", "states:CreateStateMachine",
+               "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream",
+               "athena:StartQueryExecution", "glue:StartJobRun", "glue:StartCrawler"],
+    "Resource": "*",
+    "Condition": { "ArnNotLike": { "aws:PrincipalArn": "arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/*AWSReservedSSO_Admin_*" } }
+  }]
+}
+```
+
+- 只擋建立與按次計費呼叫，不擋刪除；Identity Center Admin 角色豁免。
+- 鎖定時 **CDK / GitHub Actions 部署會全部失敗**（錯誤訊息出現 `p-mljh1epv`）。
+- 擋不住已經在跑的排程 Lambda → 模擬器要靠 SIM-N-001 的 SSM 開關。
+
+### 4.5 `rcp-data-perimeter`
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Sid": "EnforceOrgIdentities", "Effect": "Deny", "Principal": "*",
+      "Action": ["s3:*", "kms:*", "sqs:*", "secretsmanager:*", "sts:AssumeRole"], "Resource": "*",
+      "Condition": {
+        "StringNotEqualsIfExists": { "aws:PrincipalOrgID": "o-3lctsv05rd", "aws:ResourceTag/dp:exclude:identity": "true" },
+        "BoolIfExists": { "aws:PrincipalIsAWSService": "false" } } },
+    { "Sid": "EnforceS3Tls", "Effect": "Deny", "Principal": "*", "Action": "s3:*", "Resource": "*",
+      "Condition": { "BoolIfExists": { "aws:SecureTransport": "false" } } }
+  ]
+}
+```
+
+- STS 只放 `sts:AssumeRole`，**不可**改成 `sts:*`，否則 GitHub OIDC（AssumeRoleWithWebIdentity）與 SSO（AssumeRoleWithSAML）會被擋。
+- S3 強制 TLS 由 RCP 統一處理 → **bucket policy 不需要再寫拒絕非 TLS**（取代 09 §3.2 該項）。
+- 例外：資源貼標籤 `dp:exclude:identity=true` 可豁免組織身分限制。
+
+---
+
+## 5. 成本治理 / Cost Governance
+
+| 預算 Budget | 金額 | 範圍 | 告警 |
+|---|---|---|---|
+| `brewline-annual-cap` | USD 300／年 | 全組織 | 實際 50%、80%；預測 100% |
+| `brewline-monthly` | USD 25／月 | 全組織 | 範本預設：實際 85%、100%；預測 100% |
+| `brewline-prod-monthly` | USD 15／月 | Linked account 062868712468 | 實際 80%、100%；預測 100% |
+| `brewline-dev-monthly` | USD 5／月 | Linked account 610935435571 | 同上 |
+| `brewline-security-monthly` | USD 5／月 | Linked account 978684888186 | 同上 |
+
+- 分帳號預算以 **CLI 建立**（新帳號尚無帳單資料時，主控台的 Linked account 清單選不到）。
+- 2026-09-30 之後新增的預算收件人**必須驗證 Email** 才收得到通知。
+
+| Budget Action | 門檻 | 動作 | 目標 | 核准 | Action ID |
+|---|---|---|---|---|---|
+| brewline-dev-monthly | 實際 100% | 掛 `scp-budget-lockdown` | Dev OU | AUTOMATIC | `b398ede6-399f-499c-9c41-3215facf0b5a` |
+| brewline-prod-monthly | 實際 120% | 掛 `scp-budget-lockdown` | Prod OU | MANUAL | `40d648c3-6a97-4835-b168-952a4fc37ff9` |
+
+- 執行角色：`arn:aws:iam::324200381393:role/brewline-budget-actions-role`
+  - 信任 `budgets.amazonaws.com`，條件 `aws:SourceAccount=324200381393`、`aws:SourceArn=arn:aws:budgets::324200381393:budget/*`
+  - 內嵌政策 `attach-lockdown-scp`：只能把 `p-mljh1epv` 掛到 / 移出 Dev、Prod OU，外加 Organizations 唯讀
+- 解除：在 Budget Action 頁面按「還原」，或於管理帳號手動分離 SCP。週期重置是否自動解除**尚未實測**。
+
+成本異常偵測：AWS 服務監控器，訂閱 `brewline-anomaly-alert`，**每日摘要**寄 Email，門檻 USD 2。之後有 SNS 主題再改為個別告警。
+
+---
+
+## 6. 稽核日誌 / CloudTrail
+
+| 項目 | 值 |
+|---|---|
+| Trail | `brewline-org-trail`（組織 trail、多區域、主區域 ap-east-2，建在管理帳號） |
+| ARN | `arn:aws:cloudtrail:ap-east-2:324200381393:trail/brewline-org-trail` |
+| 事件 | 管理事件讀＋寫；無資料事件、無 Insights、無 CloudWatch Logs |
+| 日誌檔驗證 | 啟用 |
+| 遞迴記錄 | **關閉**（預防日後開 CloudWatch Logs + 資料事件時產生迴圈） |
+| 加密 | **SSE-S3**（ADR-014，不用 KMS） |
+| Bucket | `brewline-security-cloudtrail-978684888186`（Security 帳號，ap-east-2） |
+| Object Lock | 啟用，預設 **GOVERNANCE 365 天**（API 顯示為 `DefaultEventHold.Days=365`，實測物件 `RetainUntilDate` 為寫入後一年） |
+| 生命週期 | 目前版本 366 天過期；非目前版本 30 天刪除 |
+| Bucket policy | 只允許 `cloudtrail.amazonaws.com`，`aws:SourceArn` 限定上述 trail；路徑 `AWSLogs/324200381393/*`、`AWSLogs/o-3lctsv05rd/*` |
+
+已驗證：Security 帳號 Admin 無法永久刪除日誌（Object Lock）、無法用 bypass 刪除（SCP）、無法修改 bucket 設定（SCP）。
+修改此 bucket 的流程：從管理帳號暫時移除 `scp-baseline` 的 `ProtectAuditLogBucket` → 修改 → 加回。
+
+---
+
+## 7. 威脅偵測 / GuardDuty
+
+委派管理員：**brewline-security**（ap-east-2、us-east-1 各委派一次）。組織自動啟用：**新帳戶和現有帳戶**。
+
+| 帳號 | ap-east-2 | us-east-1 |
+|---|---|---|
+| brewline-security | 基本偵測 + S3 保護 | 基本偵測 |
+| Management | 基本偵測 + S3 保護 + **EBS Malware Protection（已知例外）** | 基本偵測 |
+| brewline-prod | 基本偵測 + S3 保護 | 基本偵測 |
+| brewline-dev | 基本偵測 + S3 保護 | 基本偵測 |
+
+- 不開：EKS、Runtime Monitoring、RDS、Lambda、Malware（EC2/S3）、AI Protection（P4 再評估）。
+- 只開台北與 us-east-1；其他區域由 `scp-region-restrict` 從源頭阻擋。
+- **已知例外**：管理帳號 ap-east-2 偵測器由 `create-detector` 建立時套用預設值開啟了 EBS Malware Protection；成為成員後成員與委派管理員都無法停用（自動啟用「所有帳戶」時也無法取消關聯）。該帳號無 EC2，不會觸發掃描。於試用期決策點確認費用為 0。
+- 教訓：成員帳號要先調好偵測器功能再加入成員；加入後設定權移交委派管理員。
+- 試用期：2026-11-09 起 30 天（每帳號每區域）。
+
+---
+
+## 8. 設定記錄 / AWS Config
+
+| 帳號 | 記錄 | 頻率 | 區域 |
+|---|---|---|---|
+| brewline-prod | ✅ | CONTINUOUS | ap-east-2 |
+| brewline-dev | ✅ | DAILY | ap-east-2 |
+| brewline-security、Management | ❌ | — | — |
+
+- 記錄類型（8 種，`INCLUSION_BY_RESOURCE_TYPES`）：`AWS::IAM::Role`、`AWS::IAM::Policy`、`AWS::S3::Bucket`、`AWS::KMS::Key`、`AWS::Lambda::Function`、`AWS::DynamoDB::Table`、`AWS::ApiGatewayV2::Api`、`AWS::ApiGatewayV2::Stage`
+- 使用服務連結角色 `AWSServiceRoleForConfig`；保留期 365 天；快照每 24 小時。
+- 交付到 `brewline-security-config-978684888186`（Security 帳號；版本控制；無 Object Lock；目前版本 365 天過期、非目前版本 30 天）。Bucket policy 以 `aws:SourceAccount` 允許 062868712468、610935435571。
+- **缺口**：CloudFront 設定只記錄在 us-east-1 的 Config，本專案未記錄 → 改由 CDK + cdk-nag 部署前檢查。
+- CLI 注意：`recordingMode` 要寫在 `--configuration-recorder` 的 JSON 內，不是獨立參數。
+
+---
+
+## 9. 合規檢查 / Security Hub CSPM
+
+- 委派管理員：brewline-security（**僅 ap-east-2**）。
+- 使用**本機組態**，不是中央組態（ADR-015：台北不支援 finding aggregator，無法當主區域）。
+- Auto-enable accounts：**關**；Auto-enable default standards：**關**。
+
+| 帳號 | Security Hub CSPM | 標準 |
+|---|---|---|
+| brewline-security | ✅（委派管理員） | **無**（預設的 FSBP、CIS v1.2.0 已停用） |
+| brewline-prod | ✅ | **只有 AWS FSBP v1.0.0** |
+| brewline-dev、Management | ❌ | — |
+
+- 不用 CIS：帳號基線項目已由 SCP、Identity Center 以預防性控制達成；FSBP 涵蓋本專案實際使用的 Serverless 服務。
+- 試用期：2026-11-09 起 30 天。
+
+---
+
+## 10. CI/CD 基礎 / GitHub & CDK
+
+### 10.1 GitHub
+
+| 項目 | 值 |
+|---|---|
+| Repo | `chesteran321/brewline`（**公開**） |
+| Ruleset `protect-main` | 預設分支；禁止刪除；必須 PR（核准數 0，單人無法自我核准）；禁止 force push；status checks 待 CI 建好後加入 |
+| Environment `production` | Required reviewers：chesteran321；Prevent self-review 關；**不允許管理員繞過**；部署分支只有 `main` |
+| Advanced Security | Dependency graph、Dependabot alerts、Dependabot security updates、Secret scanning、Push protection |
+| Actions | Workflow permissions 預設**唯讀**；不允許 Actions 建立或核准 PR |
+| Secrets | **不存任何 AWS 金鑰**（用 OIDC） |
+
+### 10.2 OIDC 角色
+
+OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.com`（Dev、Prod 各一個）。
+
+| 帳號 | 角色 | 信任 `sub` | 權限 |
+|---|---|---|---|
+| Dev | `gha-deploy-dev` | `repo:chesteran321@219534971/brewline@1451431799:ref:refs/heads/main` | `sts:AssumeRole` on `cdk-hnb659fds-*` |
+| Dev | `gha-readonly` | `repo:chesteran321@219534971/brewline@1451431799:pull_request` | `sts:AssumeRole` on `cdk-hnb659fds-lookup-role-*` |
+| Prod | `gha-deploy-prod` | `repo:chesteran321@219534971/brewline@1451431799:environment:production` | `sts:AssumeRole` on `cdk-hnb659fds-*` |
+| Prod | `gha-readonly` | `repo:chesteran321@219534971/brewline@1451431799:pull_request` | `sts:AssumeRole` on `cdk-hnb659fds-lookup-role-*` |
+
+最長工作階段 1 小時。Workflow 需宣告 `permissions: id-token: write`。
+
+**`sub` 格式（2026-11-10 實測修正）**：GitHub 簽發的 `sub` 含不可變的帳號 ID 與 repo ID：`repo:chesteran321@219534971/brewline@1451431799:<suffix>`。原本以舊格式 `repo:chesteran321/brewline:<suffix>` 建立的信任政策全部被拒（`AccessDenied`，CloudTrail `principalId` 可看到實際值），4 個角色已改用新格式。好處：repo 改名或被他人以同名重建時，信任政策不會誤放行。
+
+### 10.3 CDK bootstrap
+
+| 帳號 | 區域 | Stack | 終止保護 |
+|---|---|---|---|
+| Dev | ap-east-2、us-east-1 | `CDKToolkit` | ✅ |
+| Prod | ap-east-2、us-east-1 | `CDKToolkit` | ✅ |
+
+- Qualifier 預設 `hnb659fds`；每帳號 10 個 `cdk-hnb659fds-*` 角色。
+- `cfn-exec-role` 使用預設 AdministratorAccess（ADR-016），仍受 SCP 限制。
+- us-east-1 是為了 CloudFront ACM 憑證（edge-stack）。
+- 執行時 CDK CLI 版本 2.1148.0。**本機開發用 Node 22 LTS；Lambda 用 `Runtime.NODEJS_22_X`**（AWS SDK v3 自 2027-01 起要求 Node ≥ 22）。
+
+---
+
+## 11. 新增與修訂的決策 / New & Revised ADRs
+
+| ADR | 標題 | 狀態 | 決策摘要 |
+|---|---|---|---|
+| ADR-008 | 安全服務範圍 | Proposed → 待 2026-12-04 定案 | GuardDuty 全帳號（台北＋us-east-1，只開 S3 保護於台北）；Security Hub CSPM 只 Prod（FSBP）；Config 只 Prod（連續）＋ Dev（每日）、8 種類型；管理帳號 EBS Malware 例外（§7） |
+| ADR-009 | 主要區域 | **Accepted** | ap-east-2；28 項服務 27 項可用；例外見 §2 |
+| ADR-013 | Identity Center 單一區域 | Accepted | 不用多區域（需多區域 KMS CMK，約 USD 24/年）；區域故障時以 break-glass 登入 |
+| ADR-014 | CloudTrail 用 SSE-S3 | Accepted | KMS 每檔一次請求持續計費；保護來自跨帳號存放＋Object Lock＋SCP |
+| ADR-015 | Security Hub CSPM 用本機組態 | Accepted | 台北不支援 finding aggregator；改用 us-east-1 當主區域會把政策套到 us-east-1、造成 Config 未啟用的失敗項 |
+| ADR-016 | CDK cfn-exec 使用預設 Admin | Accepted | 作品集取捨；SCP 為防護欄；正式環境應改自訂最小權限 |
+| ADR-017 | 步驟 5–12 以主控台／CLI 手動建置 | Accepted | 為學習目的偏離 P-04；未來可再以 CDK 匯入或重建 |
+
+| 風險 | 內容 | L | I | 緩解 |
+|---|---|---|---|---|
+| RSK-013 | 主要區域無 Macie，無法自動偵測 S3 中的個資 | L | L | 個資只存 DynamoDB；DATA-011/012 設計層預防；資料湖 DQ 檢查加入 Email／電話格式偵測 |
+
+---
+
+## 12. v0.1 文件需要修改的地方 / Required Updates to v0.1 Docs
+
+| 文件 | 修改 |
+|---|---|
+| 01 §3 | 帳號結構加入 Workloads › Prod、Dev 子 OU |
+| 01 §8 | 主要區域改 ap-east-2；DR 改 ap-northeast-1；刪除「台北列為評估項目」 |
+| 02 §1 | 步驟 5–12 改為主控台／CLI 手動（ADR-017）；步驟順序 9 → 10 → 9b（Security Hub 在 Config 之後） |
+| 02 §7 | 演練區改 ap-northeast-1，加入「演練前暫時修改 `scp-region-restrict`」 |
+| 09 §3.2 | 「Bucket policy 拒絕非 TLS」改為「由 RCP `EnforceS3Tls` 統一處理」 |
+| 09 §5 | GuardDuty、Security Hub、Config 依 §7–§9 更新；Macie 改「不啟用」；Access Analyzer 可用 |
+| 10 §4.2 | 改為 §4 的實際政策；合併 `scp-baseline`；Root 4/5 |
+| 11 §3.2 | COST-020 告警閾值依實際；分帳號預算以 CLI 建立；Email 驗證要求 |
+| 11 §3.3 | Budget Actions 實際設定；「下週期自動解除」改為待實測 |
+| 12 §2 | `pii` 控制移除「Macie 一次性掃描」 |
+| 13 §4 | 新增 RB-SEC-03 break-glass；RB-COST-01 解除方式；RB-DR-01 區域 SCP 調整 |
+| 13 §6 | 每季加入 break-glass 測試 |
+| 14 | 加入 §11 的 ADR 與 RSK-013 |
+
+---
+
+## 13. 待辦 / Open Items
+
+| 時間 | 事項 |
+|---|---|
+| 盡快 | 確認 5 個預算收件人 Email 皆為 Verified |
+| 盡快 | 查看 Prod 第一個 FSBP 分數 |
+| 盡快 | 管理帳號舊資源盤點與清理（台北 S3 bucket、Glue Data Catalog、2 個 CloudWatch 告警） |
+| 有空時 | break-glass 第二個 MFA 裝置、紙本備份 |
+| 有空時 | 手動建立的預算日後改由 CDK 管理（或匯入） |
+| **2026-12-04** | 試用期決策點：GuardDuty、Security Hub CSPM 用量頁；確認管理帳號 EBS Malware 費用為 0；依 11 §7 定案 ADR-008 |
+| P1 開始 | 補強 `.gitignore` 後推送 `D:\brewline`；初始化 `infra/app`（Node 22、TypeScript、cdk-nag）；第一個 workflow（PR → `gha-readonly` `cdk diff`；main → `gha-deploy-dev` 部署）；最小 stack 驗證整條管線 |
+| P1 開始 | 建立 ruleset 的 required status checks；`.github/dependabot.yml` |
+| P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
+
+---
+
+## 14. 操作備忘 / Operating Notes
+
+- 每次開 CloudShell 先跑 `aws sts get-caller-identity`，確認在哪個帳號。CloudShell 跟著登入的帳號和角色走。
+- CloudShell 開在東京；對台北的指令一律加 `--region ap-east-2`（否則被 `scp-region-restrict` 擋）。管理帳號不受 SCP 限制。
+- 錯誤訊息判讀：`explicit deny in a service control policy` → 查 SCP；`resource control policy` → 查 RCP；`no identity-based policy allows` → 查 IAM。錯誤中的政策 ID 對照 §4。
+- 測試防護欄時選「就算成功也無害」的操作，並做正向＋反向測試。
+- `scp-budget-lockdown` 平時必須沒有任何目標。
+- 主控台中文翻譯對照：Trail＝線索、Sample findings＝問題清單範本、Configuration＝組態、Central configuration＝中央組態。

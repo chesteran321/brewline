@@ -1,0 +1,88 @@
+# PR 檢查：型別檢查、單元測試、cdk synth（含 cdk-nag）、以唯讀角色對 Dev 跑 cdk diff。
+# PR checks: typecheck, unit tests, cdk synth (with cdk-nag), and a read-only cdk diff against Dev.
+#
+# 這個 workflow 刻意「不能」部署：gha-readonly 只能扮演 cdk-hnb659fds-lookup-role-*（唯讀）。
+# This workflow deliberately cannot deploy: gha-readonly may only assume the read-only lookup role.
+name: PR checks
+
+on:
+  pull_request:
+    branches: [main]
+
+# 預設最小權限；需要 OIDC 的 job 自己再加 id-token: write。
+# Least privilege by default; jobs that need OIDC add id-token: write themselves.
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ap-east-2
+  DEV_READONLY_ROLE: arn:aws:iam::610935435571:role/gha-readonly
+  CDK_DISABLE_VERSION_CHECK: "1"
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # OIDC token → sub = repo:chesteran321@219534971/brewline@1451431799:pull_request
+    defaults:
+      run:
+        shell: bash # 明確指定 → GitHub 會加上 -eo pipefail / explicit bash adds -eo pipefail
+        working-directory: infra/app
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: infra/app/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      # synth 不需要 AWS 憑證；cdk-nag 違規會在這一步讓 job 失敗。
+      # synth needs no AWS credentials; cdk-nag violations fail the job here.
+      - name: Synth dev and prod (cdk-nag)
+        run: |
+          npx cdk synth -c env=dev  -c commit=${{ github.sha }} --quiet
+          npx cdk synth -c env=prod -c commit=${{ github.sha }} --quiet
+
+      # 公開 repo：來自 fork 的 PR 拿不到 OIDC token，也不應該拿到，所以跳過 AWS 步驟。
+      # Public repo: fork PRs get no OIDC token (by design), so AWS steps are skipped for them.
+      - name: Configure AWS credentials (OIDC, read-only)
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ env.DEV_READONLY_ROLE }}
+          role-session-name: gha-pr-${{ github.event.pull_request.number }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Who am I
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: aws sts get-caller-identity
+
+      # --no-change-set：只比對 template，不建立 change set（建立需要 deploy-role，唯讀角色沒有）。
+      # --no-change-set: template-only diff; creating a change set needs the deploy role we don't have.
+      - name: cdk diff (Dev)
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          npx cdk diff -c env=dev -c commit=${{ github.sha }} --no-change-set 2>&1 | tee diff.txt
+          {
+            echo "## cdk diff — Dev (ap-east-2)"
+            echo '```'
+            cat diff.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
