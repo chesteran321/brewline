@@ -2,8 +2,8 @@
 # After merge to main: deploy Dev automatically → wait for manual approval → deploy Prod.
 #
 # 重點 / Key point：OIDC token 的 sub 依 job 而不同。
-#   deploy-dev  沒有 environment   → sub = repo:chesteran321/brewline:ref:refs/heads/main  → gha-deploy-dev
-#   deploy-prod environment=production → sub = repo:chesteran321/brewline:environment:production → gha-deploy-prod
+#   deploy-dev  沒有 environment   → sub = repo:chesteran321@219534971/brewline@1451431799:ref:refs/heads/main  → gha-deploy-dev
+#   deploy-prod environment=production → sub = repo:chesteran321@219534971/brewline@1451431799:environment:production → gha-deploy-prod
 # 所以 deploy-dev 絕對不能加 environment，否則信任政策對不上。
 # deploy-dev must NOT declare an environment, or its sub claim will not match the Dev trust policy.
 name: Deploy

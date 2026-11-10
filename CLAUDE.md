@@ -27,9 +27,11 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 
 | 角色 Role | 帳號 Account | 信任 `sub` | 用途 Use |
 |---|---|---|---|
-| `gha-readonly` | Dev、Prod | `repo:chesteran321/brewline:pull_request` | PR 的 `cdk diff`（只能扮演 lookup role） |
-| `gha-deploy-dev` | Dev | `repo:chesteran321/brewline:ref:refs/heads/main` | main 合併後部署 Dev |
-| `gha-deploy-prod` | Prod | `repo:chesteran321/brewline:environment:production` | 經 `production` environment 核准後部署 Prod |
+| `gha-readonly` | Dev、Prod | `repo:chesteran321@219534971/brewline@1451431799:pull_request` | PR 的 `cdk diff`（只能扮演 lookup role） |
+| `gha-deploy-dev` | Dev | `repo:chesteran321@219534971/brewline@1451431799:ref:refs/heads/main` | main 合併後部署 Dev |
+| `gha-deploy-prod` | Prod | `repo:chesteran321@219534971/brewline@1451431799:environment:production` | 經 `production` environment 核准後部署 Prod |
+
+> **`sub` 格式**：GitHub 簽發的 `sub` 含不可變 ID（`<owner>@<owner_id>/<repo>@<repo_id>`；帳號 ID `219534971`、repo ID `1451431799`）。信任政策用 `StringEquals` 逐字比對，不要用 `*` 兼容舊格式。repo 刪除後以同名重建，ID 會改變，需更新信任政策。
 
 ## 絕對規則 / Hard rules
 

@@ -84,9 +84,11 @@ flowchart LR
 
 | Job | `sub` claim | AWS 角色 Role |
 |---|---|---|
-| PR checks | `repo:chesteran321/brewline:pull_request` | Dev `gha-readonly` |
-| Deploy Dev（無 environment） | `repo:chesteran321/brewline:ref:refs/heads/main` | Dev `gha-deploy-dev` |
-| Deploy Prod（`environment: production`） | `repo:chesteran321/brewline:environment:production` | Prod `gha-deploy-prod` |
+| PR checks | `repo:chesteran321@219534971/brewline@1451431799:pull_request` | Dev `gha-readonly` |
+| Deploy Dev（無 environment） | `repo:chesteran321@219534971/brewline@1451431799:ref:refs/heads/main` | Dev `gha-deploy-dev` |
+| Deploy Prod（`environment: production`） | `repo:chesteran321@219534971/brewline@1451431799:environment:production` | Prod `gha-deploy-prod` |
+
+`sub` 含 GitHub 帳號與 repo 的不可變 ID，即使 repo 改名或被同名重建也不會誤放行。
 
 repo 裡沒有任何 AWS 金鑰；GitHub 每次執行時簽發短期 OIDC token，AWS STS 驗證 `sub` 後才給 1 小時內的臨時憑證。
 No AWS keys live in this repo.

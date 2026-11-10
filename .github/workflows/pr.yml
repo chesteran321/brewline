@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      id-token: write # OIDC token → sub = repo:chesteran321/brewline:pull_request
+      id-token: write # OIDC token → sub = repo:chesteran321@219534971/brewline@1451431799:pull_request
     defaults:
       run:
         shell: bash # 明確指定 → GitHub 會加上 -eo pipefail / explicit bash adds -eo pipefail

@@ -336,12 +336,14 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 
 | 帳號 | 角色 | 信任 `sub` | 權限 |
 |---|---|---|---|
-| Dev | `gha-deploy-dev` | `repo:chesteran321/brewline:ref:refs/heads/main` | `sts:AssumeRole` on `cdk-hnb659fds-*` |
-| Dev | `gha-readonly` | `repo:chesteran321/brewline:pull_request` | `sts:AssumeRole` on `cdk-hnb659fds-lookup-role-*` |
-| Prod | `gha-deploy-prod` | `repo:chesteran321/brewline:environment:production` | `sts:AssumeRole` on `cdk-hnb659fds-*` |
-| Prod | `gha-readonly` | `repo:chesteran321/brewline:pull_request` | `sts:AssumeRole` on `cdk-hnb659fds-lookup-role-*` |
+| Dev | `gha-deploy-dev` | `repo:chesteran321@219534971/brewline@1451431799:ref:refs/heads/main` | `sts:AssumeRole` on `cdk-hnb659fds-*` |
+| Dev | `gha-readonly` | `repo:chesteran321@219534971/brewline@1451431799:pull_request` | `sts:AssumeRole` on `cdk-hnb659fds-lookup-role-*` |
+| Prod | `gha-deploy-prod` | `repo:chesteran321@219534971/brewline@1451431799:environment:production` | `sts:AssumeRole` on `cdk-hnb659fds-*` |
+| Prod | `gha-readonly` | `repo:chesteran321@219534971/brewline@1451431799:pull_request` | `sts:AssumeRole` on `cdk-hnb659fds-lookup-role-*` |
 
 最長工作階段 1 小時。Workflow 需宣告 `permissions: id-token: write`。
+
+**`sub` 格式（2026-11-10 實測修正）**：GitHub 簽發的 `sub` 含不可變的帳號 ID 與 repo ID：`repo:chesteran321@219534971/brewline@1451431799:<suffix>`。原本以舊格式 `repo:chesteran321/brewline:<suffix>` 建立的信任政策全部被拒（`AccessDenied`，CloudTrail `principalId` 可看到實際值），4 個角色已改用新格式。好處：repo 改名或被他人以同名重建時，信任政策不會誤放行。
 
 ### 10.3 CDK bootstrap
 
