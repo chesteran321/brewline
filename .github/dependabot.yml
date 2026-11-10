@@ -8,6 +8,11 @@ updates:
       day: monday
       timezone: Asia/Taipei
     open-pull-requests-limit: 5
+    ignore:
+      # @types/node 要對應執行環境的 Node 主版本（22），只接受 minor／patch。
+      # Keep @types/node on the runtime's major version (22); minor/patch only.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     groups:
       aws-cdk:
         patterns: ["aws-cdk", "aws-cdk-lib", "constructs", "cdk-nag"]
