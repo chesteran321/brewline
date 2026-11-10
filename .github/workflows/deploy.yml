@@ -1,0 +1,126 @@
+# 合併到 main 後：自動部署 Dev → 等待人工核准 → 部署 Prod。
+# After merge to main: deploy Dev automatically → wait for manual approval → deploy Prod.
+#
+# 重點 / Key point：OIDC token 的 sub 依 job 而不同。
+#   deploy-dev  沒有 environment   → sub = repo:chesteran321/brewline:ref:refs/heads/main  → gha-deploy-dev
+#   deploy-prod environment=production → sub = repo:chesteran321/brewline:environment:production → gha-deploy-prod
+# 所以 deploy-dev 絕對不能加 environment，否則信任政策對不上。
+# deploy-dev must NOT declare an environment, or its sub claim will not match the Dev trust policy.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# 同一時間只跑一次部署；不取消進行中的部署，避免 CloudFormation 半途中斷。
+# One deploy at a time; never cancel an in-flight deploy mid-CloudFormation.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-east-2
+  CDK_DISABLE_VERSION_CHECK: "1"
+
+jobs:
+  deploy-dev:
+    name: Deploy Dev
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: bash # 明確指定 → GitHub 會加上 -eo pipefail / explicit bash adds -eo pipefail
+        working-directory: infra/app
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: infra/app/package-lock.json
+
+      - run: npm ci
+      - run: npm test
+
+      - name: Configure AWS credentials (OIDC → gha-deploy-dev)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::610935435571:role/gha-deploy-dev
+          role-session-name: gha-deploy-dev-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Who am I
+        run: aws sts get-caller-identity
+
+      - name: cdk deploy (Dev)
+        run: >
+          npx cdk deploy brewline-dev-pipeline-check
+          -c env=dev -c commit=${{ github.sha }}
+          --require-approval never
+          --outputs-file outputs.json
+
+      # 正向驗證：部署出來的值必須等於這個 commit。
+      # Positive check: the deployed value must equal this commit.
+      - name: Verify deployed commit
+        run: |
+          deployed=$(jq -r '."brewline-dev-pipeline-check".PipelineCheckCommit' outputs.json)
+          echo "deployed=$deployed expected=${{ github.sha }}"
+          test "$deployed" = "${{ github.sha }}"
+          echo "✅ Dev runs commit $deployed" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-prod:
+    name: Deploy Prod
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # 進入 production environment：等待 Required reviewer 核准；只允許 main 分支。
+    # Enters the production environment: waits for the required reviewer; main branch only.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: bash # 明確指定 → GitHub 會加上 -eo pipefail / explicit bash adds -eo pipefail
+        working-directory: infra/app
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: infra/app/package-lock.json
+
+      - run: npm ci
+
+      - name: Configure AWS credentials (OIDC → gha-deploy-prod)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::062868712468:role/gha-deploy-prod
+          role-session-name: gha-deploy-prod-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Who am I
+        run: aws sts get-caller-identity
+
+      - name: cdk deploy (Prod)
+        run: >
+          npx cdk deploy brewline-prod-pipeline-check
+          -c env=prod -c commit=${{ github.sha }}
+          --require-approval never
+          --outputs-file outputs.json
+
+      - name: Verify deployed commit
+        run: |
+          deployed=$(jq -r '."brewline-prod-pipeline-check".PipelineCheckCommit' outputs.json)
+          echo "deployed=$deployed expected=${{ github.sha }}"
+          test "$deployed" = "${{ github.sha }}"
+          echo "✅ Prod runs commit $deployed" >> "$GITHUB_STEP_SUMMARY"

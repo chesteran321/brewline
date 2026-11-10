@@ -147,3 +147,22 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# ---- BrewLine additions ----
+# CDK
+cdk.out/
+cdk.context.json.bak
+infra/**/*.js
+infra/**/*.d.ts
+!infra/**/jest.config.js
+
+# Secrets and credentials (never commit)
+*.pem
+*.key
+.aws/
+credentials
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/

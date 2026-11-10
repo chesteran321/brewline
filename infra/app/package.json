@@ -1,0 +1,32 @@
+{
+  "name": "brewline-infra-app",
+  "version": "0.1.0",
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "jest",
+    "cdk": "cdk",
+    "synth:dev": "cdk synth -c env=dev",
+    "synth:prod": "cdk synth -c env=prod",
+    "diff:dev": "cdk diff -c env=dev --no-change-set"
+  },
+  "devDependencies": {
+    "@swc/core": "^1.15.0",
+    "@swc/jest": "^0.2.39",
+    "@types/jest": "^30",
+    "@types/node": "^24.10.1",
+    "aws-cdk": "2.1148.0",
+    "jest": "^30",
+    "tsx": "^4.23.0",
+    "typescript": "~7.0.2"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.275.0",
+    "cdk-nag": "^3.0.2",
+    "constructs": "^10.5.0"
+  },
+  "private": true,
+  "description": "BrewLine CDK application stacks",
+  "engines": {
+    "node": ">=22 <23"
+  }
+}
