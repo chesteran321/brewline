@@ -36,9 +36,9 @@ jobs:
         shell: bash # 明確指定 → GitHub 會加上 -eo pipefail / explicit bash adds -eo pipefail
         working-directory: infra/app
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -64,7 +64,7 @@ jobs:
       # Public repo: fork PRs get no OIDC token (by design), so AWS steps are skipped for them.
       - name: Configure AWS credentials (OIDC, read-only)
         if: github.event.pull_request.head.repo.full_name == github.repository
-        uses: aws-actions/configure-aws-credentials@v5
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.DEV_READONLY_ROLE }}
           role-session-name: gha-pr-${{ github.event.pull_request.number }}
