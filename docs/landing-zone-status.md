@@ -66,11 +66,17 @@
 | Admin | AdministratorAccess | 1 h | 全部 4 個帳號 |
 | ReadOnly | ViewOnlyAccess | 4 h | 全部 4 個帳號 |
 | BillingViewer | Billing | 4 h | 僅 Management |
-| Developer | — | — | **尚未建立**（等 P1 需要時再建） |
+| Developer | ViewOnlyAccess + AWSCloudShellFullAccess + 內嵌政策（見下） | 4 h | **僅 brewline-dev**（2026-11-11） |
 
 - **Root**：管理帳號 root 有 MFA、無存取金鑰；成員帳號 root 憑證「不存在」，已啟用集中式根存取管理（根憑證管理 + 特權根動作）。
 - **Break-glass**：IAM User `<redacted>`（管理帳號，AdministratorAccess，無存取金鑰，密碼存密碼管理器）。用途與流程見 §11 RB-SEC-03。
 - 舊的 IAM User `developer1` 與群組 `devteam` 已刪除。
+- **Developer 許可集**（2026-11-11，指派群組 `admins` → 只有 brewline-dev）：人員用來「看和測」，部署一律走 CI。
+  - 內嵌政策 Allow（Resource 皆寫死帳號 610935435571、ap-east-2）：`brewline-dev-*` 資料表的資料讀寫與 Describe；KMS Decrypt／Encrypt／GenerateDataKey*／DescribeKey **僅限 `kms:ViaService=dynamodb.ap-east-2.amazonaws.com`**；Lambda invoke／Get（`brewline-dev-*`）；Logs 讀取與 Insights；Step Functions 執行（`brewline-dev-*`）；SSM 讀 `/brewline/dev/*`。
+  - 內嵌政策明確 Deny：DynamoDB `DeleteTable`／`UpdateTable`／`UpdateContinuousBackups`／`UpdateTimeToLive`／`DeleteBackup`；KMS `ScheduleKeyDeletion`／`DisableKey`／`DisableKeyRotation`／`PutKeyPolicy`／`CreateGrant`／`RevokeGrant`；IAM 寫入類（`Create*`、`Delete*`、`Put*`、`Attach*`、`Detach*`、`Update*`、`Add*`、`Remove*`、`PassRole`、`Tag*`、`Untag*`、`Set*`）；CloudFormation 建立／更新／刪除／change set／終止保護；Lambda 更新程式碼與設定、刪除。
+  - `AWSCloudShellFullAccess`：ViewOnlyAccess 不含 CloudShell，缺少時無法建立環境。取捨：可上傳／下載檔案；Dev 只有模擬資料，可接受。
+  - IAM 角色：`arn:aws:iam::610935435571:role/aws-reserved/sso.amazonaws.com/ap-east-2/AWSReservedSSO_Developer_fa10c9f9b63adad3`
+  - 已驗證：正向 SSM 讀取、DynamoDB put／get／delete item（KMS 經 DynamoDB 自動解密）；反向 `delete-table`、`iam create-user` 皆 `explicit deny in an identity-based policy`；KMS 以政策模擬器驗證（Dev Admin 執行 `simulate-principal-policy`）：`DisableKey`、`ScheduleKeyDeletion`、`PutKeyPolicy`、`DisableKeyRotation` 為 `explicitDeny`，直接 `kms:Decrypt` 為 `implicitDeny`（`kms:ViaService` 生效）；brewline-prod 無此許可集。
 
 ---
 
@@ -502,7 +508,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | ✅ 2026-11-11 | Prod Config 記錄 `brewline-prod-core`（`AWS::DynamoDB::Table`，合規） |
 | ✅ 2026-11-11 | FSBP `DynamoDB.2`、`DynamoDB.6` 通過；`KMS.4` 不在 FSBP，由 cdk-nag＋驗證腳本涵蓋 |
 | 待決定 | ReadOnly 許可集加上 AWS 受管 `SecurityAudit`（可讀 Config／Security Hub／IAM 設定，不能讀資料內容），與 Developer 許可集一起處理 |
-| P1（A1 前） | 建立 `Developer` 許可集（§3）：只指派 Dev、4 h；ViewOnlyAccess＋自訂（`brewline-dev-*` 資料表讀寫、Lambda invoke、Logs、Step Functions、SSM `/brewline/dev/*`）；拒絕 `DeleteTable`、`kms:ScheduleKeyDeletion`／`DisableKey`、`iam:*`、CloudFormation 寫入 |
+| ✅ 2026-11-11 | 建立 `Developer` 許可集，只指派 brewline-dev，正向＋反向驗證通過（§3） |
 | P1 | 下一步：訂貨模組 A1（Cognito＋商品唯讀 API）→ A2（下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
@@ -518,5 +524,8 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 - ReadOnly 許可集是 **ViewOnlyAccess**：不能用 Config 資源查詢（`config:GetDiscoveredResourceCounts` 被拒，畫面顯示「資源 (0)」不代表沒有記錄）。合規檢查目前用 Admin 只讀查看。
 - 主控台搜尋「Security Hub」會開到**新版 Security Hub**（台北不支援，顯示 Region Unsupported）；FSBP 結果要搜尋 **Security Hub CSPM**。CLI `aws securityhub` 呼叫的是 CSPM。
 - 確認特定資源是否合規：看「問題清單」（findings，依資源）比「控制項」（依規則、整個帳號）準。
+- 反向測試用「不存在的資源」只適用於**先授權、後查資源**的服務（DynamoDB、IAM 是）。**KMS 會先找金鑰（要評估 key policy）**，不存在就回 `NotFoundException`，測不到 IAM Deny；這類情況改用 `aws iam simulate-principal-policy`（只計算 IAM 政策，不執行動作，不含 SCP／RCP／key policy）。
+- Identity Center 建立的角色路徑含區域：`/aws-reserved/sso.amazonaws.com/ap-east-2/`；查 ARN 用 `aws iam list-roles --path-prefix /aws-reserved/`，不要手打。
+- 許可集要能用 CloudShell，需另加 `AWSCloudShellFullAccess`（ViewOnlyAccess 不含）。
 - `scp-budget-lockdown` 平時必須沒有任何目標。
 - 主控台中文翻譯對照：Trail＝線索、Sample findings＝問題清單範本、Configuration＝組態、Central configuration＝中央組態。
