@@ -64,7 +64,7 @@
 | 許可集 Permission set | 政策 Policy | 工作階段 Session | 指派 Assigned to |
 |---|---|---|---|
 | Admin | AdministratorAccess | 1 h | 全部 4 個帳號 |
-| ReadOnly | ViewOnlyAccess | 4 h | 全部 4 個帳號 |
+| ReadOnly | ViewOnlyAccess + SecurityAudit（2026-11-11） | 4 h | 全部 4 個帳號 |
 | BillingViewer | Billing | 4 h | 僅 Management |
 | Developer | ViewOnlyAccess + AWSCloudShellFullAccess + 內嵌政策（見下） | 4 h | **僅 brewline-dev**（2026-11-11） |
 
@@ -77,6 +77,8 @@
   - `AWSCloudShellFullAccess`：ViewOnlyAccess 不含 CloudShell，缺少時無法建立環境。取捨：可上傳／下載檔案；Dev 只有模擬資料，可接受。
   - IAM 角色：`arn:aws:iam::610935435571:role/aws-reserved/sso.amazonaws.com/ap-east-2/AWSReservedSSO_Developer_fa10c9f9b63adad3`
   - 已驗證：正向 SSM 讀取、DynamoDB put／get／delete item（KMS 經 DynamoDB 自動解密）；反向 `delete-table`、`iam create-user` 皆 `explicit deny in an identity-based policy`；KMS 以政策模擬器驗證（Dev Admin 執行 `simulate-principal-policy`）：`DisableKey`、`ScheduleKeyDeletion`、`PutKeyPolicy`、`DisableKeyRotation` 為 `explicitDeny`，直接 `kms:Decrypt` 為 `implicitDeny`（`kms:ViaService` 生效）；brewline-prod 無此許可集。
+- **ReadOnly 許可集加上 `SecurityAudit`**（2026-11-11，重新佈建 4 個帳號）：「稽核員」組合，可讀 Config、Security Hub CSPM、IAM／S3／KMS 等安全設定，**不能讀資料內容**；不含 CloudShell（只用主控台）。
+  - 已驗證（Prod ReadOnly 主控台）：正向 Config 資源清單看到 `brewline-prod-core`（合規）、Security Hub CSPM `DynamoDB.2` 通過；反向 DynamoDB 探索項目 `dynamodb:Scan` 被拒（`no identity-based policy allows the action`）。
 
 ---
 
@@ -507,7 +509,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | ✅ 2026-11-11 | 決定：OIDC 角色**不**由 workload app／CI 管理；之後另建 `infra/landing-zone` app，以 `cdk import` 匯入，由 Admin 本機部署（可選：`scp-baseline` 加 Sid 禁止非 SSO Admin 修改 `gha-*` 角色） |
 | ✅ 2026-11-11 | Prod Config 記錄 `brewline-prod-core`（`AWS::DynamoDB::Table`，合規） |
 | ✅ 2026-11-11 | FSBP `DynamoDB.2`、`DynamoDB.6` 通過；`KMS.4` 不在 FSBP，由 cdk-nag＋驗證腳本涵蓋 |
-| 待決定 | ReadOnly 許可集加上 AWS 受管 `SecurityAudit`（可讀 Config／Security Hub／IAM 設定，不能讀資料內容），與 Developer 許可集一起處理 |
+| ✅ 2026-11-11 | ReadOnly 許可集加上 `SecurityAudit`，正向＋反向驗證通過（§3） |
 | ✅ 2026-11-11 | 建立 `Developer` 許可集，只指派 brewline-dev，正向＋反向驗證通過（§3） |
 | P1 | 下一步：訂貨模組 A1（Cognito＋商品唯讀 API）→ A2（下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
@@ -521,7 +523,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 - CloudShell 開在東京；對台北的指令一律加 `--region ap-east-2`（否則被 `scp-region-restrict` 擋）。管理帳號不受 SCP 限制。
 - 錯誤訊息判讀：`explicit deny in a service control policy` → 查 SCP；`resource control policy` → 查 RCP；`no identity-based policy allows` → 查 IAM。錯誤中的政策 ID 對照 §4。
 - 測試防護欄時選「就算成功也無害」的操作，並做正向＋反向測試。
-- ReadOnly 許可集是 **ViewOnlyAccess**：不能用 Config 資源查詢（`config:GetDiscoveredResourceCounts` 被拒，畫面顯示「資源 (0)」不代表沒有記錄）。合規檢查目前用 Admin 只讀查看。
+- 合規檢查（Config、Security Hub CSPM）用 **ReadOnly** 即可（ViewOnlyAccess + SecurityAudit）。教訓：只有 ViewOnlyAccess 時 `config:GetDiscoveredResourceCounts` 被拒，畫面顯示「資源 (0)」不代表沒有記錄，要先看有沒有存取遭拒。
 - 主控台搜尋「Security Hub」會開到**新版 Security Hub**（台北不支援，顯示 Region Unsupported）；FSBP 結果要搜尋 **Security Hub CSPM**。CLI `aws securityhub` 呼叫的是 CSPM。
 - 確認特定資源是否合規：看「問題清單」（findings，依資源）比「控制項」（依規則、整個帳號）準。
 - 反向測試用「不存在的資源」只適用於**先授權、後查資源**的服務（DynamoDB、IAM 是）。**KMS 會先找金鑰（要評估 key policy）**，不存在就回 `NotFoundException`，測不到 IAM Deny；這類情況改用 `aws iam simulate-principal-policy`（只計算 IAM 政策，不執行動作，不含 SCP／RCP／key policy）。
