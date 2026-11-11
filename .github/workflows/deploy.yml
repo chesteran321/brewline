@@ -62,7 +62,7 @@ jobs:
 
       - name: cdk deploy (Dev)
         run: >
-          npx cdk deploy brewline-dev-pipeline-check
+          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data
           -c env=dev -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -75,6 +75,23 @@ jobs:
           echo "deployed=$deployed expected=${{ github.sha }}"
           test "$deployed" = "${{ github.sha }}"
           echo "✅ Dev runs commit $deployed" >> "$GITHUB_STEP_SUMMARY"
+
+      # 以 CDK lookup role（ReadOnlyAccess）查詢實際狀態：驗證步驟不需要、也不該用部署權限。
+      # bootstrap 的 lookup role 信任政策不一定允許 sts:TagSession，所以跳過 session tagging。
+      # Verify real state as the read-only CDK lookup role; verification needs no deploy rights.
+      - name: Assume read-only lookup role for verification
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::610935435571:role/cdk-hnb659fds-lookup-role-610935435571-ap-east-2
+          role-session-name: gha-verify-dev-${{ github.run_id }}
+          role-chaining: true
+          role-skip-session-tagging: true
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify data stack (KMS CMK, PITR, TTL, protections)
+        run: |
+          scripts/verify-data-stack.sh dev outputs.json | tee verify.txt
+          { echo "### Data stack (Dev)"; echo '```'; cat verify.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   deploy-prod:
     name: Deploy Prod
@@ -117,7 +134,7 @@ jobs:
 
       - name: cdk deploy (Prod)
         run: >
-          npx cdk deploy brewline-prod-pipeline-check
+          npx cdk deploy brewline-prod-pipeline-check brewline-prod-data
           -c env=prod -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -128,3 +145,20 @@ jobs:
           echo "deployed=$deployed expected=${{ github.sha }}"
           test "$deployed" = "${{ github.sha }}"
           echo "✅ Prod runs commit $deployed" >> "$GITHUB_STEP_SUMMARY"
+
+      # 以 CDK lookup role（ReadOnlyAccess）查詢實際狀態：驗證步驟不需要、也不該用部署權限。
+      # bootstrap 的 lookup role 信任政策不一定允許 sts:TagSession，所以跳過 session tagging。
+      # Verify real state as the read-only CDK lookup role; verification needs no deploy rights.
+      - name: Assume read-only lookup role for verification
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::062868712468:role/cdk-hnb659fds-lookup-role-062868712468-ap-east-2
+          role-session-name: gha-verify-prod-${{ github.run_id }}
+          role-chaining: true
+          role-skip-session-tagging: true
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify data stack (KMS CMK, PITR, TTL, protections)
+        run: |
+          scripts/verify-data-stack.sh prod outputs.json | tee verify.txt
+          { echo "### Data stack (Prod)"; echo '```'; cat verify.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
