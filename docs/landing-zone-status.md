@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架完成 / P0 complete; P1 CI/CD skeleton complete**（2026-11-10）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成 / P0 complete; P1 CI/CD skeleton and shared data foundation complete**（2026-11-11）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -363,7 +363,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | Workflow | 觸發 | Job | OIDC 角色 | 做什麼 |
 |---|---|---|---|---|
 | `pr.yml`（PR checks） | PR → `main` | `checks` | `gha-readonly`（Dev） | typecheck → Jest → `cdk synth` dev/prod（cdk-nag）→ `cdk diff --no-change-set`（Dev），diff 寫入 Job Summary；fork PR 跳過 AWS 步驟 |
-| `deploy.yml`（Deploy） | push → `main` | `Deploy Dev` | `gha-deploy-dev` | `cdk deploy` → 驗證 SSM 值 = commit SHA |
+| `deploy.yml`（Deploy） | push → `main` | `Deploy Dev` | `gha-deploy-dev` → 驗證時 role chaining 至 `cdk-hnb659fds-lookup-role-*` | `cdk deploy`（明列 stack：pipeline-check、data）→ 驗證 SSM 值 = commit SHA → 以 lookup role（ReadOnlyAccess）執行 `scripts/verify-data-stack.sh`，結果寫入 Job Summary |
 | | | `Deploy Prod`（`environment: production`，需核准） | `gha-deploy-prod` | 同上 |
 
 | CDK app `infra/app` | 值 |
@@ -371,13 +371,17 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | 工具鏈 | TypeScript 7（`noEmit`）、tsx、Jest + swc、Node 22（`.nvmrc`） |
 | 環境選擇 | `-c env=dev\|prod` **必填**，缺漏或拼錯 synth 失敗；帳號與 ap-east-2 寫在 `lib/config.ts` |
 | cdk-nag | **v3**：`Validations.of(app).addPlugins(new AwsSolutionsChecks(app))`，違規 synth 失敗；例外用 `Validations.of(construct).acknowledge()`（v2 的 `NagSuppressions` 已移除） |
-| 標籤 | `project`、`env`、`module`、`owner`；`RequiredTagsChecker`（READONLY Aspect）缺標籤即報錯 |
-| 測試 | 14 項，含反向：不安全 S3 bucket 讓 synth 失敗、缺標籤報錯、env 缺漏失敗 |
+| 標籤 | `project`、`env`、`module`、`owner`；資料資源（DynamoDB、S3）另需 `data-class`（`public`／`internal`／`pii`）；`RequiredTagsChecker`（READONLY Aspect）缺標籤即報錯，**含 GlobalTable 的 `Replicas[].Tags`** |
+| 資料保護 | `DataProtectionChecker`（READONLY Aspect）：DynamoDB 必須 PITR、SSE-KMS 客戶管理金鑰；Prod 必須刪除保護。補 cdk-nag DDB3 不檢查 `CfnGlobalTable` 的缺口 |
+| 並行控制 | 每個環境一把鎖（`deploy-dev`、`deploy-prod`，PR #5）：Prod 等待核准時不擋後續 Dev 部署；不取消進行中的部署 |
+| 測試 | 36 項（2026-11-11），含反向：不安全 S3 bucket、缺標籤、env 缺漏、PITR 關閉、DynamoDB owned／AWS managed key、Prod 無刪除保護、缺或無效 `data-class` |
 
 | Stack | 帳號 | 資源 | 終止保護 | 首次部署 commit |
 |---|---|---|---|---|
 | `brewline-dev-pipeline-check` | Dev | SSM `/brewline/dev/pipeline-check`（Standard，免費），值 = 部署的 commit SHA | 否 | `237fb3d` ✅ |
 | `brewline-prod-pipeline-check` | Prod | SSM `/brewline/prod/pipeline-check` | **是** | `237fb3d` ✅（核准後） |
+| `brewline-dev-data` | Dev | KMS CMK、DynamoDB `brewline-dev-core`、3 個 SSM 參數（§10.5） | 否 | `31293f7` ✅（PR #6） |
+| `brewline-prod-data` | Prod | KMS CMK、DynamoDB `brewline-prod-core`、3 個 SSM 參數（§10.5） | **是** | `31293f7` ✅（核准後） |
 
 已驗證（正向＋反向）：
 - PR：`gha-readonly` 成功扮演並跑 `cdk diff`；合併前 Dev 查無參數 → PR 無法部署。
@@ -388,6 +392,45 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 - `Deploy Dev` job **不可**宣告 `environment`，否則 `sub` 變成 `environment:...`，對不上 `gha-deploy-dev`。
 - 唯讀角色跑 `cdk diff` 要加 `--no-change-set`（建立 change set 需要 deploy-role）。
 - OIDC `AccessDenied` 時，CloudTrail `AssumeRoleWithWebIdentity` 事件的 `principalId` 會顯示 GitHub 實際送來的 `sub`（見 §10.2）。
+- （2026-11-11）`gha-deploy-*` 可用 role chaining 扮演 CDK lookup role 做部署後驗證；`configure-aws-credentials` 需設 `role-chaining: true`、`role-skip-session-tagging: true`。不需修改任何 IAM。
+- （2026-11-11）Annotation error 不會讓 `app.synth()` 丟例外；是 CDK CLI 看到 error 後 exit 1。Jest 測試要用 `Annotations.fromStack().findError()` 斷言。
+- （2026-11-11）需要核准的舊部署要先 Reject，避免核准錯 commit（`29a2f75` 已 Reject）。
+
+### 10.5 共用資料層 / Shared Data Layer（P1，2026-11-11，ADR-018）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| Stack | `brewline-dev-data` | `brewline-prod-data`（終止保護） |
+| KMS CMK alias | `alias/brewline-dev-data` | `alias/brewline-prod-data` |
+| KMS key ID | `6819595c-cdc5-4a2c-8226-e9035d3f05ae` | `c288f7e2-e5df-4fb9-8f74-cc2076e6364d` |
+| 輪替 | 365 天 | 365 天 |
+| 金鑰等待期／刪除政策 | 7 天／Delete | 30 天／**Retain** |
+| DynamoDB | `brewline-dev-core` | `brewline-prod-core` |
+| CloudFormation 類型 | `AWS::DynamoDB::GlobalTable`（CDK `TableV2`，單一 replica ap-east-2） | 同左 |
+| 鍵 | `pk`（S）／`sk`（S）；無 GSI、無 Streams | 同左 |
+| 容量 | On-demand，max 50 RRU／25 WRU | On-demand，max 200 RRU／100 WRU |
+| 加密 | SSE-KMS（上述 CMK） | 同左 |
+| PITR | 35 天（ADR-019） | 35 天 |
+| 刪除保護／刪除政策 | 否／Delete | **是／Retain** |
+| TTL | `expires_at` | `expires_at` |
+| 標籤 | `module=core`、`data-class=pii` | 同左 |
+| SSM（Standard） | `/brewline/dev/data/{table-name,table-arn,kms-key-arn}` | `/brewline/prod/data/...` |
+
+- Key policy 為 CDK 預設（`kms:*` 給帳號 root → 交由 IAM 決定）；RCP `EnforceOrgIdentities` 另限制只有組織內身分可用 `kms:*`。
+- 其他 stack 一律由 SSM 參數取得名稱／ARN，不使用 CloudFormation Export。
+- 加密為**表層級**；聯絡人欄位層級加密於訂貨模組（A2）決定。
+- 費用：約 USD 1／月／帳號（KMS key）；DynamoDB 與 PITR 目前約 0。一年後第一次輪替每把 +USD 1／月（上限 USD 3／月）。
+
+已驗證（2026-11-11，Deploy run #5，`scripts/verify-data-stack.sh`，身分 `cdk-hnb659fds-lookup-role-*`）：
+- Dev、Prod 各 11 項全部 ✅：ACTIVE、SSE=KMS／ENABLED、SSE key = stack CMK、鍵 `pk`/`sk`、PITR ENABLED、TTL `expires_at`、KMS 輪替 True、SSM 表名正確；刪除保護與終止保護 Dev `false`、Prod `true`。
+- 反向（本機）：Dev 關閉 PITR → `cdk synth` 輸出 `[DataProtection] ... must enable point-in-time recovery`，exit 1。
+- 反向（Jest）：cdk-nag 單獨使用時**不會**擋下 TableV2 關閉 PITR（記錄缺口）；自訂檢查會擋。
+- 待確認：Prod Config 是否記錄為 `AWS::DynamoDB::Table`；FSBP 的 DynamoDB／KMS 控制項是否 PASSED（約 24 小時後）。
+
+教訓 / Lessons：
+- cdk-nag `AwsSolutions-DDB3` 只檢查 `CfnTable`；`TableV2` 產生 `CfnGlobalTable`，被視為不適用。
+- `CfnGlobalTable` 不是 ITaggable（標籤在 `Replicas[].Tags`），只用 `TagManager.isTaggable()` 的檢查會默默跳過。
+- CMK 加密的 `TableV2` 必須在有明確區域的 stack 中（測試的 Stack 也要給 `env`）。
 
 ---
 
@@ -402,6 +445,8 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | ADR-015 | Security Hub CSPM 用本機組態 | Accepted | 台北不支援 finding aggregator；改用 us-east-1 當主區域會把政策套到 us-east-1、造成 Config 未啟用的失敗項 |
 | ADR-016 | CDK cfn-exec 使用預設 Admin | Accepted | 作品集取捨；SCP 為防護欄；正式環境應改自訂最小權限 |
 | ADR-017 | 步驟 5–12 以主控台／CLI 手動建置 | Accepted | 為學習目的偏離 P-04；未來可再以 CDK 匯入或重建 |
+| ADR-018 | 共用資料層：每帳號 1 把 CMK + DynamoDB 單表（TableV2） | Accepted（2026-11-11） | 見 §10.5 與 docs/14；鍵 `pk`/`sk`；GSI、Streams 延後；SSM 取代 Export；自訂 `DataProtectionChecker` 補 cdk-nag 缺口 |
+| ADR-019 | Dev 也開 PITR | Accepted（2026-11-11） | 費用約 0、不需例外、可在 Dev 練習還原；取代 02 §3 |
 
 | 風險 | 內容 | L | I | 緩解 |
 |---|---|---|---|---|
@@ -425,7 +470,14 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | 12 §2 | `pii` 控制移除「Macie 一次性掃描」 |
 | 13 §4 | 新增 RB-SEC-03 break-glass；RB-COST-01 解除方式；RB-DR-01 區域 SCP 調整 |
 | 13 §6 | 每季加入 break-glass 測試 |
-| 14 | 加入 §11 的 ADR 與 RSK-013 |
+| 14 | 加入 §11 的 ADR 與 RSK-013（ADR-018、ADR-019 已加入，PR #6） |
+| 02 §3 | Dev PITR 改為開啟（ADR-019） |
+| 02 §4 | CDK 結構改為 `infra/app/{bin,lib/stacks,lib/aspects,scripts,test}` |
+| 09 §3.1 | 加註：使用 `TableV2`；Streams 延後到有 consumer；GSI 依模組逐一新增 |
+| 09 §5、11 §2 | KMS 輪替費用：第一、二次輪替各 +USD 1／月，每把上限 USD 3／月 |
+| 03 §10 | 「聯絡人欄位以 CMK 加密」釐清為表層級 SSE（已完成）＋欄位層級（A2 決定） |
+| 03 §10、09 §1.2 | API Gateway **HTTP API 不能直接掛 WAF**；登入／註冊限流改由 CloudFront 或 Cognito user pool WAF（A1 決定） |
+| 03 §5 | 租戶角色另需 `dynamodb:ConditionCheckItem`（TransactWriteItems）；信任政策需 `sts:TagSession` |
 
 ---
 
@@ -441,9 +493,14 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | **2026-12-04** | 試用期決策點：GuardDuty、Security Hub CSPM 用量頁；確認管理帳號 EBS Malware 費用為 0；依 11 §7 定案 ADR-008 |
 | ✅ 2026-11-10 | `.gitignore` 補強；`infra/app` 初始化；PR／Deploy workflow；pipeline-check stack 驗證 Dev、Prod 整條管線（§10.4，PR #1） |
 | ✅ 2026-11-10 | ruleset required status check `checks`；`.github/dependabot.yml` |
-| 盡快 | 本機 `D:\brewline` 改為 `git clone` GitHub repo（或 `git pull`），**不要**把本機舊內容 force push 上去 |
+| ✅ 2026-11-10 | 本機 `D:\brewline` 改為 `git clone` GitHub repo |
 | P1 | 處理 Dependabot 開的更新 PR（確認 `checks` 綠燈再合併） |
-| P1 | 第一個業務模組前：建立 `Developer` 許可集（§3）、決定是否由 CDK 管理 OIDC 角色（目前為手動，ADR-017） |
+| ✅ 2026-11-11 | 共用資料基礎：`brewline-<env>-data` 部署 Dev、Prod 並驗證（§10.5，PR #6） |
+| ✅ 2026-11-11 | 決定：OIDC 角色**不**由 workload app／CI 管理；之後另建 `infra/landing-zone` app，以 `cdk import` 匯入，由 Admin 本機部署（可選：`scp-baseline` 加 Sid 禁止非 SSO Admin 修改 `gha-*` 角色） |
+| 約 2026-11-12 | 確認 Prod Config 記錄 `brewline-prod-core`（`AWS::DynamoDB::Table`）；FSBP DynamoDB／KMS 控制項 PASSED |
+| P1（A1 前） | 建立 `Developer` 許可集（§3）：只指派 Dev、4 h；ViewOnlyAccess＋自訂（`brewline-dev-*` 資料表讀寫、Lambda invoke、Logs、Step Functions、SSM `/brewline/dev/*`）；拒絕 `DeleteTable`、`kms:ScheduleKeyDeletion`／`DisableKey`、`iam:*`、CloudFormation 寫入 |
+| P1 | 下一步：訂貨模組 A1（Cognito＋商品唯讀 API）→ A2（下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
+| P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
 ---
