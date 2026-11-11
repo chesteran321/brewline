@@ -11,7 +11,8 @@ A B2B specialty-coffee supply platform built from scratch on AWS — a non-comme
 | 階段 Phase | 狀態 Status |
 |---|---|
 | P0 Landing Zone | ✅ 完成 |
-| P1 CI/CD 骨架 | 🚧 進行中：`brewline-<env>-pipeline-check` stack 驗證 OIDC → CDK → CloudFormation |
+| P1 CI/CD 骨架 | ✅ 完成：`brewline-<env>-pipeline-check` 驗證 OIDC → CDK → CloudFormation |
+| P1 共用資料基礎 | 🚧 進行中：`brewline-<env>-data`（KMS CMK + DynamoDB 單表，ADR-018） |
 
 ## 程式庫結構 / Layout
 
@@ -25,8 +26,9 @@ A B2B specialty-coffee supply platform built from scratch on AWS — a non-comme
 └── infra/app/                 # CDK app（TypeScript）
     ├── bin/app.ts             # 進入點：-c env=dev|prod
     ├── lib/config.ts          # 帳號、區域（ap-east-2）
-    ├── lib/aspects/           # 標籤規範 Aspect
-    ├── lib/stacks/            # Stacks
+    ├── lib/aspects/           # 標籤規範、資料保護檢查 Aspect
+    ├── lib/stacks/            # pipeline-check、data
+    ├── scripts/               # 部署後驗證 / post-deploy checks
     └── test/                  # Jest 單元測試
 ```
 

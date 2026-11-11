@@ -23,6 +23,19 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | IaC | AWS CDK（TypeScript），Node 22 LTS，Lambda `Runtime.NODEJS_22_X` |
 | CDK bootstrap | qualifier `hnb659fds`，Dev / Prod 的 ap-east-2 與 us-east-1 |
 
+### 共用資料層 / Shared data layer（ADR-018）
+
+| 項目 Item | 值 Value |
+|---|---|
+| Stack | `brewline-<env>-data`（Prod 終止保護） |
+| KMS CMK | `alias/brewline-<env>-data`，年度輪替；每帳號 1 把，之後 S3／SQS／SNS 共用 |
+| DynamoDB | `brewline-<env>-core`，CDK `TableV2`（= `AWS::DynamoDB::GlobalTable`），鍵 `pk`／`sk`，TTL `expires_at` |
+| 取得名稱／ARN | SSM `/brewline/<env>/data/{table-name,table-arn,kms-key-arn}`（不要用 CloudFormation Export） |
+
+- cdk-nag `AwsSolutions-DDB3` **不檢查** `CfnGlobalTable`；PITR／CMK／刪除保護由 `lib/aspects/data-protection.ts` 把關。
+- 新增 GSI：一次 PR 只加一個（CloudFormation 每次更新只能新增一個 GSI）。
+- 不要把 `TableV2` 改成 `Table`（資源類型不同 → 取代 → 資料遺失）。
+
 ### CI/CD 身分 / CI/CD identities（GitHub OIDC）
 
 | 角色 Role | 帳號 Account | 信任 `sub` | 用途 Use |

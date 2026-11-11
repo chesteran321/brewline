@@ -92,6 +92,31 @@
 - **決策 Decision**：Management 帳號以 Paid plan 建立，依靠 Budgets 與 SCP 控制成本。
 - **後果 Consequences**：可長期運作並使用全部服務；成本控制責任完全落在本專案的治理設計上。
 
+### ADR-018 共用資料層：每帳號 1 把 CMK + DynamoDB 單表（TableV2）/ Shared Data Layer: One CMK per Account + Single Table (TableV2)
+
+- **狀態 Status**：Accepted（2026-11-11）
+- **背景 Context**：訂貨、溯源、模擬器都依賴同一張表與同一把金鑰；表的 key schema、CDK construct 類型、金鑰 alias 之後很難改（改了需重建或 retain + `cdk import`），應在獨立的小 PR 先決定。
+- **決策 Decision**：
+  - Stack `brewline-<env>-data`：KMS 對稱 CMK `alias/brewline-<env>-data`（年度自動輪替）＋ DynamoDB `brewline-<env>-core`。
+  - 使用 CDK `TableV2`（合成為 `AWS::DynamoDB::GlobalTable`），保留日後東京 DR 演練加 replica 的彈性，且不需 custom resource。
+  - 鍵名用通用 `pk` / `sk`（String）；實體型別寫在值裡。GSI 與 Streams 延後到需要的模組 PR（CloudFormation 每次更新只能新增一個 GSI）。
+  - On-demand 加最大吞吐量上限（COST-005）：Dev 50 / 25、Prod 200 / 100 RRU / WRU；TTL 屬性 `expires_at`。
+  - Prod：刪除保護、RETAIN、終止保護；Dev：可刪除，金鑰等待期 7 天。
+  - 其他 stack 由 SSM 參數 `/brewline/<env>/data/*` 取得名稱與 ARN，不用 CloudFormation Export。
+  - 資料表標記 `data-class=pii`（之後會存聯絡人）。本階段為**表層級** SSE-KMS；欄位層級加密於訂貨模組決定。
+- **後果 Consequences**：
+  - 費用約 USD 1／月／帳號（KMS key）；第一次、第二次輪替後各加 USD 1／月，每把上限 USD 3／月。
+  - cdk-nag `AwsSolutions-DDB3` 只檢查 `CfnTable`，對 `CfnGlobalTable` 視為不適用 → 以自訂 `DataProtectionChecker` Aspect 補上（PITR、CMK、Prod 刪除保護），違規即 synth 失敗。
+  - `CfnGlobalTable` 不是 ITaggable（標籤在 `Replicas[].Tags`），`RequiredTagsChecker` 已改為逐一檢查 replica，並要求資料資源帶 `data-class`。
+  - 金鑰被停用或排程刪除時，資料表會無法存取；Prod 金鑰等待期 30 天、RETAIN。
+
+### ADR-019 Dev 也開啟 PITR / PITR Enabled in Dev
+
+- **狀態 Status**：Accepted（2026-11-11）；取代 02 §3「Dev PITR 關閉」
+- **背景 Context**：PITR 依表大小計費（約 USD 0.20／GB-月），Dev 表只有 KB 等級；關閉反而需要 cdk-nag／自訂檢查的例外。
+- **決策 Decision**：Dev、Prod 都開 PITR，保留 35 天。
+- **後果 Consequences**：費用約 0；不需要任何例外；可在 Dev 練習 PITR 還原（RB-DR 相關演練）而不碰 Prod。
+
 ### ADR 範本 / ADR Template
 
 ```markdown
