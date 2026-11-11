@@ -426,7 +426,8 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 - 反向（本機）：Dev 關閉 PITR → `cdk synth` 輸出 `[DataProtection] ... must enable point-in-time recovery`，exit 1。
 - 反向（Jest）：cdk-nag 單獨使用時**不會**擋下 TableV2 關閉 PITR（記錄缺口）；自訂檢查會擋。
 - ✅（2026-11-11 22:42，Prod Admin 主控台）Config 已將 `brewline-prod-core` 記錄為 `AWS::DynamoDB::Table`，合規狀態「合規」→ `TableV2`（GlobalTable）不影響 Config 記錄。
-- 待確認：FSBP 的 DynamoDB／KMS 個別控制項是否 PASSED。
+- ✅（2026-11-11 22:53，Security Hub CSPM 控制項頁）`DynamoDB.2`（PITR）通過、`DynamoDB.6`（刪除保護）通過，失敗的檢查皆 0／1。
+- `KMS.4`（金鑰輪替）顯示「已停用」：它不屬於 FSBP（屬 CIS、NIST 等），Prod 只開 FSBP 所以不評估。輪替已由 cdk-nag `AwsSolutions-KMS5`（部署前）與驗證腳本 `KMS rotation = True`（部署後）確認，不另開標準。
 
 教訓 / Lessons：
 - cdk-nag `AwsSolutions-DDB3` 只檢查 `CfnTable`；`TableV2` 產生 `CfnGlobalTable`，被視為不適用。
@@ -499,7 +500,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | ✅ 2026-11-11 | 共用資料基礎：`brewline-<env>-data` 部署 Dev、Prod 並驗證（§10.5，PR #6） |
 | ✅ 2026-11-11 | 決定：OIDC 角色**不**由 workload app／CI 管理；之後另建 `infra/landing-zone` app，以 `cdk import` 匯入，由 Admin 本機部署（可選：`scp-baseline` 加 Sid 禁止非 SSO Admin 修改 `gha-*` 角色） |
 | ✅ 2026-11-11 | Prod Config 記錄 `brewline-prod-core`（`AWS::DynamoDB::Table`，合規） |
-| 約 2026-11-12 | FSBP DynamoDB（PITR、刪除保護）／KMS（輪替）控制項 PASSED |
+| ✅ 2026-11-11 | FSBP `DynamoDB.2`、`DynamoDB.6` 通過；`KMS.4` 不在 FSBP，由 cdk-nag＋驗證腳本涵蓋 |
 | 待決定 | ReadOnly 許可集加上 AWS 受管 `SecurityAudit`（可讀 Config／Security Hub／IAM 設定，不能讀資料內容），與 Developer 許可集一起處理 |
 | P1（A1 前） | 建立 `Developer` 許可集（§3）：只指派 Dev、4 h；ViewOnlyAccess＋自訂（`brewline-dev-*` 資料表讀寫、Lambda invoke、Logs、Step Functions、SSM `/brewline/dev/*`）；拒絕 `DeleteTable`、`kms:ScheduleKeyDeletion`／`DisableKey`、`iam:*`、CloudFormation 寫入 |
 | P1 | 下一步：訂貨模組 A1（Cognito＋商品唯讀 API）→ A2（下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
@@ -515,5 +516,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 - 錯誤訊息判讀：`explicit deny in a service control policy` → 查 SCP；`resource control policy` → 查 RCP；`no identity-based policy allows` → 查 IAM。錯誤中的政策 ID 對照 §4。
 - 測試防護欄時選「就算成功也無害」的操作，並做正向＋反向測試。
 - ReadOnly 許可集是 **ViewOnlyAccess**：不能用 Config 資源查詢（`config:GetDiscoveredResourceCounts` 被拒，畫面顯示「資源 (0)」不代表沒有記錄）。合規檢查目前用 Admin 只讀查看。
+- 主控台搜尋「Security Hub」會開到**新版 Security Hub**（台北不支援，顯示 Region Unsupported）；FSBP 結果要搜尋 **Security Hub CSPM**。CLI `aws securityhub` 呼叫的是 CSPM。
+- 確認特定資源是否合規：看「問題清單」（findings，依資源）比「控制項」（依規則、整個帳號）準。
 - `scp-budget-lockdown` 平時必須沒有任何目標。
 - 主控台中文翻譯對照：Trail＝線索、Sample findings＝問題清單範本、Configuration＝組態、Central configuration＝中央組態。
