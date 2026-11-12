@@ -41,6 +41,15 @@ check "SSE key = stack CMK"       "$(jq -r '.Table.SSEDescription.KMSMasterKeyAr
 check "DeletionProtectionEnabled" "$(jq -r '.Table.DeletionProtectionEnabled' <<<"$desc")" "$want_deletion_protection"
 check "Key schema"                "$(jq -c '[.Table.KeySchema[].AttributeName]' <<<"$desc")" '["pk","sk"]'
 
+# GSI1（A1a）：ACTIVE、鍵、寫入上限與資料表相同 / GSI1 is ACTIVE with the expected keys and write cap.
+gsi=$(jq -c '.Table.GlobalSecondaryIndexes // [] | map(select(.IndexName == "gsi1")) | .[0] // {}' <<<"$desc")
+check "GSI count"         "$(jq -r '.Table.GlobalSecondaryIndexes // [] | length' <<<"$desc")" "1"
+check "GSI1 status"       "$(jq -r '.IndexStatus' <<<"$gsi")" "ACTIVE"
+check "GSI1 key schema"   "$(jq -c '[.KeySchema[]?.AttributeName]' <<<"$gsi")" '["gsi1pk","gsi1sk"]'
+check "GSI1 projection"   "$(jq -r '.Projection.ProjectionType' <<<"$gsi")" "ALL"
+check "GSI1 max write = table max write" \
+  "$(jq -r '.OnDemandThroughput.MaxWriteRequestUnits' <<<"$gsi")" "$(jq -r '.Table.OnDemandThroughput.MaxWriteRequestUnits' <<<"$desc")"
+
 check "PITR" "$(aws dynamodb describe-continuous-backups --table-name "$table" --region "$region" \
   --query 'ContinuousBackupsDescription.PointInTimeRecoveryDescription.PointInTimeRecoveryStatus' --output text)" "ENABLED"
 

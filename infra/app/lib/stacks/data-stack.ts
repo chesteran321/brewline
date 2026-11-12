@@ -20,6 +20,14 @@ export interface DataStackProps extends StackProps {
  * so an imported export never blocks changes to this stack.
  */
 export class DataStack extends Stack {
+  /**
+   * 多用途 GSI（overloaded GSI，ADR-018 修訂、A1）。鍵名通用，值決定用途：
+   *   商品目錄 gsi1pk = "CATALOG"、gsi1sk = "PRODUCT#<id>"（A1）
+   *   訂單狀態 gsi1pk = "STATUS#<status>"、gsi1sk = "<ts>"（A2，docs/03 §6）
+   * Overloaded GSI: generic key names; the values decide the access pattern.
+   */
+  public static readonly GSI1 = { indexName: 'gsi1', partitionKey: 'gsi1pk', sortKey: 'gsi1sk' } as const;
+
   public readonly key: kms.Key;
   public readonly table: dynamodb.TableV2;
 
@@ -50,9 +58,9 @@ export class DataStack extends Stack {
 
     // 2) DynamoDB 單表。TableV2 → AWS::DynamoDB::GlobalTable（ADR-018）。
     //    鍵名用通用的 pk / sk，實體型別寫在值裡（TENANT#、PRODUCT#…），日後新增實體不必改 schema。
-    //    GSI 與 Streams 刻意延後到需要的模組 PR。
+    //    GSI 一次 PR 只加一個（CloudFormation 每次更新只能新增一個 GSI）；Streams 延後到有 consumer。
     // Generic pk/sk so new entity types never change the key schema.
-    // GSIs and Streams are deliberately deferred to the module PRs that need them.
+    // One GSI per PR (CloudFormation adds at most one GSI per update); Streams wait for a consumer.
     this.table = new dynamodb.TableV2(this, 'CoreTable', {
       tableName: `brewline-${envName}-core`,
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
@@ -69,6 +77,21 @@ export class DataStack extends Stack {
       },
       deletionProtection: data.deletionProtection,
       timeToLiveAttribute: 'expires_at',
+      // GSI1：只有帶 gsi1pk 的項目會進索引（sparse）。projection ALL：項目小、讀取方便，儲存成本可忽略。
+      // 最大吞吐量明確設成與資料表相同（COST-005）：CDK 不設時 template 不會出現上限 → 索引不受限。
+      // 寫入上限不可低於資料表，否則 GSI 的反壓（back-pressure）會連帶節流資料表寫入。
+      // GSI1 is sparse and ALL-projected. Max throughput is set explicitly (CDK omits it otherwise, leaving the
+      // index uncapped); never cap GSI writes below the table, or index back-pressure throttles table writes.
+      globalSecondaryIndexes: [
+        {
+          indexName: DataStack.GSI1.indexName,
+          partitionKey: { name: DataStack.GSI1.partitionKey, type: dynamodb.AttributeType.STRING },
+          sortKey: { name: DataStack.GSI1.sortKey, type: dynamodb.AttributeType.STRING },
+          projectionType: dynamodb.ProjectionType.ALL,
+          maxReadRequestUnits: data.maxReadRequestUnits,
+          maxWriteRequestUnits: data.maxWriteRequestUnits,
+        },
+      ],
       removalPolicy,
     });
 

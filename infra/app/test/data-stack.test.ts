@@ -67,8 +67,18 @@ describe('DataStack', () => {
       SSESpecification: { SSEEnabled: true, SSEType: 'KMS' },
       TimeToLiveSpecification: { AttributeName: 'expires_at', Enabled: true },
       WriteOnDemandThroughputSettings: { MaxWriteRequestUnits: d.maxWriteRequestUnits },
-      // GSI 與 Streams 刻意延後 / GSIs and Streams are deliberately deferred.
-      GlobalSecondaryIndexes: Match.absent(),
+      // A1a：只有一個多用途 GSI1；Streams 仍延後 / A1a: exactly one overloaded GSI1; Streams still deferred.
+      GlobalSecondaryIndexes: [
+        {
+          IndexName: 'gsi1',
+          KeySchema: [
+            { AttributeName: 'gsi1pk', KeyType: 'HASH' },
+            { AttributeName: 'gsi1sk', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+          WriteOnDemandThroughputSettings: { MaxWriteRequestUnits: d.maxWriteRequestUnits },
+        },
+      ],
       StreamSpecification: Match.absent(),
       Replicas: [
         Match.objectLike({
@@ -77,10 +87,43 @@ describe('DataStack', () => {
           PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true, RecoveryPeriodInDays: 35 },
           DeletionProtectionEnabled: d.deletionProtection,
           ReadOnDemandThroughputSettings: { MaxReadRequestUnits: d.maxReadRequestUnits },
+          GlobalSecondaryIndexes: [
+            { IndexName: 'gsi1', ReadOnDemandThroughputSettings: { MaxReadRequestUnits: d.maxReadRequestUnits } },
+          ],
           Tags: Match.arrayWith([{ Key: 'data-class', Value: 'pii' }, { Key: 'module', Value: 'core' }]),
         }),
       ],
     });
+  });
+
+  test.each(['dev', 'prod'] as const)('%s: GSI key attributes are declared as strings', (envName) => {
+    const { template } = buildApp(envName);
+    template.hasResourceProperties('AWS::DynamoDB::GlobalTable', {
+      AttributeDefinitions: Match.arrayWith([
+        { AttributeName: 'gsi1pk', AttributeType: 'S' },
+        { AttributeName: 'gsi1sk', AttributeType: 'S' },
+      ]),
+    });
+  });
+
+  // 反向：GSI 沒有明確上限時，template 不會帶 MaxWriteRequestUnits（= 不受限）。這個測試記錄 CDK 的預設行為，
+  // 說明為什麼 data-stack 必須明確設定。
+  // Negative: without explicit caps the template carries no max units (= uncapped); documents why we set them.
+  test('a TableV2 GSI without explicit caps has no on-demand max in the template (documents the default)', () => {
+    const app = new App();
+    const stack = new Stack(app, 'GsiDefault', { env: { account: '111111111111', region: 'ap-east-2' } });
+    new dynamodb.TableV2(stack, 'T', {
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      billing: dynamodb.Billing.onDemand({ maxReadRequestUnits: 10, maxWriteRequestUnits: 5 }),
+      globalSecondaryIndexes: [{ indexName: 'g', partitionKey: { name: 'gpk', type: dynamodb.AttributeType.STRING } }],
+    });
+    const tables = Template.fromStack(stack).findResources('AWS::DynamoDB::GlobalTable');
+    const [table] = Object.values(tables) as Array<{ Properties: { GlobalSecondaryIndexes: Array<Record<string, unknown>> } }>;
+    expect(table.Properties.GlobalSecondaryIndexes[0].WriteOnDemandThroughputSettings).toBeUndefined();
+  });
+
+  test('exposes the GSI1 names as constants for consumers', () => {
+    expect(DataStack.GSI1).toEqual({ indexName: 'gsi1', partitionKey: 'gsi1pk', sortKey: 'gsi1sk' });
   });
 
   test('prod: retains table and key; dev: destroys them', () => {
