@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成 / P0 complete; P1 CI/CD skeleton and shared data foundation complete**（2026-11-11）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1 進行中（A1a GSI1 完成）/ P0 complete; P1 CI/CD skeleton and shared data foundation complete; ordering A1 in progress (A1a done)**（2026-11-12）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -403,6 +403,8 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 - （2026-11-11）`gha-deploy-*` 可用 role chaining 扮演 CDK lookup role 做部署後驗證；`configure-aws-credentials` 需設 `role-chaining: true`、`role-skip-session-tagging: true`。不需修改任何 IAM。
 - （2026-11-11）Annotation error 不會讓 `app.synth()` 丟例外；是 CDK CLI 看到 error 後 exit 1。Jest 測試要用 `Annotations.fromStack().findError()` 斷言。
 - （2026-11-11）需要核准的舊部署要先 Reject，避免核准錯 commit（`29a2f75` 已 Reject）。
+- （2026-11-12）Deploy job `timeout-minutes` 由 20 調為 **40**（PR #16）：新增 GSI 時驗證要等索引回填（見 §10.5）。
+- （2026-11-12）Node 24 升級（PR #12，ADR-023）走完整條管線：CI `setup-node` 讀 `.nvmrc` → 24.22.2；Dev、Prod `brewline-*-data (no changes)`，驗證 11/11。
 
 ### 10.5 共用資料層 / Shared Data Layer（P1，2026-11-11，ADR-018）
 
@@ -415,7 +417,8 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | 金鑰等待期／刪除政策 | 7 天／Delete | 30 天／**Retain** |
 | DynamoDB | `brewline-dev-core` | `brewline-prod-core` |
 | CloudFormation 類型 | `AWS::DynamoDB::GlobalTable`（CDK `TableV2`，單一 replica ap-east-2） | 同左 |
-| 鍵 | `pk`（S）／`sk`（S）；無 GSI、無 Streams | 同左 |
+| 鍵 | `pk`（S）／`sk`（S）；無 Streams | 同左 |
+| GSI | `gsi1`（多用途）：`gsi1pk`（S）／`gsi1sk`（S），projection ALL，sparse；max 50 RRU／25 WRU（與表相同） | 同左；max 200 RRU／100 WRU |
 | 容量 | On-demand，max 50 RRU／25 WRU | On-demand，max 200 RRU／100 WRU |
 | 加密 | SSE-KMS（上述 CMK） | 同左 |
 | PITR | 35 天（ADR-019） | 35 天 |
@@ -437,7 +440,15 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 - ✅（2026-11-11 22:53，Security Hub CSPM 控制項頁）`DynamoDB.2`（PITR）通過、`DynamoDB.6`（刪除保護）通過，失敗的檢查皆 0／1。
 - `KMS.4`（金鑰輪替）顯示「已停用」：它不屬於 FSBP（屬 CIS、NIST 等），Prod 只開 FSBP 所以不評估。輪替已由 cdk-nag `AwsSolutions-KMS5`（部署前）與驗證腳本 `KMS rotation = True`（部署後）確認，不另開標準。
 
+GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
+- 用途由值決定：商品目錄 `gsi1pk=CATALOG`／`gsi1sk=PRODUCT#<id>`（A1）；訂單狀態 `STATUS#<status>`／`<ts>`（A2）。
+- 最大吞吐量**明確**設為與表相同：CDK `TableV2` 的 GSI 不設時 template 不帶上限（= 不受 COST-005 限制）。寫入上限放在 GlobalTable 頂層 `WriteOnDemandThroughputSettings`（全域），讀取上限在 `Replicas[].GlobalSecondaryIndexes[]`（每個 replica）。
+- CI `cdk diff`：`[~] AWS::DynamoDB::GlobalTable`（`AttributeDefinitions` 加 `gsi1pk`／`gsi1sk`、`[+] GlobalSecondaryIndexes`、`Replicas` 加讀取上限），**無 replacement**。
+- 已驗證：`verify-data-stack.sh` 新增 5 項 → Dev、Prod 各 **16 項全部 ✅**（GSI count 1、ACTIVE、鍵、ALL、寫入上限 Dev 25／Prod 100）。Prod 驗證時等了 29 × 15 秒（約 7 分鐘）索引才 ACTIVE。
+- 手動（Dev，Developer 許可集）：正向 `query --index-name gsi1`（`gsi1pk=CATALOG`）→ `Count: 0`；反向 `--index-name gsi2` → `ValidationException: The table does not have the specified index`。Developer 的資料讀取權限涵蓋索引，不需修改許可集。
+
 教訓 / Lessons：
+- （2026-11-12）**`AWS::DynamoDB::GlobalTable` 在新 GSI 仍是 `CREATING`（`Backfilling=True`）時就回報 `UPDATE_COMPLETE`。** 第一次部署 #13 時驗證失敗（`GSI1 status = CREATING`），部署本身成功、Prod 因 Dev 失敗而未部署。實測空表：Dev CloudFormation 完成後約 8 分鐘、Prod 約 7 分鐘才 ACTIVE。修正：驗證腳本先輪詢等所有 GSI ACTIVE（每 15 秒、最多 20 分鐘，PR #16）。**DR 一次重建所有 stack 時，依賴 GSI 的步驟（例如 smoke test）要等索引 ACTIVE。**
 - cdk-nag `AwsSolutions-DDB3` 只檢查 `CfnTable`；`TableV2` 產生 `CfnGlobalTable`，被視為不適用。
 - `CfnGlobalTable` 不是 ITaggable（標籤在 `Replicas[].Tags`），只用 `TagManager.isTaggable()` 的檢查會默默跳過。
 - CMK 加密的 `TableV2` 必須在有明確區域的 stack 中（測試的 Stack 也要給 `env`）。
@@ -485,6 +496,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | 02 §3 | Dev PITR 改為開啟（ADR-019） |
 | 02 §4 | CDK 結構改為 `infra/app/{bin,lib/stacks,lib/aspects,scripts,test}` |
 | 09 §3.1 | 加註：使用 `TableV2`；Streams 延後到有 consumer；GSI 依模組逐一新增 |
+| 03 §6 | GSI1 改為**多用途**（`gsi1pk`／`gsi1sk`）：商品 `CATALOG`／`PRODUCT#<id>`、訂單 `STATUS#<status>`／`<ts>`（ADR-018 修訂） |
 | 09 §5、11 §2 | KMS 輪替費用：第一、二次輪替各 +USD 1／月，每把上限 USD 3／月 |
 | 03 §10 | 「聯絡人欄位以 CMK 加密」釐清為表層級 SSE（已完成）＋欄位層級（A2 決定） |
 | 03 §10、09 §1.2 | API Gateway **HTTP API 不能直接掛 WAF**；登入／註冊限流改由 CloudFront 或 Cognito user pool WAF（A1 決定） |
@@ -512,6 +524,8 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | ✅ 2026-11-11 | FSBP `DynamoDB.2`、`DynamoDB.6` 通過；`KMS.4` 不在 FSBP，由 cdk-nag＋驗證腳本涵蓋 |
 | ✅ 2026-11-11 | ReadOnly 許可集加上 `SecurityAudit`，正向＋反向驗證通過（§3） |
 | ✅ 2026-11-11 | 建立 `Developer` 許可集，只指派 brewline-dev，正向＋反向驗證通過（§3） |
+| ✅ 2026-11-12 | Node 24（PR #12，ADR-023）；訂貨 A1a：GSI1 部署 Dev、Prod 並驗證（§10.5，PR #13、#16） |
+| 進行中 | Lambda 併發配額：Dev、Prod 皆為 **10**（新帳號預設），已申請 1000（Service Quotas `L-B99A9384`，2026-11-12；Dev 狀態 `CASE_OPENED`）。**核准前不能部署任何設定保留併發的 Lambda（A1b、A1c）**：需求 Dev ≥ 122、Prod ≥ 141 |
 | P1 | 下一步：訂貨模組 A1（Cognito＋商品唯讀 API）→ A2（下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
@@ -531,4 +545,6 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 - Identity Center 建立的角色路徑含區域：`/aws-reserved/sso.amazonaws.com/ap-east-2/`；查 ARN 用 `aws iam list-roles --path-prefix /aws-reserved/`，不要手打。
 - 許可集要能用 CloudShell，需另加 `AWSCloudShellFullAccess`（ViewOnlyAccess 不含）。
 - `scp-budget-lockdown` 平時必須沒有任何目標。
+- 帳號層級的查詢（例如 `lambda:GetAccountSettings`，Resource 只能是 `*`）不在 Developer 許可集內 → 用 Admin（2026-11-12 實測 `no identity-based policy allows`）。
+- Service Quotas 是**每帳號、每區域**：申請一律加 `--region ap-east-2`。狀態 `CASE_OPENED` 代表轉為人工審核的 Support 案件，到該帳號的 Support Center 查看並回覆；以 `aws lambda get-account-settings` 的實際值為準。
 - 主控台中文翻譯對照：Trail＝線索、Sample findings＝問題清單範本、Configuration＝組態、Central configuration＝中央組態。
