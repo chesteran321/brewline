@@ -36,6 +36,22 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 - 新增 GSI：一次 PR 只加一個（CloudFormation 每次更新只能新增一個 GSI）。
 - 不要把 `TableV2` 改成 `Table`（資源類型不同 → 取代 → 資料遺失）。
 
+### 身分層 / Identity layer（ADR-022）
+
+| 項目 Item | 值 Value |
+|---|---|
+| Stack | `brewline-<env>-auth`（module `identity`；Prod 刪除保護＋終止保護） |
+| User pool | Cognito **Essentials**，不開放自助註冊；群組 `cafe`、`simulator`、`staff` |
+| 授權 | pre token 觸發器 V2 把群組轉成 access token scope（`services/identity/src/scopes.ts`）；API 路由用 scope 授權 |
+| 租戶 | `custom:tenant_id`（`t_<ULID>`，任何 app client 都不能寫；**建立後不可刪除或改名**） |
+| 取得 ID | SSM `/brewline/<env>/auth/{user-pool-id,user-pool-arn,web-client-id,issuer}` |
+
+### Lambda 標準 / Lambda standard（ADR-023）
+
+- 一律用 `lib/constructs/brewline-function.ts`：Node 24、arm64、X-Ray、保留併發、自建 log group（Dev 7 天／Prod 30 天）、esbuild 打包（含 AWS SDK）。
+- `lib/aspects/lambda-guardrails.ts` 在 synth 時檢查；CDK 內部函數需用 `LambdaGuardrailsChecker.exempt(scope, reason)` 明確豁免。
+- Lambda 程式碼在 `services/`（獨立 package：`npm ci && npm test`）。
+
 ### CI/CD 身分 / CI/CD identities（GitHub OIDC）
 
 | 角色 Role | 帳號 Account | 信任 `sub` | 用途 Use |
@@ -81,6 +97,7 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 ## 常用指令 / Common commands
 
 ```bash
+(cd services && npm ci && npm test)   # Lambda 程式碼 / Lambda code
 cd infra/app
 npm ci
 npm test

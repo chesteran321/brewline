@@ -118,6 +118,26 @@
 - **決策 Decision**：Dev、Prod 都開 PITR，保留 35 天。
 - **後果 Consequences**：費用約 0；不需要任何例外；可在 Dev 練習 PITR 還原（RB-DR 相關演練）而不碰 Prod。
 
+### ADR-022 身分層：Cognito Essentials、以 scope 授權、`custom:tenant_id` / Identity: Cognito Essentials, Scope-based Authorization, `custom:tenant_id`
+
+- **狀態 Status**：Accepted（2026-11-12，訂貨 A1b）；取代 09 §1.3 的「Lite」與「staff 群組強制 TOTP」
+- **背景 Context**：A1 的 HTTP API 用 JWT authorizer；授權要在 Gateway 完成（越權請求不叫起 Lambda），A2 的租戶隔離需要 access token 帶 `tenant_id`。Cognito 預設 access token 只有群組，沒有自訂屬性；修改 access token 需要 pre token generation 觸發器 V2，只有 Essentials／Plus 可用。Lite 與 Essentials 都有每月 10,000 MAU 免費額度（以帳號或 organization 計），Plus 沒有。
+- **決策 Decision**：
+  - Stack `brewline-<env>-auth`（module `identity`），與 API stack 分開：user pool 有狀態，Prod 刪除保護、RETAIN、終止保護。
+  - 方案 **Essentials**；不開放自助註冊（`AllowAdminCreateUserOnly`，配合 ORD-F-001 由內部人員開通）；Email 登入；密碼 ≥ 12 字元含大小寫、數字、符號，禁止重複最近 5 組。
+  - 群組 `cafe`、`simulator`、`staff`。**pre token 觸發器（V2）把群組轉成 access token 的 scope**：`cafe`／`simulator` → `brewline/catalog.read`；`staff` → `brewline/catalog.read`＋`brewline/admin`。對照表在 `services/identity/src/scopes.ts`，CDK 與 Lambda 共用。
+  - 自訂屬性 **`custom:tenant_id`**（String，1–64，mutable），格式 `t_<ULID>`；觸發器檢查格式後以 `tenant_id` claim 放進 access token。**任何 app client 的 writeAttributes 都不含它** → 只有管理員 API 能設定。
+  - 一律 fail closed：同時屬於 staff 與 cafe／simulator、缺 tenant_id 或格式錯誤 → 不加任何 scope（登入成功但 API 回 403）。
+  - MFA：Cognito 只能整個 pool 設定，**無法只對 staff 強制** → OPTIONAL、只開 TOTP（不開 SMS，沒有 SNS 角色）；部署後驗證腳本偵測「已啟用的 staff 帳號沒有 TOTP」並讓 CI 失敗（偵測性控制）。
+  - App client：`web`（SRP＋refresh、無 OAuth／hosted UI、token 撤銷、不洩漏帳號是否存在）；Dev 另有 `smoke-test`（`ADMIN_USER_PASSWORD_AUTH`，只能以 IAM 身分呼叫，供 A1c smoke test）。Access／ID token 60 分鐘、refresh 7 天。
+  - 其他 stack 由 SSM `/brewline/<env>/auth/{user-pool-id,user-pool-arn,web-client-id,issuer[,smoke-test-client-id]}` 取得。
+- **後果 Consequences**：
+  - 費用 0（MAU 遠低於免費額度）。
+  - cdk-nag 例外：`AwsSolutions-COG2`（MFA 非 REQUIRED，原因如上）、`AwsSolutions-COG8`（Plus 方案沒有免費額度）。預期 Security Hub CSPM FSBP `Cognito.1`（威脅防護）會失敗，列為已接受的 finding。
+  - `custom:tenant_id` 之後**不能刪除、改名或修改長度限制**。
+  - JWT authorizer 只檢查簽章與期限，**不檢查撤銷**：停用帳號或 GlobalSignOut 後，舊 access token 在到期前（最多 60 分鐘）仍可呼叫 API（RSK-015）。群組變更在下次 refresh 時生效。
+- **替代方案 Alternatives considered**：Lite（無法自訂 access token，只能在每個 Lambda 檢查群組，越權請求仍會叫起 Lambda）；Plus（威脅防護，但沒有免費額度）；用 ID token 授權（ID token 不是給 API 用的，且沒有 scope）；Lambda authorizer（每個請求多一次 Lambda 呼叫與延遲）。
+
 ### ADR-023 Node.js 24：本機、CI、Lambda 一致 / Node.js 24 Across Local, CI and Lambda
 
 - **狀態 Status**：Accepted（2026-11-12）；取代 status §10.3「Node 22 / `Runtime.NODEJS_22_X`」
@@ -161,6 +181,7 @@
 | RSK-010 | Bedrock 成本失控或不當輸出 / Bedrock cost or unsafe output | L | M | 配額、預算、Guardrails、規則式退路 | Chester |
 | RSK-011 | GitHub 帳號遭入侵影響部署 / GitHub account compromise | L | H | GitHub 強制 MFA；Prod 需人工核准；OIDC 條件限制 | Chester |
 | RSK-012 | 非公開的第三方資料或格式不慎混入 / Non-public third-party data leakage into project | L | H | 限制 C-03；EDI 只依公開規格；提交前自我檢查清單 | Chester |
+| RSK-015 | 已撤銷的帳號在 access token 到期前仍可呼叫 API；staff MFA 無法由 Cognito 強制 / Revoked users keep API access until token expiry; staff MFA not enforceable per group | M | M | Token 60 分鐘；部署後驗證偵測 staff 未設 TOTP；高風險操作（A2 之後）在 Lambda 再查使用者狀態 | Chester |
 
 風險清單於每季複查，新增或變更紀錄於 Git 歷史。
 The register is reviewed quarterly; changes are tracked in Git history.

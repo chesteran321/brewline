@@ -46,10 +46,20 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: infra/app/package-lock.json
+          cache-dependency-path: |
+            infra/app/package-lock.json
+            services/package-lock.json
+
+      # cdk deploy 會用 esbuild 打包 services/ 的 Lambda / cdk deploy bundles the Lambdas in services/.
+      - name: Install (services)
+        working-directory: services
+        run: npm ci
 
       - run: npm ci
       - run: npm test
+      - name: Unit tests (services)
+        working-directory: services
+        run: npm test
 
       - name: Configure AWS credentials (OIDC → gha-deploy-dev)
         uses: aws-actions/configure-aws-credentials@v6
@@ -63,7 +73,7 @@ jobs:
 
       - name: cdk deploy (Dev)
         run: >
-          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data
+          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data brewline-dev-auth
           -c env=dev -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -94,6 +104,11 @@ jobs:
           scripts/verify-data-stack.sh dev outputs.json | tee verify.txt
           { echo "### Data stack (Dev)"; echo '```'; cat verify.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Verify auth stack (Cognito, pre token trigger, negative tests)
+        run: |
+          scripts/verify-auth-stack.sh dev outputs.json | tee verify-auth.txt
+          { echo "### Auth stack (Dev)"; echo '```'; cat verify-auth.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
   deploy-prod:
     name: Deploy Prod
     needs: deploy-dev
@@ -120,7 +135,14 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: infra/app/package-lock.json
+          cache-dependency-path: |
+            infra/app/package-lock.json
+            services/package-lock.json
+
+      # cdk deploy 會用 esbuild 打包 services/ 的 Lambda / cdk deploy bundles the Lambdas in services/.
+      - name: Install (services)
+        working-directory: services
+        run: npm ci
 
       - run: npm ci
 
@@ -136,7 +158,7 @@ jobs:
 
       - name: cdk deploy (Prod)
         run: >
-          npx cdk deploy brewline-prod-pipeline-check brewline-prod-data
+          npx cdk deploy brewline-prod-pipeline-check brewline-prod-data brewline-prod-auth
           -c env=prod -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -164,3 +186,8 @@ jobs:
         run: |
           scripts/verify-data-stack.sh prod outputs.json | tee verify.txt
           { echo "### Data stack (Prod)"; echo '```'; cat verify.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify auth stack (Cognito, pre token trigger, negative tests)
+        run: |
+          scripts/verify-auth-stack.sh prod outputs.json | tee verify-auth.txt
+          { echo "### Auth stack (Prod)"; echo '```'; cat verify-auth.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
