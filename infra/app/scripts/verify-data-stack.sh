@@ -33,6 +33,19 @@ check() { # check <label> <actual> <expected>
 
 aws sts get-caller-identity --query Arn --output text
 
+# 等 GSI 變成 ACTIVE 再驗證。AWS::DynamoDB::GlobalTable 在索引仍是 CREATING（回填中）時
+# 就會回報 UPDATE_COMPLETE，所以「CloudFormation 完成」不等於「索引可用」（2026-11-12 實測）。
+# Wait for GSIs to become ACTIVE: GlobalTable reports UPDATE_COMPLETE while an index is still CREATING.
+max_wait_checks=80   # 80 × 15 s = 20 分鐘 / minutes（實測 Dev 空表約 8 分鐘）
+for ((i = 1; i <= max_wait_checks; i++)); do
+  pending=$(aws dynamodb describe-table --table-name "$table" --region "$region" \
+    --query 'Table.GlobalSecondaryIndexes[?IndexStatus!=`ACTIVE`].[IndexName, IndexStatus]' --output text)
+  # 沒有 GSI 時 JMESPath 回 None / "None" means the table has no GSI at all.
+  [[ -z "$pending" || "$pending" == "None" ]] && break
+  echo "⏳ waiting for GSI to become ACTIVE ($i/$max_wait_checks): $(tr '\t\n' ' ;' <<<"$pending")"
+  sleep 15
+done
+
 desc=$(aws dynamodb describe-table --table-name "$table" --region "$region" --output json)
 check "TableStatus"               "$(jq -r '.Table.TableStatus' <<<"$desc")" "ACTIVE"
 check "SSE type"                  "$(jq -r '.Table.SSEDescription.SSEType' <<<"$desc")" "KMS"

@@ -23,7 +23,8 @@ jobs:
   deploy-dev:
     name: Deploy Dev
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 部署＋等 GSI ACTIVE（新增 GSI 實測約 8 分鐘，驗證最多等 20 分鐘）/ deploy + GSI backfill wait
+    timeout-minutes: 40
     # 每個環境各自一把鎖：Prod 等待核准時，不會擋住後續的 Dev 部署。
     # 不取消進行中的部署，避免 CloudFormation 半途中斷。
     # One lock per environment: a Prod job waiting for approval no longer blocks Dev.
@@ -97,7 +98,8 @@ jobs:
     name: Deploy Prod
     needs: deploy-dev
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 部署＋等 GSI ACTIVE（新增 GSI 實測約 8 分鐘，驗證最多等 20 分鐘）/ deploy + GSI backfill wait
+    timeout-minutes: 40
     # 進入 production environment：等待 Required reviewer 核准；只允許 main 分支。
     # Enters the production environment: waits for the required reviewer; main branch only.
     environment: production
