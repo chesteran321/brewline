@@ -104,6 +104,7 @@
   - Prod：刪除保護、RETAIN、終止保護；Dev：可刪除，金鑰等待期 7 天。
   - 其他 stack 由 SSM 參數 `/brewline/<env>/data/*` 取得名稱與 ARN，不用 CloudFormation Export。
   - 資料表標記 `data-class=pii`（之後會存聯絡人）。本階段為**表層級** SSE-KMS；欄位層級加密於訂貨模組決定。
+  - **修訂（2026-11-12，訂貨 A1a）**：新增唯一一個**多用途 GSI**（overloaded GSI）`gsi1`，鍵 `gsi1pk`／`gsi1sk`（String），projection ALL，sparse（只有帶 `gsi1pk` 的項目會進索引）。用途由值決定：商品目錄 `CATALOG`／`PRODUCT#<id>`（A1）、訂單狀態 `STATUS#<status>`／`<ts>`（A2，取代 03 §6 的專用 GSI1）。GSI 的 on-demand 最大吞吐量**明確設成與資料表相同**：CDK 未設定時 template 不帶上限（= 索引不受限）；寫入上限也不可低於資料表，否則 GSI 反壓會連帶節流資料表寫入。
 - **後果 Consequences**：
   - 費用約 USD 1／月／帳號（KMS key）；第一次、第二次輪替後各加 USD 1／月，每把上限 USD 3／月。
   - cdk-nag `AwsSolutions-DDB3` 只檢查 `CfnTable`，對 `CfnGlobalTable` 視為不適用 → 以自訂 `DataProtectionChecker` Aspect 補上（PITR、CMK、Prod 刪除保護），違規即 synth 失敗。
