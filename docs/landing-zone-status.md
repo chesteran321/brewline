@@ -364,7 +364,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 - Qualifier 預設 `hnb659fds`；每帳號 10 個 `cdk-hnb659fds-*` 角色。
 - `cfn-exec-role` 使用預設 AdministratorAccess（ADR-016），仍受 SCP 限制。
 - us-east-1 是為了 CloudFront ACM 憑證（edge-stack）。
-- 執行時 CDK CLI 版本 2.1148.0。**本機開發用 Node 22 LTS；Lambda 用 `Runtime.NODEJS_22_X`**（AWS SDK v3 自 2027-01 起要求 Node ≥ 22）。
+- 執行時 CDK CLI 版本 2.1148.0。**本機與 CI 用 Node 24 LTS；Lambda 用 `Runtime.NODEJS_24_X`**（ADR-023，2026-11-12；原為 Node 22，nodejs22.x 於 2027-04-30 淘汰）。
 
 ### 10.4 CI/CD 管線 / Pipeline（P1，2026-11-10）
 
@@ -376,7 +376,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 
 | CDK app `infra/app` | 值 |
 |---|---|
-| 工具鏈 | TypeScript 7（`noEmit`）、tsx、Jest + swc、Node 22（`.nvmrc`） |
+| 工具鏈 | TypeScript 7（`noEmit`）、tsx、Jest + swc、Node 24（`.nvmrc`，ADR-023） |
 | 環境選擇 | `-c env=dev\|prod` **必填**，缺漏或拼錯 synth 失敗；帳號與 ap-east-2 寫在 `lib/config.ts` |
 | cdk-nag | **v3**：`Validations.of(app).addPlugins(new AwsSolutionsChecks(app))`，違規 synth 失敗；例外用 `Validations.of(construct).acknowledge()`（v2 的 `NagSuppressions` 已移除） |
 | 標籤 | `project`、`env`、`module`、`owner`；資料資源（DynamoDB、S3）另需 `data-class`（`public`／`internal`／`pii`）；`RequiredTagsChecker`（READONLY Aspect）缺標籤即報錯，**含 GlobalTable 的 `Replicas[].Tags`** |
@@ -457,6 +457,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | ADR-017 | 步驟 5–12 以主控台／CLI 手動建置 | Accepted | 為學習目的偏離 P-04；未來可再以 CDK 匯入或重建 |
 | ADR-018 | 共用資料層：每帳號 1 把 CMK + DynamoDB 單表（TableV2） | Accepted（2026-11-11） | 見 §10.5 與 docs/14；鍵 `pk`/`sk`；GSI、Streams 延後；SSM 取代 Export；自訂 `DataProtectionChecker` 補 cdk-nag 缺口 |
 | ADR-019 | Dev 也開 PITR | Accepted（2026-11-11） | 費用約 0、不需例外、可在 Dev 練習還原；取代 02 §3 |
+| ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22 |
 
 | 風險 | 內容 | L | I | 緩解 |
 |---|---|---|---|---|

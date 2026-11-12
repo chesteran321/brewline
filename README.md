@@ -36,7 +36,7 @@ A B2B specialty-coffee supply platform built from scratch on AWS — a non-comme
 
 ### 前置需求 / Prerequisites
 
-- Node.js 22 LTS（見 `.nvmrc`；`nvm use` 或 `fnm use`）
+- Node.js 24 LTS（見 `.nvmrc`；`nvm use` 或 `fnm use`）
 - 只有 `cdk diff` / `cdk deploy` 需要 AWS 憑證，且一律透過 IAM Identity Center（**不使用存取金鑰**）
 
 ### Synth（不需要 AWS 憑證）
