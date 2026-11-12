@@ -117,6 +117,18 @@
 - **決策 Decision**：Dev、Prod 都開 PITR，保留 35 天。
 - **後果 Consequences**：費用約 0；不需要任何例外；可在 Dev 練習 PITR 還原（RB-DR 相關演練）而不碰 Prod。
 
+### ADR-023 Node.js 24：本機、CI、Lambda 一致 / Node.js 24 Across Local, CI and Lambda
+
+- **狀態 Status**：Accepted（2026-11-12）；取代 status §10.3「Node 22 / `Runtime.NODEJS_22_X`」
+- **背景 Context**：Lambda `nodejs22.x` 預定 2027-04-30 淘汰（之後陸續封鎖建立與更新函數），落在本作品集的第一個營運年內；`nodejs24.x` 預定 2028-04-30 淘汰。訂貨模組 A1 是第一個 Lambda，此時切換成本最低。本機、CI、Lambda 主版本不一致時，型別（`@types/node`）與實際執行行為可能不同。
+- **決策 Decision**：
+  - Lambda 一律 `Runtime.NODEJS_24_X`、arm64（由 A1 起的 Lambda 標準 construct 強制）。
+  - 本機與 CI 用 Node 24 LTS：`.nvmrc` = 24、`package.json` `engines` = `>=24 <25`、`@types/node` ^24；Dependabot 只接受 `@types/node` 的 minor／patch。
+- **後果 Consequences**：
+  - Node 24 runtime 移除了 callback 形式的 handler，一律寫 `async` handler。
+  - 下一次主版本升級約在 2027 年底評估（Node 26）。
+- **替代方案 Alternatives considered**：維持 Node 22 → 一年內必須再遷移一次，且 cdk-nag `AwsSolutions-L1`（最新 runtime）可能需要例外。
+
 ### ADR 範本 / ADR Template
 
 ```markdown

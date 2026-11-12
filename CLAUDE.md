@@ -20,7 +20,7 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | Prod | `062868712468` |
 | Dev | `610935435571` |
 | 年度預算 Annual budget | ≤ USD 300 |
-| IaC | AWS CDK（TypeScript），Node 22 LTS，Lambda `Runtime.NODEJS_22_X` |
+| IaC | AWS CDK（TypeScript），Node 24 LTS（本機、CI），Lambda `Runtime.NODEJS_24_X`（ADR-023） |
 | CDK bootstrap | qualifier `hnb659fds`，Dev / Prod 的 ap-east-2 與 us-east-1 |
 
 ### 共用資料層 / Shared data layer（ADR-018）
