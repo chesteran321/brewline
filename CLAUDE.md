@@ -46,6 +46,18 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 租戶 | `custom:tenant_id`（`t_<ULID>`，任何 app client 都不能寫；**建立後不可刪除或改名**） |
 | 取得 ID | SSM `/brewline/<env>/auth/{user-pool-id,user-pool-arn,web-client-id,issuer}` |
 
+### 訂貨 API / Ordering API（ADR-020、ADR-021）
+
+| 項目 Item | 值 Value |
+|---|---|
+| Stack | `brewline-<env>-api`（module `ordering`；Prod 終止保護） |
+| 類型 | HTTP API，Cognito JWT authorizer；**每條路由必須有 scope**（`lib/aspects/api-guardrails.ts`） |
+| WAF | A1 不掛（ADR-020）；靠 JWT、scope、stage 限流、保留併發、DynamoDB 上限、Budget Actions |
+| 商品資料 | `PRODUCT#<id>`／`META`（每次部署覆寫）、`STOCK`（只寫一次，部署不重設庫存）；目錄由 GSI1 `gsi1pk=CATALOG` 查詢 |
+| IAM | `dynamodb:LeadingKeys` 限定 `PRODUCT#*`／`CATALOG`；**絕不授予 Scan**（`ForAllValues` 對空集合為 true）並明確 Deny |
+| 驗證 | Dev 每次部署跑 smoke test custom resource（失敗即 rollback）；CI 跑 `scripts/verify-api-stack.sh` |
+| 合約 | `api/openapi.yaml` |
+
 ### Lambda 標準 / Lambda standard（ADR-023）
 
 - 一律用 `lib/constructs/brewline-function.ts`：Node 24、arm64、X-Ray、保留併發、自建 log group（Dev 7 天／Prod 30 天）、esbuild 打包（含 AWS SDK）。

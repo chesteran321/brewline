@@ -2,9 +2,11 @@
 import { App, Tags, Validations } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { applyStandardTags, RequiredTagsChecker } from '../lib/aspects/required-tags';
+import { ApiGuardrailsChecker } from '../lib/aspects/api-guardrails';
 import { DataProtectionChecker } from '../lib/aspects/data-protection';
 import { LambdaGuardrailsChecker } from '../lib/aspects/lambda-guardrails';
 import { resolveEnv } from '../lib/config';
+import { ApiStack } from '../lib/stacks/api-stack';
 import { AuthStack } from '../lib/stacks/auth-stack';
 import { DataStack } from '../lib/stacks/data-stack';
 import { PipelineCheckStack } from '../lib/stacks/pipeline-check-stack';
@@ -46,6 +48,22 @@ const authStack = new AuthStack(app, `brewline-${env.name}-auth`, {
 });
 Tags.of(authStack).add('module', 'identity', { priority: 200 });
 
+// 訂貨 API（A1：商品唯讀）：HTTP API + JWT scope 授權（ADR-020、ADR-021）/ Ordering API.
+// 無狀態 → 不開終止保護也可重建；仍在 Prod 開啟以防誤刪 / Stateless, but protected in Prod anyway.
+// 依賴關係只用來排定部署順序（值經 SSM 傳遞，不產生 Export）/ Ordering only; values flow through SSM.
+const apiStack = new ApiStack(app, `brewline-${env.name}-api`, {
+  envName: env.name,
+  api: env.api,
+  lambda: env.lambda,
+  commitSha,
+  env: { account: env.account, region: env.region },
+  description: 'BrewLine ordering API (A1): HTTP API, Cognito JWT scopes, read-only catalog',
+  terminationProtection: env.name === 'prod',
+});
+apiStack.addStackDependency(dataStack, 'reads /brewline/<env>/data/* from SSM');
+apiStack.addStackDependency(authStack, 'reads /brewline/<env>/auth/* from SSM');
+Tags.of(apiStack).add('module', 'ordering', { priority: 200 });
+
 // 全 app 共用標籤；module 之後由各 stack 覆寫。
 // App-wide tags; individual stacks override "module" later.
 applyStandardTags(app, { env: env.name, module: 'platform' });
@@ -58,6 +76,10 @@ DataProtectionChecker.attach(app, { requireDeletionProtection: env.name === 'pro
 // Lambda 標準：Node 24、arm64、X-Ray、保留併發、log 保留期（ADR-023、COST-004、COST-007）。
 // Lambda standard: Node 24, arm64, X-Ray, reserved concurrency, log retention.
 LambdaGuardrailsChecker.attach(app);
+
+// HTTP API：每條路由 JWT + scope；每個 stage access log + 限流（ADR-020、ADR-021）。
+// HTTP API: JWT + scope on every route; access logs + throttling on every stage.
+ApiGuardrailsChecker.attach(app);
 
 // cdk-nag v3 以 CDK 原生 Policy Validation 外掛執行；違規會讓 synth 失敗（CI 因此擋下 PR）。
 // cdk-nag v3 runs as a native CDK policy-validation plugin; violations fail synth and block the PR.

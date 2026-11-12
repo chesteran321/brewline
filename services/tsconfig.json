@@ -3,15 +3,28 @@
     "target": "ES2023",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["es2023"],
+    "lib": [
+      "es2023"
+    ],
     "strict": true,
     "noImplicitReturns": true,
     "noUncheckedIndexedAccess": true,
     "isolatedModules": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["jest", "node"]
+    "types": [
+      "jest",
+      "node"
+    ],
+    "resolveJsonModule": true,
+    "esModuleInterop": true
   },
-  "include": ["**/src/**/*.ts", "**/test/**/*.ts"],
-  "exclude": ["node_modules"]
+  "include": [
+    "**/src/**/*.ts",
+    "**/test/**/*.ts",
+    "**/seed/*.json"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
 }
