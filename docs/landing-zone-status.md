@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b-1（訂單 API）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1, A2a and A2b-1 complete**（2026-11-13）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -558,7 +558,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 教訓 / Lessons：
 - （2026-11-13）IAM `get-role` 會把**只有一個值的條件陣列**回傳成字串（部署 `["tenant_id"]` → 讀回 `"tenant_id"`），驗證腳本誤判失敗、Prod 延後一次 → jq `[.] | flatten` 正規化後比對（PR #21）。
 
-### 10.9 訂單 API / Orders API（P1，2026-11-13，ADR-025，PR #23）
+### 10.9 訂單 API / Orders API（P1，2026-11-13，ADR-025，PR #23、#25）
 
 | 項目 | Dev | Prod |
 |---|---|---|
@@ -570,6 +570,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 輸入上限 | 每筆 ≤ 25 個商品、每個 1–500 kg、商品不重複、body ≤ 16 KB | 同左 |
 | 測試商品 | `p-9001`（併發，10 kg）、`p-9002`（smoke，每次重設 100 kg）；**不設 `gsi1pk`** → 不在目錄 | 無 |
 | Smoke test | **41 項**（A1 的 18 項＋訂單 23 項） | 無 |
+| 訂單測試（手動） | `brewline-dev-ordering-order-tests`（角色 `brewline-dev-orders-tests`，保留併發 1）；`infra/app/scripts/run-order-tests.sh`；夾具權限只限 `PRODUCT#p-9001` 與兩個 `TENANT#t_01CNCRTST…` | 無 |
 
 - 回應：201 建立；200 同一個 key 重送（回原訂單）；422 同一個 key 不同內容；409 庫存不足（什麼都沒扣）；400 輸入錯誤／商品不存在；503 交易衝突或 throttle（同一個 key 重試）；別的租戶的訂單 → 404。
 - 費用：STS 免費；每筆訂單 6–54 WRU；smoke test 規模每月 < USD 0.1。帳號保留併發：Dev 新增 15、Prod 新增 30。
@@ -580,9 +581,14 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
   - 反向：沒 token 401、缺 key 400、數量 0 → 400、26 個商品 → 400、不存在的商品 400；同 key 不同內容 422；500 kg → 409 且**庫存仍為 97／3**；staff 下單與查詢 403；ID token 被拒；**租戶 B 讀 A 的訂單 404、B 的列表為空**。
 - `verify-api-stack.sh` Dev、Prod 全部 ✅：6 條路由、訂單 scope、路由限流（Dev 2／5、Prod 10／20）、6 個函數設定；HTTP 反向 `POST /orders`、`GET /orders` 沒 token、`POST /orders` 偽造 JWT → 401。
 - `verify-tenant-access.sh` Dev、Prod 各 **37 項全部 ✅**：原 19 項＋3 個呼叫端角色 × 6 項（存在、沒有 managed policy、**DynamoDB／KMS Allow = []**、`AssumeRole`／`TagSession` 租戶角色 allowed、直接讀表 implicitDeny）。
-- IAM 層的跨租戶探測與併發測試在 A2b-2（Dev）。
+- **Dev 訂單測試 17/17 passed**（2026-11-13，Developer 權限集 `lambda invoke`）：
+  - 冪等風暴：同一個 key 同時 10 次 → `created 1`、`replayed 9`，資料表 1 筆訂單，只扣 1 kg。**03 §11「重送 10 次只產生 1 筆」達成。**
+  - 搶庫存：100 個請求搶 10 kg（約 4.1 秒）→ `created 10`、`insufficient_stock 58`、`busy 32`；`available 0`、`reserved 1 → 11`，資料表 10 筆訂單。**03 §11「100 個並發搶最後 10 kg 不超賣」達成。**
+  - IAM 探測（租戶 A 的真實臨時憑證）：讀自己的訂單成功；讀 B、Query B、寫進 B、改價格、Query GSI1、Scan、刪除自己的訂單 → 全部 `AccessDeniedException`。**ORD-N-001「跨租戶存取 100% 失敗」在資料層達成。**
+  - 清理 22 個項目（11 筆訂單＋11 筆冪等記錄）。
 
 教訓 / Lessons：
+- （2026-11-13）搶庫存時 32 筆是 `busy`（`TransactionConflict` 重試 3 次後放棄）而不是 throttle：多個交易同時更新**同一個 STOCK 項目**，DynamoDB 直接取消衝突的交易，不會排隊等待。對 client 而言是 503，用同一個 Idempotency-Key 重試即可。熱門商品的單一庫存項目是寫入熱點（hot key）；正式流量若需要更高併發，可考慮庫存分片或佇列化下單（A3 之後評估）。
 - （2026-11-13）`CfnStage.routeSettings` 是 Json 型別，CDK 不會把 camelCase 轉成 PascalCase → 必須直接寫 `ThrottlingRateLimit`；單元測試在部署前發現。route key 必須先存在 → stage 依賴路由。
 
 ## 11. 新增與修訂的決策 / New & Revised ADRs
@@ -678,7 +684,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-13 | A2 決策：每租戶限流 → 只做路由限流並接受限制（D3）；聯絡人欄位層級加密 → 延到 A4（D5）；`LeadingKeys` 完全比對 → A2a 完成 |
 | ✅ 2026-11-13 | 訂貨 A2a：租戶存取角色、訂單 scope、token 15 分鐘，部署 Dev、Prod 並驗證（§10.6、§10.8，PR #20、#21） |
 | ✅ 2026-11-13 | 訂貨 A2b-1：訂單 API 部署 Dev、Prod 並驗證（§10.9，PR #23） |
-| P1 | 下一步：訂貨模組 A2b-2（Dev 併發測試＋IAM 跨租戶探測）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
+| ✅ 2026-11-13 | 訂貨 A2b-2：Dev 訂單測試（冪等風暴、搶庫存、IAM 探測）17/17（§10.9，PR #25）；**A2 完成** |
+| P1 | 下一步：訂貨模組 A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
