@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation and ordering A1 complete**（2026-11-13）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2a complete**（2026-11-13）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -475,7 +475,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - `CfnGlobalTable` 不是 ITaggable（標籤在 `Replicas[].Tags`），只用 `TagManager.isTaggable()` 的檢查會默默跳過。
 - CMK 加密的 `TableV2` 必須在有明確區域的 stack 中（測試的 Stack 也要給 `env`）。
 
-### 10.6 身分層 / Identity Layer（P1，2026-11-13，ADR-022，PR #14）
+### 10.6 身分層 / Identity Layer（P1，2026-11-13，ADR-022，PR #14、#20）
 
 | 項目 | Dev | Prod |
 |---|---|---|
@@ -487,16 +487,16 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | MFA | OPTIONAL，只開 TOTP；無 SMS 設定 | 同左 |
 | 自訂屬性 | `custom:tenant_id`（String 1–64，mutable；**任何 app client 都不能寫**；不可刪除或改名） | 同左 |
 | 群組 | `cafe`、`simulator`、`staff` | 同左 |
-| App client | `web`（SRP＋refresh、無 OAuth、token 撤銷、60 分／7 天）；`smoke-test`（`ADMIN_USER_PASSWORD_AUTH`） | 只有 `web` |
+| App client | `web`（SRP＋refresh、無 OAuth、token 撤銷、access／ID **15 分**（A2a，原 60 分）／refresh 7 天）；`smoke-test`（`ADMIN_USER_PASSWORD_AUTH`） | 只有 `web` |
 | pre token 觸發器 | `brewline-dev-identity-pre-token`（V2_0，Node 24 arm64，保留併發 5，log 7 天） | `…-prod-…`（保留併發 10，log 30 天） |
 | SSM | `/brewline/dev/auth/{user-pool-id,user-pool-arn,web-client-id,issuer,smoke-test-client-id}` | 前 4 個 |
 
-- Scope 對照（`services/identity/src/scopes.ts`）：`cafe`／`simulator` → `brewline/catalog.read`；`staff` → `+ brewline/admin`。staff 與 cafe／simulator 同時存在、缺 tenant 或格式錯誤 → 不加任何 scope（fail closed）。
+- Scope 對照（`services/identity/src/scopes.ts`）：`cafe`／`simulator` → `brewline/catalog.read`、`brewline/orders.read`、`brewline/orders.write`（訂單 scope 於 A2a 加入）；`staff` → `brewline/catalog.read`、`brewline/admin`（**沒有訂單 scope**：staff 不屬於任何租戶）。staff 與 cafe／simulator 同時存在、缺 tenant 或格式錯誤 → 不加任何 scope（fail closed）。
 - cdk-nag 例外：`AwsSolutions-COG2`（MFA 只能整個 pool 設定）、`AwsSolutions-COG8`（Plus 無免費額度）、`AwsSolutions-IAM5[Resource::*]`（X-Ray）。
 - 費用：約 0（10,000 MAU 免費額度以 organization 計）。
 
 已驗證（2026-11-13）：
-- `scripts/verify-auth-stack.sh`：Dev、Prod 各 **25 項全部 ✅**；反向（`--no-sign-request`）：`sign-up` → `NotAuthorizedException`、`USER_PASSWORD_AUTH` → `InvalidParameterException`。
+- `scripts/verify-auth-stack.sh`：Dev、Prod 各 **25 項全部 ✅**（A2a 後 27 項，新增 access／ID token = `15 minutes`）；反向（`--no-sign-request`）：`sign-up` → `NotAuthorizedException`、`USER_PASSWORD_AUTH` → `InvalidParameterException`。
 - 手動（Dev Admin）：cafe 帳號 access token `scope = aws.cognito.signin.user.admin brewline/catalog.read`、`tenant_id = t_…`；反向：同一帳號加入 `staff` → 重新登入後 scope 只剩 `aws.cognito.signin.user.admin`、`tenant_id = null`。測試帳號已刪除（`list-users` = 0）。
 - 帳號層級：`UnreservedConcurrentExecutions` Dev 1000 → 995。
 
@@ -534,6 +534,29 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 
 ---
 
+### 10.8 租戶存取角色 / Tenant Access Role（P1，2026-11-13，ADR-024，PR #20、#21）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| 角色 | `brewline-dev-tenant-access`（api stack，output `TenantAccessRoleArn`） | `brewline-prod-tenant-access` |
+| 信任 | 呼叫端 `aws:PrincipalArn` = `arn:aws:iam::<帳號>:role/brewline-<env>-orders-*`；`aws:RequestTag/tenant_id` = `t_` ＋ 26 個 `?`；`aws:TagKeys` 只能是 `tenant_id`；動作 `sts:AssumeRole`＋`sts:TagSession`；最長 1 小時 | 同左 |
+| 自己的租戶 | `GetItem`／`Query`／`PutItem`／`ConditionCheckItem`，`LeadingKeys` **完全等於** `TENANT#${aws:PrincipalTag/tenant_id}` | 同左 |
+| 商品 | 讀 `PRODUCT#*`；`UpdateItem` 只能動 `pk, sk, available_kg, reserved_kg, version, updated_at`，`ReturnValues` 不可為 `ALL_*` | 同左 |
+| 其他 | 明確 Deny `Scan`（表＋索引）；KMS 限 `kms:ViaService`；沒有 `DeleteItem` | 同左 |
+
+- 目前沒有任何呼叫端（A2b 的訂單函數才會使用）。費用 0。
+- 修正 v0.1 03 §5：`TENANT#${tag}*` 的前綴比對 → `StringEquals` 完全比對＋信任政策限制 tag 長度。
+
+已驗證（2026-11-13，`scripts/verify-tenant-access.sh`，CI lookup role）：
+- Dev、Prod 各 **19 項全部 ✅**：6 項設定＋13 項 `simulate-principal-policy`。
+  - allowed：讀／寫自己的訂單、讀商品、只動庫存欄位扣庫存。
+  - implicitDeny：讀 B 的訂單、寫進 B、前綴攻擊（tag `t_1` → `TENANT#t_1…`）、沒有 session tag、改價格、扣庫存但 `ReturnValues=ALL_NEW`、新增商品、刪除自己的訂單。
+  - explicitDeny：`Scan`。
+- `cdk-hnb659fds-lookup-role`（ReadOnlyAccess）可以執行 `iam:SimulatePrincipalPolicy`。
+
+教訓 / Lessons：
+- （2026-11-13）IAM `get-role` 會把**只有一個值的條件陣列**回傳成字串（部署 `["tenant_id"]` → 讀回 `"tenant_id"`），驗證腳本誤判失敗、Prod 延後一次 → jq `[.] | flatten` 正規化後比對（PR #21）。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -551,11 +574,12 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-021 | API 類型：HTTP API | Accepted（2026-11-12） | 較便宜、內建 JWT＋scope；無法直接掛 WAF、無每租戶限流（ORD-N-003 待 A2）（§10.7） |
 | ADR-022 | 身分層：Cognito Essentials、scope 授權、`custom:tenant_id` | Accepted（2026-11-12） | pre token V2 群組→scope、tenant_id claim；MFA OPTIONAL＋TOTP；不開放註冊（§10.6） |
 | ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22 |
+| ADR-024 | 租戶隔離：STS session tag ＋ `LeadingKeys` 完全比對 | Accepted（2026-11-13） | 訂單函數（`brewline-<env>-orders-*`）帶 `tenant_id` 扮演 `brewline-<env>-tenant-access`；商品只能改庫存欄位；Scan 明確 Deny（§10.8） |
 
 | 風險 | 內容 | L | I | 緩解 |
 |---|---|---|---|---|
 | RSK-014 | 無 WAF，惡意流量只能靠限流與預算控制；execute-api 網址可被直接呼叫 | M | L | ADR-020 的分層控制；前端上線時加 CloudFront＋WAF，評估關閉 execute-api 預設端點 |
-| RSK-015 | 撤銷的帳號在 access token 到期前（≤ 60 分）仍可呼叫 API；staff MFA 無法由 Cognito 強制 | M | M | Token 60 分鐘；部署後驗證偵測 staff 未設 TOTP；A2 起高風險操作在 Lambda 再查使用者狀態 |
+| RSK-015 | 撤銷的帳號在 access token 到期前（≤ 15 分）仍可呼叫 API；staff MFA 無法由 Cognito 強制 | M | M | Token **15 分鐘**（A2a，原 60 分）；部署後驗證偵測 staff 未設 TOTP；A2 起高風險操作在 Lambda 再查使用者狀態 |
 | RSK-013 | 主要區域無 Macie，無法自動偵測 S3 中的個資 | L | L | 個資只存 DynamoDB；DATA-011/012 設計層預防；資料湖 DQ 檢查加入 Email／電話格式偵測 |
 
 ---
@@ -584,7 +608,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 09 §5、11 §2 | KMS 輪替費用：第一、二次輪替各 +USD 1／月，每把上限 USD 3／月 |
 | 03 §10 | 「聯絡人欄位以 CMK 加密」釐清為表層級 SSE（已完成）＋欄位層級（A2 決定） |
 | 03 §10、09 §1.2 | API Gateway **HTTP API 不能直接掛 WAF**；登入／註冊限流改由 CloudFront 或 Cognito user pool WAF（A1 決定） |
-| 03 §5 | 租戶角色另需 `dynamodb:ConditionCheckItem`（TransactWriteItems）；信任政策需 `sts:TagSession`；`LeadingKeys` 範例的 `TENANT#${tenant_id}*` 結尾 `*` 會讓 `t_1` 存取 `t_12…` → 改 `StringEquals` 完全比對（A2） |
+| 03 §5 | 租戶角色另需 `dynamodb:ConditionCheckItem`（TransactWriteItems）；信任政策需 `sts:TagSession`；`LeadingKeys` 範例的 `TENANT#${tenant_id}*` 結尾 `*` 會讓 `t_1` 存取 `t_12…` → 改 `StringEquals` 完全比對（**已完成**，ADR-024、§10.8） |
 | 03 §4 | ORD-N-003「每租戶 10 req/s」HTTP API 無法原生達成（ADR-021）→ A2 決定 |
 | 03 §7 | 新增 `GET /admin/products/{id}/stock`（staff）；cafe 回應只有 `stock_status`，不含公斤數；`api/openapi.yaml` 已建立 |
 | 09 §1.2、03 §10、10 SEC-050 | 「登入與註冊 WAF 速率規則」改為 ADR-020 的分層控制 |
@@ -619,8 +643,10 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-13 | 訂貨 A1b 身分層（§10.6，PR #14）、A1c 商品唯讀 API（§10.7，PR #15、#18）部署 Dev、Prod 並驗證 |
 | ✅ 2026-11-13 | Prod Config 記錄類型 8 → 57（`Config.1` 要求）；`Cognito.1` SUPPRESSED（ADR-022）；發現台北 Config 無法記錄 IAM、ApiGatewayV2（§2、§8、§9） |
 | 2026-11-14 | 確認 `Config.1` 重新評估後的剩餘原因；若只剩台北不支援的類型 → SUPPRESSED（備註引用 §2） |
-| A2 前 | ORD-N-003 每租戶限流做法；聯絡人欄位層級加密；`LeadingKeys` 改完全比對 |
-| P1 | 下一步：訂貨模組 A2（下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
+| ✅ 2026-11-13 | A2 決策：每租戶限流 → 只做路由限流並接受限制（D3）；聯絡人欄位層級加密 → 延到 A4（D5）；`LeadingKeys` 完全比對 → A2a 完成 |
+| ✅ 2026-11-13 | 訂貨 A2a：租戶存取角色、訂單 scope、token 15 分鐘，部署 Dev、Prod 並驗證（§10.6、§10.8，PR #20、#21） |
+| 盡快 | Dev Admin 手動反向：`sts assume-role` 租戶角色 → 預期 `AccessDenied`（信任政策 `aws:PrincipalArn` 不符） |
+| P1 | 下一步：訂貨模組 A2b（訂單 API：下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
