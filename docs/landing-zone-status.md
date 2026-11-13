@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1 進行中（A1a GSI1 完成）/ P0 complete; P1 CI/CD skeleton and shared data foundation complete; ordering A1 in progress (A1a done)**（2026-11-12）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation and ordering A1 complete**（2026-11-13）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -453,6 +453,63 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - `CfnGlobalTable` 不是 ITaggable（標籤在 `Replicas[].Tags`），只用 `TagManager.isTaggable()` 的檢查會默默跳過。
 - CMK 加密的 `TableV2` 必須在有明確區域的 stack 中（測試的 Stack 也要給 `env`）。
 
+### 10.6 身分層 / Identity Layer（P1，2026-11-13，ADR-022，PR #14）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| Stack | `brewline-dev-auth`（module `identity`） | `brewline-prod-auth`（**終止保護**） |
+| User pool | `brewline-dev-users`，**Essentials** | `brewline-prod-users`，Essentials |
+| 刪除保護／刪除政策 | INACTIVE／Delete | **ACTIVE／Retain** |
+| 註冊 | 僅管理員建立（`AllowAdminCreateUserOnly`）；Email 登入 | 同左 |
+| 密碼 | ≥ 12，大小寫、數字、符號；歷史 5 組 | 同左 |
+| MFA | OPTIONAL，只開 TOTP；無 SMS 設定 | 同左 |
+| 自訂屬性 | `custom:tenant_id`（String 1–64，mutable；**任何 app client 都不能寫**；不可刪除或改名） | 同左 |
+| 群組 | `cafe`、`simulator`、`staff` | 同左 |
+| App client | `web`（SRP＋refresh、無 OAuth、token 撤銷、60 分／7 天）；`smoke-test`（`ADMIN_USER_PASSWORD_AUTH`） | 只有 `web` |
+| pre token 觸發器 | `brewline-dev-identity-pre-token`（V2_0，Node 24 arm64，保留併發 5，log 7 天） | `…-prod-…`（保留併發 10，log 30 天） |
+| SSM | `/brewline/dev/auth/{user-pool-id,user-pool-arn,web-client-id,issuer,smoke-test-client-id}` | 前 4 個 |
+
+- Scope 對照（`services/identity/src/scopes.ts`）：`cafe`／`simulator` → `brewline/catalog.read`；`staff` → `+ brewline/admin`。staff 與 cafe／simulator 同時存在、缺 tenant 或格式錯誤 → 不加任何 scope（fail closed）。
+- cdk-nag 例外：`AwsSolutions-COG2`（MFA 只能整個 pool 設定）、`AwsSolutions-COG8`（Plus 無免費額度）、`AwsSolutions-IAM5[Resource::*]`（X-Ray）。
+- 費用：約 0（10,000 MAU 免費額度以 organization 計）。
+
+已驗證（2026-11-13）：
+- `scripts/verify-auth-stack.sh`：Dev、Prod 各 **25 項全部 ✅**；反向（`--no-sign-request`）：`sign-up` → `NotAuthorizedException`、`USER_PASSWORD_AUTH` → `InvalidParameterException`。
+- 手動（Dev Admin）：cafe 帳號 access token `scope = aws.cognito.signin.user.admin brewline/catalog.read`、`tenant_id = t_…`；反向：同一帳號加入 `staff` → 重新登入後 scope 只剩 `aws.cognito.signin.user.admin`、`tenant_id = null`。測試帳號已刪除（`list-users` = 0）。
+- 帳號層級：`UnreservedConcurrentExecutions` Dev 1000 → 995。
+
+### 10.7 訂貨 API A1 / Ordering API A1（P1，2026-11-13，ADR-020、ADR-021，PR #15、#18）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| Stack | `brewline-dev-api`（module `ordering`） | `brewline-prod-api`（**終止保護**） |
+| HTTP API | `brewline-dev-api`，`$default` stage，無 CORS | `brewline-prod-api` |
+| 限流 | 10／20 req/s | 50／100 req/s |
+| Authorizer | Cognito JWT（issuer、audience 來自 SSM；audience 含 `web`＋`smoke-test`） | audience 只有 `web` |
+| 路由 | `GET /products`、`GET /products/{id}`（`brewline/catalog.read`）；`GET /admin/products/{id}/stock`（`brewline/admin`） | 同左 |
+| Lambda | `brewline-dev-ordering-{list-products,get-product,get-product-stock}`：Node 24 arm64、X-Ray、保留併發 5、log 7 天 | 保留併發 10、log 30 天 |
+| Access log | `/aws/apigateway/brewline-dev-api`（JSON，不記錄 token／標頭／query） | 30 天 |
+| 種子 | 8 個虛構商品（`services/ordering/seed/products.json`）；META 每次覆寫、STOCK 只寫一次 | 同左 |
+| Smoke test | 每次部署執行（custom resource，失敗即 rollback）：**18 項** | 無 |
+
+- IAM：每個函數一個角色；DynamoDB 以 `dynamodb:LeadingKeys` 限定 `PRODUCT#*`（GSI 查詢限定 `CATALOG`）；KMS 限 `kms:ViaService = dynamodb.ap-east-2.amazonaws.com`；**明確 Deny `dynamodb:Scan`**（表與 `/index/*`）；API Gateway 呼叫權限的 `SourceArn` 限定到單一路由。
+- 新增 `ApiGuardrailsChecker`：每條路由 JWT＋至少一個 scope；每個 stage 必須有 access log 與限流。
+- 合約：`api/openapi.yaml`。
+- 費用：Dev 約 USD 0.2、Prod 約 USD 0.3／月（以 us-east-1 單價估算）。
+
+已驗證（2026-11-13，`scripts/verify-api-stack.sh`）：
+- Dev、Prod **全部 ✅**：路由、`Routes without JWT/scope = 0`、admin scope、issuer = user pool、audience 含 web、限流、access log、無 CORS、3 個 Lambda 的設定、種子 ≥ 8、終止保護。
+- **Dev smoke test 18/18 passed**（兩次部署）：未登入 401；cafe 讀目錄 200 且 DTO 無內部欄位；staff 讀庫存 200；cafe、simulator 讀 admin → 403；cafe＋staff → 403；cafe ID token → 401/403；`p-9999` → 404；`DROP-TABLE` → 400；token claims。**GSI 上的 `LeadingKeys = CATALOG` 條件實際可用。**
+- HTTP 反向：無 token、亂碼 token、**自簽 admin JWT** → 401；未定義路由與 `POST /products` → 404。
+- 唯讀角色（ReadOnlyAccess）`get-item` 讀商品 → **denied**（表層 CMK：無 `kms:Decrypt`）。
+- 帳號層級：`UnreservedConcurrentExecutions` Dev **978**、Prod **959**（與保留併發合計一致）。
+
+教訓 / Lessons：
+- （2026-11-13）新帳號 Lambda 併發配額只有 **10**，任何保留併發都會讓部署失敗 → 先 `get-account-settings` 確認；申請轉 Support 案件，隔夜核准（§13、§14）。
+- （2026-11-13）`apigatewayv2 get-stage` 的 `ThrottlingRateLimit` 是浮點數（`10.0`），字串比對失敗 → jq `floor` 後再比（PR #18）。**部署本身與 smoke test 全部通過**，Prod 因 Dev 失敗而延後一次部署。
+- （2026-11-13）驗證步驟原本在失敗時不會寫入 Job Summary（`-e -o pipefail` 跳過後續指令）→ 改為 `set +e`、`PIPESTATUS[0]`，先寫 summary 再 `exit $rc`（6 個驗證步驟）。
+- `cdk diff` 對含中文的 Cognito 邀請信會顯示 `Omitted … mangled non-ASCII characters`，實際內容未變。
+
 ---
 
 ## 11. 新增與修訂的決策 / New & Revised ADRs
@@ -468,10 +525,15 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-017 | 步驟 5–12 以主控台／CLI 手動建置 | Accepted | 為學習目的偏離 P-04；未來可再以 CDK 匯入或重建 |
 | ADR-018 | 共用資料層：每帳號 1 把 CMK + DynamoDB 單表（TableV2） | Accepted（2026-11-11） | 見 §10.5 與 docs/14；鍵 `pk`/`sk`；GSI、Streams 延後；SSM 取代 Export；自訂 `DataProtectionChecker` 補 cdk-nag 缺口 |
 | ADR-019 | Dev 也開 PITR | Accepted（2026-11-11） | 費用約 0、不需例外、可在 Dev 練習還原；取代 02 §3 |
+| ADR-020 | A1 不掛 WAF，改以分層限流 | Accepted（2026-11-12） | 登入／註冊走 Cognito 端點、execute-api 可繞過 CloudFront → CloudFront WAF 無效；regional WAF 每年約 USD 190。改以不開放註冊、JWT、scope、限流、保留併發、DynamoDB 上限、Budget Actions；前端時改 CloudFront＋WAF（§10.7） |
+| ADR-021 | API 類型：HTTP API | Accepted（2026-11-12） | 較便宜、內建 JWT＋scope；無法直接掛 WAF、無每租戶限流（ORD-N-003 待 A2）（§10.7） |
+| ADR-022 | 身分層：Cognito Essentials、scope 授權、`custom:tenant_id` | Accepted（2026-11-12） | pre token V2 群組→scope、tenant_id claim；MFA OPTIONAL＋TOTP；不開放註冊（§10.6） |
 | ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22 |
 
 | 風險 | 內容 | L | I | 緩解 |
 |---|---|---|---|---|
+| RSK-014 | 無 WAF，惡意流量只能靠限流與預算控制；execute-api 網址可被直接呼叫 | M | L | ADR-020 的分層控制；前端上線時加 CloudFront＋WAF，評估關閉 execute-api 預設端點 |
+| RSK-015 | 撤銷的帳號在 access token 到期前（≤ 60 分）仍可呼叫 API；staff MFA 無法由 Cognito 強制 | M | M | Token 60 分鐘；部署後驗證偵測 staff 未設 TOTP；A2 起高風險操作在 Lambda 再查使用者狀態 |
 | RSK-013 | 主要區域無 Macie，無法自動偵測 S3 中的個資 | L | L | 個資只存 DynamoDB；DATA-011/012 設計層預防；資料湖 DQ 檢查加入 Email／電話格式偵測 |
 
 ---
@@ -500,7 +562,13 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 09 §5、11 §2 | KMS 輪替費用：第一、二次輪替各 +USD 1／月，每把上限 USD 3／月 |
 | 03 §10 | 「聯絡人欄位以 CMK 加密」釐清為表層級 SSE（已完成）＋欄位層級（A2 決定） |
 | 03 §10、09 §1.2 | API Gateway **HTTP API 不能直接掛 WAF**；登入／註冊限流改由 CloudFront 或 Cognito user pool WAF（A1 決定） |
-| 03 §5 | 租戶角色另需 `dynamodb:ConditionCheckItem`（TransactWriteItems）；信任政策需 `sts:TagSession` |
+| 03 §5 | 租戶角色另需 `dynamodb:ConditionCheckItem`（TransactWriteItems）；信任政策需 `sts:TagSession`；`LeadingKeys` 範例的 `TENANT#${tenant_id}*` 結尾 `*` 會讓 `t_1` 存取 `t_12…` → 改 `StringEquals` 完全比對（A2） |
+| 03 §4 | ORD-N-003「每租戶 10 req/s」HTTP API 無法原生達成（ADR-021）→ A2 決定 |
+| 03 §7 | 新增 `GET /admin/products/{id}/stock`（staff）；cafe 回應只有 `stock_status`，不含公斤數；`api/openapi.yaml` 已建立 |
+| 09 §1.2、03 §10、10 SEC-050 | 「登入與註冊 WAF 速率規則」改為 ADR-020 的分層控制 |
+| 09 §1.3 | Lite → **Essentials**；「staff 強制 TOTP」→ OPTIONAL＋偵測性檢查；威脅防護不開（需 Plus，FSBP `Cognito.1` 預期失敗） |
+| 09 §2.1 | CORS：A1 不開；前端改走 CloudFront 同網域 |
+| 09 §2.2 | Node 24（ADR-023）；保留併發 Dev 5／Prod 10（API）；CodeDeploy canary 延後 |
 
 ---
 
@@ -526,7 +594,10 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-11 | 建立 `Developer` 許可集，只指派 brewline-dev，正向＋反向驗證通過（§3） |
 | ✅ 2026-11-12 | Node 24（PR #12，ADR-023）；訂貨 A1a：GSI1 部署 Dev、Prod 並驗證（§10.5，PR #13、#16） |
 | ✅ 2026-11-13 | Lambda 併發配額：Dev、Prod 原為 **10**（新帳號預設），2026-11-12 申請 1000（Service Quotas `L-B99A9384`）→ 轉 Support 案件（`CASE_OPENED`）→ 2026-11-13 `CASE_CLOSED`，`get-account-settings` 實際值 **1000／Unreserved 1000**（兩個帳號）。A1b、A1c 需求 Dev ≥ 122、Prod ≥ 141 |
-| P1 | 下一步：訂貨模組 A1（Cognito＋商品唯讀 API）→ A2（下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
+| ✅ 2026-11-13 | 訂貨 A1b 身分層（§10.6，PR #14）、A1c 商品唯讀 API（§10.7，PR #15、#18）部署 Dev、Prod 並驗證 |
+| 盡快 | Prod Security Hub CSPM：確認 `Cognito.1`（威脅防護）失敗並標記為已接受（ADR-022）；查看 `APIGateway.9`（HTTP API access log） |
+| A2 前 | ORD-N-003 每租戶限流做法；聯絡人欄位層級加密；`LeadingKeys` 改完全比對 |
+| P1 | 下一步：訂貨模組 A2（下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
