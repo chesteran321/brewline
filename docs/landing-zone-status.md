@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -48,6 +48,7 @@
   - ❌ Macie 不提供 → 不啟用（RSK-013）
   - ❌ CloudShell 不提供 → 操作時在東京開 CloudShell，指令一律加 `--region ap-east-2`
   - ❌ Security Hub CSPM 的 finding aggregator 不支援 → 不能用中央組態（ADR-015）
+  - ❌ EventBridge **Pipes、Archive and replay、Schema registry／discovery、Global endpoints、API destinations** 不提供（EventBridge 各區域功能表，2026-11-13 查證）→ Streams 到 bus 用 Lambda、事件留存用 Logs 規則（ADR-026）。✅ 自訂 event bus 可建立（2026-11-13 Dev Admin 實測；Developer 權限集沒有 `events:*`）
   - ❌ AWS Config **無法記錄全域 IAM 類型**（`AWS::IAM::Role`／`Policy`／`User`／`Group`）：只有 2022 年 2 月前已提供 Config 的區域可以（AWS 文件明載，2026-11-13 實測 0 筆）
   - ❌ AWS Config 實測**未記錄 `AWS::ApiGatewayV2::Api`／`Stage`**（自 11-09 列入記錄清單，API 已存在仍為 0 筆；CSPM `APIGateway.9` 為「無資料 0/0」）→ 推論台北不支援此類型
   - ⚠️ `put-configuration-recorder` 對不支援的類型**不會報錯**，只是不記錄 → 新增類型後一律用 `list-discovered-resources` 逐一確認
@@ -439,7 +440,8 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | 金鑰等待期／刪除政策 | 7 天／Delete | 30 天／**Retain** |
 | DynamoDB | `brewline-dev-core` | `brewline-prod-core` |
 | CloudFormation 類型 | `AWS::DynamoDB::GlobalTable`（CDK `TableV2`，單一 replica ap-east-2） | 同左 |
-| 鍵 | `pk`（S）／`sk`（S）；無 Streams | 同左 |
+| 鍵 | `pk`（S）／`sk`（S） | 同左 |
+| Streams | `NEW_AND_OLD_IMAGES`（A3a，PR #27；stream 標籤 `2026-11-13T07:37:06.700`） | 同左（`2026-11-13T07:41:58.933`） |
 | GSI | `gsi1`（多用途）：`gsi1pk`（S）／`gsi1sk`（S），projection ALL，sparse；max 50 RRU／25 WRU（與表相同） | 同左；max 200 RRU／100 WRU |
 | 容量 | On-demand，max 50 RRU／25 WRU | On-demand，max 200 RRU／100 WRU |
 | 加密 | SSE-KMS（上述 CMK） | 同左 |
@@ -447,7 +449,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 | 刪除保護／刪除政策 | 否／Delete | **是／Retain** |
 | TTL | `expires_at` | `expires_at` |
 | 標籤 | `module=core`、`data-class=pii` | 同左 |
-| SSM（Standard） | `/brewline/dev/data/{table-name,table-arn,kms-key-arn}` | `/brewline/prod/data/...` |
+| SSM（Standard） | `/brewline/dev/data/{table-name,table-arn,kms-key-arn,table-stream-arn}` | `/brewline/prod/data/...` |
 
 - Key policy 為 CDK 預設（`kms:*` 給帳號 root → 交由 IAM 決定）；RCP `EnforceOrgIdentities` 另限制只有組織內身分可用 `kms:*`。
 - 其他 stack 一律由 SSM 參數取得名稱／ARN，不使用 CloudFormation Export。
@@ -458,6 +460,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 - Dev、Prod 各 11 項全部 ✅：ACTIVE、SSE=KMS／ENABLED、SSE key = stack CMK、鍵 `pk`/`sk`、PITR ENABLED、TTL `expires_at`、KMS 輪替 True、SSM 表名正確；刪除保護與終止保護 Dev `false`、Prod `true`。
 - 反向（本機）：Dev 關閉 PITR → `cdk synth` 輸出 `[DataProtection] ... must enable point-in-time recovery`，exit 1。
 - 反向（Jest）：cdk-nag 單獨使用時**不會**擋下 TableV2 關閉 PITR（記錄缺口）；自訂檢查會擋。
+- （2026-11-13，A3a）Streams：Dev、Prod 新增 5 項全部 ✅：enabled、`NEW_AND_OLD_IMAGES`、`ENABLED`、SSM = `LatestStreamArn`、**表的建立時間比 stream 早（沒有被取代）**；API smoke test 41/41 照常。
 - ✅（2026-11-11 22:42，Prod Admin 主控台）Config 已將 `brewline-prod-core` 記錄為 `AWS::DynamoDB::Table`，合規狀態「合規」→ `TableV2`（GlobalTable）不影響 Config 記錄。
 - ✅（2026-11-11 22:53，Security Hub CSPM 控制項頁）`DynamoDB.2`（PITR）通過、`DynamoDB.6`（刪除保護）通過，失敗的檢查皆 0／1。
 - `KMS.4`（金鑰輪替）顯示「已停用」：它不屬於 FSBP（屬 CIS、NIST 等），Prod 只開 FSBP 所以不評估。輪替已由 cdk-nag `AwsSolutions-KMS5`（部署前）與驗證腳本 `KMS rotation = True`（部署後）確認，不另開標準。
@@ -591,6 +594,31 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - （2026-11-13）搶庫存時 32 筆是 `busy`（`TransactionConflict` 重試 3 次後放棄）而不是 throttle：多個交易同時更新**同一個 STOCK 項目**，DynamoDB 直接取消衝突的交易，不會排隊等待。對 client 而言是 503，用同一個 Idempotency-Key 重試即可。熱門商品的單一庫存項目是寫入熱點（hot key）；正式流量若需要更高併發，可考慮庫存分片或佇列化下單（A3 之後評估）。
 - （2026-11-13）`CfnStage.routeSettings` 是 Json 型別，CDK 不會把 camelCase 轉成 PascalCase → 必須直接寫 `ThrottlingRateLimit`；單元測試在部署前發現。route key 必須先存在 → stage 依賴路由。
 
+### 10.10 事件層 / Event Layer（P1，2026-11-13，ADR-026，PR #28、#29）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| Stack | `brewline-dev-events`（module `events`） | `brewline-prod-events`（**終止保護**） |
+| Bus | `brewline-dev`（SSM `/brewline/dev/events/{bus-name,bus-arn}`） | `brewline-prod` |
+| 發布函數 | `brewline-dev-events-stream-publisher`：Node 24 arm64、X-Ray、保留併發 2；只有讀 stream、`kms:Decrypt`（ViaService DynamoDB）、`events:PutEvents`（此 bus）、送 DLQ | 同左 |
+| 事件來源對應 | `LATEST`、batch 25、過濾（`entity=Order`；`sk=STOCK` 的 MODIFY）、`ReportBatchItemFailures`、bisect、重試 3、最長 1 小時、失敗 → `brewline-dev-events-stream-dlq` | 同左 |
+| 事件 | `source=brewline.ordering`：`OrderCreated`、`OrderStatusChanged`、`StockLow`；detail 白名單、`event_id` = stream eventID | 同左 |
+| 稽核 log | 規則 `brewline-dev-audit-log`（`brewline.*`）→ `/aws/events/brewline-dev`（7 天）；原生 `AWS::Logs::ResourcePolicy`，`aws:SourceArn` = 規則 | 30 天 |
+| DLQ | `events-stream-dlq`、`events-rule-dlq`：SSE-SQS、僅 TLS、14 天 | 同左 |
+| 告警（無通知目標，A4 接上） | `…-events-stream-iterator-age`（> 5 分）、`…-events-stream-dlq-not-empty`、`…-events-rule-dlq-not-empty` | 同左 |
+
+- 部署順序 data → events → api（api 依賴 events，Dev smoke test 下的單才會產生事件）。
+- 費用：Lambda 觸發器讀 Streams 免費；自訂事件 USD 1／百萬；其餘在免費額度內 → 約 0。
+
+已驗證（2026-11-13，`scripts/verify-events-stack.sh`，commit `55c4799`）：
+- Dev 28 項、Prod 26 項全部 ✅：bus、SSM、對應 `Enabled`／來源 = SSM stream ARN／部分失敗／重試 3／bisect／on-failure DLQ／2 個過濾、函數設定、規則與 pattern、log 保留、DLQ SSE-SQS 且 0 則訊息、3 個告警且無 ALARM、終止保護。
+- **端到端（Dev）**：smoke test 下單 → Streams → 發布函數 → bus → 規則 → Logs，最近 1 小時找到 smoke 租戶 A 的 `OrderCreated`（2 筆）。
+- 反向：事件 log 中 `created_by`、`idempotency_key`、`TENANT#` 出現次數 = 0（Dev、Prod）。
+
+教訓 / Lessons：
+- （2026-11-13）`targets.CloudWatchLogGroup` 會部署一個 AwsCustomResource Lambda 寫 log 資源政策（不符 Lambda 標準）→ 改用原生 `AWS::Logs::ResourcePolicy`。
+- （2026-11-13）`aws logs filter-log-events` 自動分頁，`--query` 逐頁套用：`length(events)` 印出 `2⏎0` → 驗證誤判、Prod 延後一次 → 改列 `eventId` 再 `wc -w`（PR #29）。同次另修正 DLQ ARN 的 regex。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -602,7 +630,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-015 | Security Hub CSPM 用本機組態 | Accepted | 台北不支援 finding aggregator；改用 us-east-1 當主區域會把政策套到 us-east-1、造成 Config 未啟用的失敗項 |
 | ADR-016 | CDK cfn-exec 使用預設 Admin | Accepted | 作品集取捨；SCP 為防護欄；正式環境應改自訂最小權限 |
 | ADR-017 | 步驟 5–12 以主控台／CLI 手動建置 | Accepted | 為學習目的偏離 P-04；未來可再以 CDK 匯入或重建 |
-| ADR-018 | 共用資料層：每帳號 1 把 CMK + DynamoDB 單表（TableV2） | Accepted（2026-11-11） | 見 §10.5 與 docs/14；鍵 `pk`/`sk`；GSI、Streams 延後；SSM 取代 Export；自訂 `DataProtectionChecker` 補 cdk-nag 缺口 |
+| ADR-018 | 共用資料層：每帳號 1 把 CMK + DynamoDB 單表（TableV2） | Accepted（2026-11-11） | 見 §10.5 與 docs/14；鍵 `pk`/`sk`；GSI 逐一新增、Streams 於 A3a 開啟；SSM 取代 Export；自訂 `DataProtectionChecker` 補 cdk-nag 缺口 |
 | ADR-019 | Dev 也開 PITR | Accepted（2026-11-11） | 費用約 0、不需例外、可在 Dev 練習還原；取代 02 §3 |
 | ADR-020 | A1 不掛 WAF，改以分層限流 | Accepted（2026-11-12） | 登入／註冊走 Cognito 端點、execute-api 可繞過 CloudFront → CloudFront WAF 無效；regional WAF 每年約 USD 190。改以不開放註冊、JWT、scope、限流、保留併發、DynamoDB 上限、Budget Actions；前端時改 CloudFront＋WAF（§10.7） |
 | ADR-021 | API 類型：HTTP API | Accepted（2026-11-12） | 較便宜、內建 JWT＋scope；無法直接掛 WAF、無每租戶限流（ORD-N-003 待 A2）（§10.7） |
@@ -610,6 +638,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22 |
 | ADR-024 | 租戶隔離：STS session tag ＋ `LeadingKeys` 完全比對 | Accepted（2026-11-13） | 訂單函數（`brewline-<env>-orders-*`）帶 `tenant_id` 扮演 `brewline-<env>-tenant-access`；商品只能改庫存欄位；Scan 明確 Deny（§10.8） |
 | ADR-025 | 下單交易與冪等 | Accepted（2026-11-13） | 冪等記錄＋訂單＋扣庫存在同一個交易；sk `ORDER#<ULID>`；伺服器端定價；≤ 25 個商品、1–500 kg；路由限流（§10.9） |
+| ADR-026 | 事件層：Streams → Lambda → EventBridge | Accepted（2026-11-13） | 台北沒有 Pipes／Archive；自訂 bus、白名單 detail、`event_id` 去重、Logs 規則留存、DLQ SSE-SQS（§10.10） |
 
 | 風險 | 內容 | L | I | 緩解 |
 |---|---|---|---|---|
@@ -639,7 +668,10 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 14 | 加入 §11 的 ADR 與 RSK-013（ADR-018、ADR-019 已加入，PR #6） |
 | 02 §3 | Dev PITR 改為開啟（ADR-019） |
 | 02 §4 | CDK 結構改為 `infra/app/{bin,lib/stacks,lib/aspects,scripts,test}` |
-| 09 §3.1 | 加註：使用 `TableV2`；Streams 延後到有 consumer；GSI 依模組逐一新增 |
+| 09 §3.1 | 加註：使用 `TableV2`；Streams `NEW_AND_OLD_IMAGES`（A3a）；GSI 依模組逐一新增 |
+| 09 §2.4 | 台北沒有 **Archive and replay** → 以 Logs 規則留存；DLQ 用 SSE-SQS（ADR-026） |
+| 01 §5 | Streams → EventBridge 改為 **Lambda 發布**（台北沒有 Pipes，ADR-026） |
+| 09 §2.3 | Step Functions「Catch 後發布 `WorkflowFailed`」→ 失敗告警＋DLQ（A3d） |
 | 03 §6 | GSI1 改為**多用途**（`gsi1pk`／`gsi1sk`）：商品 `CATALOG`／`PRODUCT#<id>`、訂單 `STATUS#<status>`／`<created_at>#<order_id>`（ADR-018 修訂）；訂單 sk `ORDER#<ts>#<id>` → **`ORDER#<ULID>`**；新增冪等項目 `IDEMP#<key>`（ADR-025） |
 | 03 §3 | ORD-F-004 不使用 Lambda Powertools Idempotency，改為同一交易內的冪等記錄（ADR-025） |
 | 03 §11 | 跨租戶存取回 **404**（不是 403），證據為應用層日誌＋IAM 探測（A2 決策 D4），不依賴 CloudTrail 資料事件 |
@@ -685,7 +717,10 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-13 | 訂貨 A2a：租戶存取角色、訂單 scope、token 15 分鐘，部署 Dev、Prod 並驗證（§10.6、§10.8，PR #20、#21） |
 | ✅ 2026-11-13 | 訂貨 A2b-1：訂單 API 部署 Dev、Prod 並驗證（§10.9，PR #23） |
 | ✅ 2026-11-13 | 訂貨 A2b-2：Dev 訂單測試（冪等風暴、搶庫存、IAM 探測）17/17（§10.9，PR #25）；**A2 完成** |
-| P1 | 下一步：訂貨模組 A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
+| ✅ 2026-11-13 | A3 決策：D1 Streams → Lambda → EventBridge；D2 狀態以 DynamoDB 為準、Step Functions 只做逾時取消；D5 逾時 Dev 10 分／Prod 48 小時；D6 咖啡廳自行取消延後；D7 先建告警、通知待 A4 |
+| ✅ 2026-11-13 | 訂貨 A3a Streams（§10.5，PR #27）、A3b 事件層（§10.10，PR #28、#29）部署 Dev、Prod 並驗證 |
+| 有空時 | Developer 權限集加上 EventBridge、Step Functions、SQS 唯讀（目前 `events:ListEventBuses` 被拒） |
+| P1 | 下一步：訂貨模組 A3c（staff 端點＋狀態轉換）→ A3d（Step Functions 逾時取消）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
