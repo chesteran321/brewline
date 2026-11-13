@@ -118,6 +118,32 @@
 - **決策 Decision**：Dev、Prod 都開 PITR，保留 35 天。
 - **後果 Consequences**：費用約 0；不需要任何例外；可在 Dev 練習 PITR 還原（RB-DR 相關演練）而不碰 Prod。
 
+### ADR-020 A1 不掛 WAF，改以分層限流防範錢包阻斷 / No WAF in A1; Layered Throttling Against Denial of Wallet
+
+- **狀態 Status**：Accepted（2026-11-12，訂貨 A1）；修訂 09 §1.2、03 §10、10 SEC-050 的「登入與註冊套用 WAF 速率規則」
+- **背景 Context**：HTTP API 不能直接掛 WAF。三個選項：(A) CloudFront（固定費率 Free 方案，含 WAF）放在 API 前面；(B) Cognito user pool 掛 regional WAF；(C) 暫不掛 WAF。關鍵事實：登入與註冊呼叫的是 **Cognito 自己的端點**，不經過我們的 CloudFront；execute-api 預設網址也能**繞過** CloudFront。Regional WAF 每個 web ACL 約 USD 5／月加規則費，Dev＋Prod 一年約 USD 190，超過年度預算的 60%。A1 沒有前端。
+- **決策 Decision**：A1 採 **C**，以分層控制取代：
+  1. 不開放自助註冊（ADR-022）→ 註冊端點的攻擊面消失；
+  2. JWT authorizer：未登入或簽章無效的請求在 Gateway 回 401，不叫起 Lambda；
+  3. Scope 授權：越權請求在 Gateway 回 403；
+  4. Stage 預設限流：Dev 10／20、Prod 50／100 req/s（COST-003）；
+  5. Lambda 保留併發：API 函數 Dev 5、Prod 10（COST-004）；
+  6. DynamoDB 最大吞吐量（COST-005）、Budget Actions、成本異常偵測。
+  做前端時改採 **A**（CloudFront 同網域 `/api/*` → 也不需要 CORS），並同時評估 API 自訂網域＋`disableExecuteApiEndpoint`，才能關閉繞過路徑。
+- **後果 Consequences**：費用 0；沒有 IP 層級規則（RSK-014）。API Gateway 官方文件沒有明確說明被拒絕的請求是否計費，保守視為計費：HTTP API 每 1M 請求約 USD 1。新增 `ApiGuardrailsChecker`：每條路由必須 JWT＋至少一個 scope，每個 stage 必須有 access log 與限流。
+- **替代方案 Alternatives considered**：A（現在沒有東西可以保護，且無法涵蓋 Cognito 端點與 execute-api 繞過）；B（成本過高）。
+
+### ADR-021 API 類型：HTTP API / API Type: HTTP API
+
+- **狀態 Status**：Accepted（2026-11-12，訂貨 A1）
+- **背景 Context**：REST API 支援 WAF、usage plan（每用戶端限流）、請求驗證、快取；HTTP API 較便宜（約 USD 1 vs 3.5／1M 請求）、延遲較低、內建 JWT authorizer 並可依 scope 授權。Config 已記錄 `AWS::ApiGatewayV2::*`（status §8）。
+- **決策 Decision**：HTTP API，單一 `$default` stage（auto deploy），Lambda proxy integration（payload 2.0）。不開 CORS（A1 沒有前端）。Access log 為 JSON，**不記錄 token、標頭與 query string**。
+- **後果 Consequences**：
+  - **ORD-N-003「每租戶 10 req/s」無法用 HTTP API 原生達成**（只有 stage 與路由層級限流）→ A2 決定：應用層計數、改為每路由限流，或接受限制。
+  - 不能直接掛 WAF（見 ADR-020）。
+  - 輸入驗證在 Lambda（zod），不是 Gateway。
+- **替代方案 Alternatives considered**：REST API（功能較多，但本專案需要的 WAF 與 usage plan 都要額外成本，且需修改 Config 記錄類型）。
+
 ### ADR-022 身分層：Cognito Essentials、以 scope 授權、`custom:tenant_id` / Identity: Cognito Essentials, Scope-based Authorization, `custom:tenant_id`
 
 - **狀態 Status**：Accepted（2026-11-12，訂貨 A1b）；取代 09 §1.3 的「Lite」與「staff 群組強制 TOTP」
@@ -181,6 +207,7 @@
 | RSK-010 | Bedrock 成本失控或不當輸出 / Bedrock cost or unsafe output | L | M | 配額、預算、Guardrails、規則式退路 | Chester |
 | RSK-011 | GitHub 帳號遭入侵影響部署 / GitHub account compromise | L | H | GitHub 強制 MFA；Prod 需人工核准；OIDC 條件限制 | Chester |
 | RSK-012 | 非公開的第三方資料或格式不慎混入 / Non-public third-party data leakage into project | L | H | 限制 C-03；EDI 只依公開規格；提交前自我檢查清單 | Chester |
+| RSK-014 | 沒有 WAF，惡意流量只能靠限流與預算控制擋下；execute-api 網址可被直接呼叫 / No WAF; floods are stopped only by throttling and budgets | M | L | ADR-020 的六層控制；Budget Actions；前端上線時加 CloudFront＋WAF 並評估關閉 execute-api 預設端點 | Chester |
 | RSK-015 | 已撤銷的帳號在 access token 到期前仍可呼叫 API；staff MFA 無法由 Cognito 強制 / Revoked users keep API access until token expiry; staff MFA not enforceable per group | M | M | Token 60 分鐘；部署後驗證偵測 staff 未設 TOTP；高風險操作（A2 之後）在 Lambda 再查使用者狀態 | Chester |
 
 風險清單於每季複查，新增或變更紀錄於 Git 歷史。

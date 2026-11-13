@@ -1,0 +1,50 @@
+[
+  {
+    "id": "p-0001", "name": "Highland Washed Lot 1", "name_zh": "高地水洗一號",
+    "origin_country": "ET", "region": "Yirgacheffe", "process": "washed", "variety": "Ethiopian landrace",
+    "altitude_m": 2000, "cup_score": 87.5, "roast_level": "light", "flavor_notes": ["jasmine", "bergamot", "lemon"],
+    "price_per_kg": 1450, "currency": "TWD", "lot_id": "L-2026-001", "initial_stock_kg": 120, "low_threshold_kg": 20
+  },
+  {
+    "id": "p-0002", "name": "Highland Natural Lot 2", "name_zh": "高地日曬二號",
+    "origin_country": "ET", "region": "Guji", "process": "natural", "variety": "Ethiopian landrace",
+    "altitude_m": 2100, "cup_score": 88.0, "roast_level": "light", "flavor_notes": ["blueberry", "cacao nib", "wine"],
+    "price_per_kg": 1580, "currency": "TWD", "lot_id": "L-2026-002", "initial_stock_kg": 90, "low_threshold_kg": 15
+  },
+  {
+    "id": "p-0003", "name": "Ridge Double Washed", "name_zh": "山脊雙重水洗",
+    "origin_country": "KE", "region": "Nyeri", "process": "washed", "variety": "SL28",
+    "altitude_m": 1800, "cup_score": 87.0, "roast_level": "light", "flavor_notes": ["blackcurrant", "grapefruit", "brown sugar"],
+    "price_per_kg": 1520, "currency": "TWD", "lot_id": "L-2026-003", "initial_stock_kg": 60, "low_threshold_kg": 15
+  },
+  {
+    "id": "p-0004", "name": "Valley Honey", "name_zh": "河谷蜜處理",
+    "origin_country": "CO", "region": "Huila", "process": "honey", "variety": "Caturra",
+    "altitude_m": 1700, "cup_score": 85.5, "roast_level": "medium-light", "flavor_notes": ["red apple", "caramel", "orange"],
+    "price_per_kg": 980, "currency": "TWD", "lot_id": "L-2026-004", "initial_stock_kg": 200, "low_threshold_kg": 40
+  },
+  {
+    "id": "p-0005", "name": "Volcano Washed", "name_zh": "火山水洗",
+    "origin_country": "GT", "region": "Antigua", "process": "washed", "variety": "Bourbon",
+    "altitude_m": 1600, "cup_score": 84.5, "roast_level": "medium", "flavor_notes": ["milk chocolate", "almond", "plum"],
+    "price_per_kg": 860, "currency": "TWD", "lot_id": "L-2026-005", "initial_stock_kg": 250, "low_threshold_kg": 50
+  },
+  {
+    "id": "p-0006", "name": "Cloud Forest Geisha", "name_zh": "雲霧林藝伎",
+    "origin_country": "PA", "region": "Boquete", "process": "washed", "variety": "Geisha",
+    "altitude_m": 1750, "cup_score": 90.0, "roast_level": "light", "flavor_notes": ["jasmine", "peach", "honey"],
+    "price_per_kg": 4800, "currency": "TWD", "lot_id": "L-2026-006", "initial_stock_kg": 15, "low_threshold_kg": 5
+  },
+  {
+    "id": "p-0007", "name": "Island Wet-Hulled", "name_zh": "島嶼濕剝",
+    "origin_country": "ID", "region": "Aceh", "process": "wet-hulled", "variety": "Typica",
+    "altitude_m": 1500, "cup_score": 84.0, "roast_level": "medium-dark", "flavor_notes": ["cedar", "dark chocolate", "spice"],
+    "price_per_kg": 820, "currency": "TWD", "lot_id": "L-2026-007", "initial_stock_kg": 180, "low_threshold_kg": 40
+  },
+  {
+    "id": "p-0008", "name": "Mountain Anaerobic", "name_zh": "高山厭氧",
+    "origin_country": "TW", "region": "Alishan", "process": "anaerobic", "variety": "Typica",
+    "altitude_m": 1200, "cup_score": 86.0, "roast_level": "light", "flavor_notes": ["lychee", "oolong", "cane sugar"],
+    "price_per_kg": 2600, "currency": "TWD", "lot_id": "L-2026-008", "initial_stock_kg": 30, "low_threshold_kg": 8
+  }
+]

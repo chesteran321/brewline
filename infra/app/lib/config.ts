@@ -55,7 +55,23 @@ export interface LambdaSettings {
    */
   readonly reservedConcurrency: {
     readonly preTokenGeneration: number;
+    /** 每個 API 函數 / Each API function. */
+    readonly api: number;
+    /** 部署時才執行的 custom resource（種子、smoke test）/ Deploy-time custom resources. */
+    readonly customResource: number;
   };
+}
+
+/**
+ * HTTP API 的各環境設定（docs/09 §2.1、COST-003、ADR-021）。
+ * Per-environment HTTP API settings.
+ */
+export interface ApiSettings {
+  /** Stage 預設限流（每秒請求數）/ Stage default throttle (requests per second). */
+  readonly throttleRateLimit: number;
+  readonly throttleBurstLimit: number;
+  /** 部署時執行 A1 smoke test（需要 auth stack 的 smoke-test client）/ Run the A1 smoke test on deploy. */
+  readonly smokeTest: boolean;
 }
 
 export interface BrewlineEnv {
@@ -65,6 +81,7 @@ export interface BrewlineEnv {
   readonly data: DataSettings;
   readonly auth: AuthSettings;
   readonly lambda: LambdaSettings;
+  readonly api: ApiSettings;
 }
 
 /** Lambda 標準 runtime（ADR-023）/ Standard Lambda runtime. */
@@ -93,8 +110,9 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 7, // COST-007
-      reservedConcurrency: { preTokenGeneration: 5 },
+      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1 },
     },
+    api: { throttleRateLimit: 10, throttleBurstLimit: 20, smokeTest: true },
   },
   prod: {
     name: 'prod',
@@ -115,8 +133,9 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 30, // COST-007
-      reservedConcurrency: { preTokenGeneration: 10 },
+      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1 },
     },
+    api: { throttleRateLimit: 50, throttleBurstLimit: 100, smokeTest: false },
   },
 };
 

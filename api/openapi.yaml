@@ -1,0 +1,150 @@
+# BrewLine 訂貨 API — A1（商品唯讀）/ BrewLine ordering API — A1 (read-only catalog)
+# 真實來源是 infra/app/lib/stacks/api-stack.ts；此檔描述對外合約（docs/03 §7）。
+# The source of truth is api-stack.ts; this file documents the public contract.
+openapi: 3.1.0
+info:
+  title: BrewLine Ordering API
+  version: 0.1.0-a1
+  description: |
+    驗證：Cognito access token（`Authorization: Bearer <token>`）。授權以 OAuth scope 在 API Gateway 執行，
+    越權請求回 403，不會叫起 Lambda（ADR-022）。ID token 沒有 scope，會被拒絕。
+    Authentication: Cognito access token. Authorization is scope-based at API Gateway (403 before any Lambda runs).
+servers:
+  - url: https://{apiId}.execute-api.ap-east-2.amazonaws.com
+    variables:
+      apiId:
+        default: example
+security:
+  - cognito: []
+paths:
+  /products:
+    get:
+      operationId: listProducts
+      summary: 上架商品列表 / List active products
+      security:
+        - cognito: [brewline/catalog.read]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, count]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Product' } }
+                  count: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+  /products/{id}:
+    get:
+      operationId: getProduct
+      summary: 商品明細 / Product detail
+      security:
+        - cognito: [brewline/catalog.read]
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Product' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /admin/products/{id}/stock:
+    get:
+      operationId: getProductStock
+      summary: 庫存明細（內部人員）/ Stock detail (staff only)
+      security:
+        - cognito: [brewline/admin]
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminStock' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+components:
+  securitySchemes:
+    cognito:
+      type: oauth2
+      description: Cognito user pool access token; scopes are added by the pre token generation trigger.
+      flows:
+        clientCredentials:
+          tokenUrl: https://example.invalid/oauth2/token
+          scopes:
+            brewline/catalog.read: 讀商品目錄（cafe、simulator、staff）
+            brewline/admin: 內部人員端點（staff）
+  parameters:
+    ProductId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^p-\d{4}$', example: p-0001 }
+  schemas:
+    StockStatus:
+      type: string
+      enum: [in_stock, low, out]
+      description: 咖啡廳只看得到狀態，看不到公斤數 / Cafés see a status, never kilograms.
+    Product:
+      type: object
+      additionalProperties: false
+      required: [id, name, name_zh, origin_country, region, process, variety, altitude_m, cup_score,
+                 roast_level, flavor_notes, price_per_kg, currency, lot_id, stock_status]
+      properties:
+        id: { type: string, example: p-0001 }
+        name: { type: string }
+        name_zh: { type: string }
+        origin_country: { type: string, description: ISO 3166-1 alpha-2 }
+        region: { type: string }
+        process: { type: string, enum: [washed, natural, honey, anaerobic, wet-hulled] }
+        variety: { type: string }
+        altitude_m: { type: integer }
+        cup_score: { type: number }
+        roast_level: { type: string, enum: [light, medium-light, medium, medium-dark, dark] }
+        flavor_notes: { type: array, items: { type: string } }
+        price_per_kg: { type: integer, description: 整數，幣別見 currency / integer in `currency` }
+        currency: { type: string, enum: [TWD] }
+        lot_id: { type: string }
+        stock_status: { $ref: '#/components/schemas/StockStatus' }
+    AdminStock:
+      type: object
+      additionalProperties: false
+      required: [product_id, available_kg, reserved_kg, low_threshold_kg, version, stock_status]
+      properties:
+        product_id: { type: string }
+        available_kg: { type: integer }
+        reserved_kg: { type: integer }
+        low_threshold_kg: { type: integer }
+        version: { type: integer }
+        stock_status: { $ref: '#/components/schemas/StockStatus' }
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+  responses:
+    BadRequest:
+      description: 參數格式錯誤 / Invalid parameter
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unauthorized:
+      description: 缺少或無效的 token（API Gateway 回應）/ Missing or invalid token (API Gateway)
+    Forbidden:
+      description: token 缺少需要的 scope（API Gateway 回應）/ Token lacks the required scope (API Gateway)
+    NotFound:
+      description: 找不到 / Not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    TooManyRequests:
+      description: 超過 stage 限流 / Stage throttling exceeded
