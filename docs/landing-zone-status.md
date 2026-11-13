@@ -525,7 +525,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-11 | ReadOnly 許可集加上 `SecurityAudit`，正向＋反向驗證通過（§3） |
 | ✅ 2026-11-11 | 建立 `Developer` 許可集，只指派 brewline-dev，正向＋反向驗證通過（§3） |
 | ✅ 2026-11-12 | Node 24（PR #12，ADR-023）；訂貨 A1a：GSI1 部署 Dev、Prod 並驗證（§10.5，PR #13、#16） |
-| 進行中 | Lambda 併發配額：Dev、Prod 皆為 **10**（新帳號預設），已申請 1000（Service Quotas `L-B99A9384`，2026-11-12；Dev 狀態 `CASE_OPENED`）。**核准前不能部署任何設定保留併發的 Lambda（A1b、A1c）**：需求 Dev ≥ 122、Prod ≥ 141 |
+| ✅ 2026-11-13 | Lambda 併發配額：Dev、Prod 原為 **10**（新帳號預設），2026-11-12 申請 1000（Service Quotas `L-B99A9384`）→ 轉 Support 案件（`CASE_OPENED`）→ 2026-11-13 `CASE_CLOSED`，`get-account-settings` 實際值 **1000／Unreserved 1000**（兩個帳號）。A1b、A1c 需求 Dev ≥ 122、Prod ≥ 141 |
 | P1 | 下一步：訂貨模組 A1（Cognito＋商品唯讀 API）→ A2（下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
@@ -546,5 +546,5 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 許可集要能用 CloudShell，需另加 `AWSCloudShellFullAccess`（ViewOnlyAccess 不含）。
 - `scp-budget-lockdown` 平時必須沒有任何目標。
 - 帳號層級的查詢（例如 `lambda:GetAccountSettings`，Resource 只能是 `*`）不在 Developer 許可集內 → 用 Admin（2026-11-12 實測 `no identity-based policy allows`）。
-- Service Quotas 是**每帳號、每區域**：申請一律加 `--region ap-east-2`。狀態 `CASE_OPENED` 代表轉為人工審核的 Support 案件，到該帳號的 Support Center 查看並回覆；以 `aws lambda get-account-settings` 的實際值為準。
+- Service Quotas 是**每帳號、每區域**：申請一律加 `--region ap-east-2`。狀態 `CASE_OPENED` 代表轉為人工審核的 Support 案件，到該帳號的 Support Center 查看並回覆；結案後狀態是 `CASE_CLOSED`（不會顯示 `APPROVED`），**是否核准以 `aws lambda get-account-settings` 的實際值為準**（2026-11-13 實測，隔夜完成）。
 - 主控台中文翻譯對照：Trail＝線索、Sample findings＝問題清單範本、Configuration＝組態、Central configuration＝中央組態。
