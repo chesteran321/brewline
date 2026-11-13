@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2a complete**（2026-11-13）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b-1（訂單 API）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1, A2a and A2b-1 complete**（2026-11-13）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -558,6 +558,33 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 教訓 / Lessons：
 - （2026-11-13）IAM `get-role` 會把**只有一個值的條件陣列**回傳成字串（部署 `["tenant_id"]` → 讀回 `"tenant_id"`），驗證腳本誤判失敗、Prod 延後一次 → jq `[.] | flatten` 正規化後比對（PR #21）。
 
+### 10.9 訂單 API / Orders API（P1，2026-11-13，ADR-025，PR #23）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| 路由 | `POST /orders`（`brewline/orders.write`，必填 `Idempotency-Key`）、`GET /orders`、`GET /orders/{id}`（`brewline/orders.read`） | 同左 |
+| `POST /orders` 路由限流 | 2／5 req/s（stage `RouteSettings`） | 10／20 req/s |
+| Lambda | `brewline-dev-ordering-{create-order,list-orders,get-order}`，保留併發 5 | 保留併發 10 |
+| 函數角色 | `brewline-dev-orders-{create,list,get}`：**沒有任何 DynamoDB／KMS 權限**，只能 `sts:AssumeRole`＋`sts:TagSession` 租戶角色（§10.8） | 同左 |
+| 交易 | 一個 `TransactWriteItems`：`IDEMP#<key>`（TTL 24h）＋`ORDER#<ULID>`＋每個商品扣 `STOCK`；伺服器端定價（價格快照）；`PAID_MOCK` | 同左 |
+| 輸入上限 | 每筆 ≤ 25 個商品、每個 1–500 kg、商品不重複、body ≤ 16 KB | 同左 |
+| 測試商品 | `p-9001`（併發，10 kg）、`p-9002`（smoke，每次重設 100 kg）；**不設 `gsi1pk`** → 不在目錄 | 無 |
+| Smoke test | **41 項**（A1 的 18 項＋訂單 23 項） | 無 |
+
+- 回應：201 建立；200 同一個 key 重送（回原訂單）；422 同一個 key 不同內容；409 庫存不足（什麼都沒扣）；400 輸入錯誤／商品不存在；503 交易衝突或 throttle（同一個 key 重試）；別的租戶的訂單 → 404。
+- 費用：STS 免費；每筆訂單 6–54 WRU；smoke test 規模每月 < USD 0.1。帳號保留併發：Dev 新增 15、Prod 新增 30。
+
+已驗證（2026-11-13，commit `75ac24b`）：
+- **Dev smoke test 41/41 passed**：
+  - 正向：下單 201（`CREATED`／`PAID_MOCK`，金額 = 價格 × 數量）、重送 200 同一個 `order_id`、simulator 下單、列表與明細。
+  - 反向：沒 token 401、缺 key 400、數量 0 → 400、26 個商品 → 400、不存在的商品 400；同 key 不同內容 422；500 kg → 409 且**庫存仍為 97／3**；staff 下單與查詢 403；ID token 被拒；**租戶 B 讀 A 的訂單 404、B 的列表為空**。
+- `verify-api-stack.sh` Dev、Prod 全部 ✅：6 條路由、訂單 scope、路由限流（Dev 2／5、Prod 10／20）、6 個函數設定；HTTP 反向 `POST /orders`、`GET /orders` 沒 token、`POST /orders` 偽造 JWT → 401。
+- `verify-tenant-access.sh` Dev、Prod 各 **37 項全部 ✅**：原 19 項＋3 個呼叫端角色 × 6 項（存在、沒有 managed policy、**DynamoDB／KMS Allow = []**、`AssumeRole`／`TagSession` 租戶角色 allowed、直接讀表 implicitDeny）。
+- IAM 層的跨租戶探測與併發測試在 A2b-2（Dev）。
+
+教訓 / Lessons：
+- （2026-11-13）`CfnStage.routeSettings` 是 Json 型別，CDK 不會把 camelCase 轉成 PascalCase → 必須直接寫 `ThrottlingRateLimit`；單元測試在部署前發現。route key 必須先存在 → stage 依賴路由。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -576,11 +603,13 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-022 | 身分層：Cognito Essentials、scope 授權、`custom:tenant_id` | Accepted（2026-11-12） | pre token V2 群組→scope、tenant_id claim；MFA OPTIONAL＋TOTP；不開放註冊（§10.6） |
 | ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22 |
 | ADR-024 | 租戶隔離：STS session tag ＋ `LeadingKeys` 完全比對 | Accepted（2026-11-13） | 訂單函數（`brewline-<env>-orders-*`）帶 `tenant_id` 扮演 `brewline-<env>-tenant-access`；商品只能改庫存欄位；Scan 明確 Deny（§10.8） |
+| ADR-025 | 下單交易與冪等 | Accepted（2026-11-13） | 冪等記錄＋訂單＋扣庫存在同一個交易；sk `ORDER#<ULID>`；伺服器端定價；≤ 25 個商品、1–500 kg；路由限流（§10.9） |
 
 | 風險 | 內容 | L | I | 緩解 |
 |---|---|---|---|---|
 | RSK-014 | 無 WAF，惡意流量只能靠限流與預算控制；execute-api 網址可被直接呼叫 | M | L | ADR-020 的分層控制；前端上線時加 CloudFront＋WAF，評估關閉 execute-api 預設端點 |
 | RSK-015 | 撤銷的帳號在 access token 到期前（≤ 15 分）仍可呼叫 API；staff MFA 無法由 Cognito 強制 | M | M | Token **15 分鐘**（A2a，原 60 分）；部署後驗證偵測 staff 未設 TOTP；A2 起高風險操作在 Lambda 再查使用者狀態 |
+| RSK-016 | A3 之前已預留的庫存不會自動釋放；單筆最多預留 500 kg，可能佔滿某商品 | M | M | 不開放註冊；路由限流；staff 監看 reserved；A3 加入取消與逾時釋放 |
 | RSK-013 | 主要區域無 Macie，無法自動偵測 S3 中的個資 | L | L | 個資只存 DynamoDB；DATA-011/012 設計層預防；資料湖 DQ 檢查加入 Email／電話格式偵測 |
 
 ---
@@ -605,7 +634,9 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 02 §3 | Dev PITR 改為開啟（ADR-019） |
 | 02 §4 | CDK 結構改為 `infra/app/{bin,lib/stacks,lib/aspects,scripts,test}` |
 | 09 §3.1 | 加註：使用 `TableV2`；Streams 延後到有 consumer；GSI 依模組逐一新增 |
-| 03 §6 | GSI1 改為**多用途**（`gsi1pk`／`gsi1sk`）：商品 `CATALOG`／`PRODUCT#<id>`、訂單 `STATUS#<status>`／`<ts>`（ADR-018 修訂） |
+| 03 §6 | GSI1 改為**多用途**（`gsi1pk`／`gsi1sk`）：商品 `CATALOG`／`PRODUCT#<id>`、訂單 `STATUS#<status>`／`<created_at>#<order_id>`（ADR-018 修訂）；訂單 sk `ORDER#<ts>#<id>` → **`ORDER#<ULID>`**；新增冪等項目 `IDEMP#<key>`（ADR-025） |
+| 03 §3 | ORD-F-004 不使用 Lambda Powertools Idempotency，改為同一交易內的冪等記錄（ADR-025） |
+| 03 §11 | 跨租戶存取回 **404**（不是 403），證據為應用層日誌＋IAM 探測（A2 決策 D4），不依賴 CloudTrail 資料事件 |
 | 09 §5、11 §2 | KMS 輪替費用：第一、二次輪替各 +USD 1／月，每把上限 USD 3／月 |
 | 03 §10 | 「聯絡人欄位以 CMK 加密」釐清為表層級 SSE（已完成）＋欄位層級（A2 決定） |
 | 03 §10、09 §1.2 | API Gateway **HTTP API 不能直接掛 WAF**；登入／註冊限流改由 CloudFront 或 Cognito user pool WAF（A1 決定） |
@@ -646,7 +677,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 2026-11-14 | 確認 `Config.1` 重新評估後的剩餘原因；若只剩台北不支援的類型 → SUPPRESSED（備註引用 §2） |
 | ✅ 2026-11-13 | A2 決策：每租戶限流 → 只做路由限流並接受限制（D3）；聯絡人欄位層級加密 → 延到 A4（D5）；`LeadingKeys` 完全比對 → A2a 完成 |
 | ✅ 2026-11-13 | 訂貨 A2a：租戶存取角色、訂單 scope、token 15 分鐘，部署 Dev、Prod 並驗證（§10.6、§10.8，PR #20、#21） |
-| P1 | 下一步：訂貨模組 A2b（訂單 API：下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
+| ✅ 2026-11-13 | 訂貨 A2b-1：訂單 API 部署 Dev、Prod 並驗證（§10.9，PR #23） |
+| P1 | 下一步：訂貨模組 A2b-2（Dev 併發測試＋IAM 跨租戶探測）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
