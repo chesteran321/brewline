@@ -35,7 +35,7 @@ check "Trust caller pattern" "$(jq -r '[.Statement[].Condition.ArnLike["aws:Prin
   "arn:aws:iam::${account}:role/brewline-${env_name}-orders-*"
 check "Trust tag length pattern" "$(jq -r '[.Statement[].Condition.StringLike["aws:RequestTag/tenant_id"]] | unique | .[]' <<<"$trust")" \
   "t_??????????????????????????"
-check "Trust allowed tag keys" "$(jq -c '[.Statement[].Condition["ForAllValues:StringEquals"]["aws:TagKeys"]] | unique | .[]' <<<"$trust")" '["tenant_id"]'
+check "Trust allowed tag keys" "$(jq -c '[.Statement[].Condition["ForAllValues:StringEquals"]["aws:TagKeys"] | [.] | flatten] | unique | .[]' <<<"$trust")" '["tenant_id"]'
 
 # --- 政策模擬 / Policy simulation ---
 A=t_01AAAAAAAAAAAAAAAAAAAAAAAA      # 租戶 A / tenant A
