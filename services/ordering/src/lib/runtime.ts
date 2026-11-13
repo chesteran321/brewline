@@ -4,6 +4,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { STSClient } from '@aws-sdk/client-sts';
 import { CatalogRepo } from './catalog-repo';
+import { AdminOrderRepo } from './admin-order-repo';
 import { OrderRepo } from './order-repo';
 import { TenantCredentials } from './tenant-credentials';
 
@@ -70,4 +71,22 @@ export function orderRepo(): OrderRepo {
 /** 測試用 / For tests. */
 export function setOrderRepoForTesting(r: OrderRepo | undefined): void {
   orders = r;
+}
+
+let admin: AdminOrderRepo | undefined;
+
+/** staff 用：函數自己的角色（跨租戶、受 IAM 限制）/ Staff repo using the function's own role. */
+export function adminOrderRepo(): AdminOrderRepo {
+  admin ??= new AdminOrderRepo(
+    DynamoDBDocumentClient.from(tracer.captureAWSv3Client(new DynamoDBClient({})), {
+      marshallOptions: { removeUndefinedValues: true },
+    }),
+    requiredEnv('TABLE_NAME'),
+    requiredEnv('GSI1_NAME'),
+  );
+  return admin;
+}
+
+export function setAdminOrderRepoForTesting(r: AdminOrderRepo | undefined): void {
+  admin = r;
 }

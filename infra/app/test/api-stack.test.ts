@@ -46,12 +46,18 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   const { app, stack, template } = buildApp(envName);
   const cfg = ENVIRONMENTS[envName];
 
-  test('HTTP API with six routes, all JWT + scope', () => {
+  test('HTTP API with nine routes, all JWT + scope', () => {
     template.resourceCountIs('AWS::ApiGatewayV2::Api', 1);
     const routes = Object.fromEntries(resources(template, 'AWS::ApiGatewayV2::Route').map(([, r]) => [r.Properties.RouteKey, r.Properties]));
     expect(Object.keys(routes).sort()).toEqual([
-      'GET /admin/products/{id}/stock', 'GET /orders', 'GET /orders/{id}', 'GET /products', 'GET /products/{id}', 'POST /orders',
+      'GET /admin/orders', 'GET /admin/products/{id}/stock', 'GET /admin/tenants/{tenantId}/orders/{orderId}',
+      'GET /orders', 'GET /orders/{id}', 'GET /products', 'GET /products/{id}',
+      'PATCH /admin/tenants/{tenantId}/orders/{orderId}', 'POST /orders',
     ]);
+    // staff 端點只接受 admin scope / Staff endpoints need the admin scope.
+    for (const k of ['GET /admin/orders', 'GET /admin/tenants/{tenantId}/orders/{orderId}', 'PATCH /admin/tenants/{tenantId}/orders/{orderId}']) {
+      expect(routes[k]).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/admin'] });
+    }
     expect(routes['POST /orders']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/orders.write'] });
     expect(routes['GET /orders']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/orders.read'] });
     expect(routes['GET /orders/{id}']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/orders.read'] });
@@ -145,6 +151,34 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
     }
   });
 
+  test('staff order functions (A3c): never orders-* roles; tenant keys, status index, stock attributes only', () => {
+    for (const name of ['admin-list-orders', 'admin-get-order', 'admin-update-order']) {
+      const fnName = `brewline-${envName}-ordering-${name}`;
+      const [[, fn]] = resources(template, 'AWS::Lambda::Function').filter(([, r]) => r.Properties.FunctionName === fnName) as [[string, Res]];
+      const roleId = fn.Properties.Role['Fn::GetAtt'][0];
+      // 反向：角色名稱不是 orders-*（無法扮演租戶角色）/ Negative: cannot assume the tenant role.
+      expect(template.toJSON().Resources[roleId].Properties.RoleName).toBeUndefined();
+      const st = statementsFor(template, fnName);
+      expect(st.flatMap((x) => [].concat(x.Action))).not.toContain('sts:AssumeRole');
+      expect(st).toContainEqual(expect.objectContaining({ Sid: 'DenyScan', Effect: 'Deny' }));
+    }
+    const list = statementsFor(template, `brewline-${envName}-ordering-admin-list-orders`);
+    expect(list.find((x) => x.Sid === 'QueryStatusIndex')).toMatchObject({
+      Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['STATUS#*'] } },
+    });
+    const upd = statementsFor(template, `brewline-${envName}-ordering-admin-update-order`);
+    expect(upd.find((x) => x.Sid === 'TransitionTenantOrder')).toMatchObject({
+      Action: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+      Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['TENANT#*'] } },
+    });
+    expect(upd.find((x) => x.Sid === 'AdjustStockOnly').Condition['ForAllValues:StringEquals']['dynamodb:Attributes']).toEqual([
+      'pk', 'sk', 'available_kg', 'reserved_kg', 'version', 'updated_at',
+    ]);
+    // 反向：沒有 Put／Delete／Batch（建不了、刪不了訂單）/ Negative: cannot create or delete items.
+    const acts = upd.filter((x) => x.Effect === 'Allow').flatMap((x) => [].concat(x.Action)) as string[];
+    expect(acts.filter((a) => /dynamodb:(Put|Delete|Batch)/.test(a))).toEqual([]);
+  });
+
   test('order tests (A2b-2): Dev only, orders-tests role, fixture access limited to exact test keys', () => {
     const fns = resources(template, 'AWS::Lambda::Function').filter(([, r]) => r.Properties.FunctionName === `brewline-${envName}-ordering-order-tests`);
     if (!cfg.api.orderTests) {
@@ -198,7 +232,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
       expect(s.Properties).toMatchObject({ ProductId: 'p-0001', OrderProductId: 'p-9002', Commit: 'abc1234' });
       expect(s.DependsOn).toEqual(expect.arrayContaining(['CatalogSeed']));
       expect(s.DependsOn!.some((d) => d.startsWith('DefaultStage'))).toBe(true);
-      expect(s.DependsOn!.filter((d) => /^HttpApi(GET|POST)/.test(d) && !d.includes('Integration'))).toHaveLength(6);
+      expect(s.DependsOn!.filter((d) => /^HttpApi(GET|POST|PATCH)/.test(d) && !d.includes('Integration'))).toHaveLength(9);
       // 只能管理這個 pool 的使用者 / User management limited to this pool.
       const st = statementsFor(template, `brewline-${envName}-ordering-smoke-a1`);
       const cognito = st.find((x) => x.Sid === 'ManageThrowawayUsers');
@@ -223,7 +257,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   test('all first-party Lambdas follow the standard; provider framework functions are explicitly exempt', () => {
     const fns = resources(template, 'AWS::Lambda::Function');
     const ours = fns.filter(([, r]) => String(r.Properties.FunctionName ?? '').startsWith(`brewline-${envName}-`));
-    expect(ours).toHaveLength(7 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
+    expect(ours).toHaveLength(10 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
     for (const [, r] of ours) {
       expect(r.Properties).toMatchObject({ Runtime: 'nodejs24.x', Architectures: ['arm64'], TracingConfig: { Mode: 'Active' } });
     }

@@ -102,16 +102,16 @@ async function call(
   cfg: Config,
   path: string,
   token?: string,
-  post?: { body: unknown; key?: string },
+  post?: { body: unknown; key?: string; method?: 'POST' | 'PATCH' },
 ): Promise<{ status: number; body: any }> {
   const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
   if (post) {
-    await new Promise((r) => setTimeout(r, POST_GAP_MS));
+    if ((post.method ?? 'POST') === 'POST') await new Promise((r) => setTimeout(r, POST_GAP_MS));
     headers['content-type'] = 'application/json';
     if (post.key) headers['idempotency-key'] = post.key;
   }
   const res = await fetch(new URL(path, cfg.apiUrl), {
-    method: post ? 'POST' : 'GET',
+    method: post ? (post.method ?? 'POST') : 'GET',
     headers,
     body: post ? JSON.stringify(post.body) : undefined,
     signal: AbortSignal.timeout(10_000),
@@ -192,7 +192,10 @@ export async function runChecks(cfg: Config, tokens: Record<Role, Tokens>): Prom
   expect('staff access token has admin scope', String(staff.scope).includes('brewline/admin'), String(staff.scope));
   expect('staff access token has no tenant_id', staff.tenant_id === undefined, String(staff.tenant_id));
 
-  checks.push(...(await orderChecks(cfg, tokens)));
+  const orders = await orderChecks(cfg, tokens);
+  checks.push(...orders.checks);
+  if (orders.orderId && orders.simOrderId) checks.push(...(await adminChecks(cfg, tokens, orders.orderId, orders.simOrderId)));
+  else checks.push({ name: 'admin checks need both smoke orders', ok: false, detail: 'missing order ids' });
   return checks;
 }
 
@@ -200,7 +203,10 @@ export async function runChecks(cfg: Config, tokens: Record<Role, Tokens>): Prom
  * A2 訂單檢查（ADR-025）。使用 Dev 測試商品，開始前庫存已重設為 SMOKE_STOCK_KG。
  * A2 order checks against the Dev test product, whose stock was reset to SMOKE_STOCK_KG.
  */
-export async function orderChecks(cfg: Config, tokens: Record<Role, Tokens>): Promise<Check[]> {
+export async function orderChecks(
+  cfg: Config,
+  tokens: Record<Role, Tokens>,
+): Promise<{ checks: Check[]; orderId?: string; simOrderId?: string }> {
   const checks: Check[] = [];
   const expect = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
   const p = cfg.orderProductId;
@@ -274,6 +280,81 @@ export async function orderChecks(cfg: Config, tokens: Record<Role, Tokens>): Pr
   const staff = decodeClaims(tokens.staff.access);
   expect('cafe token has orders.write', String(cafe.scope).includes('brewline/orders.write'), String(cafe.scope));
   expect('staff token has no orders scope', !String(staff.scope).includes('brewline/orders.'), String(staff.scope));
+  return { checks, orderId, simOrderId };
+}
+
+/**
+ * A3c staff 狀態轉換（ADR-027）。進入時：cafe 訂單 3 kg（CREATED）、simulator 訂單 2 kg（CREATED），
+ * 測試商品庫存 available 95／reserved 5。
+ * Staff transitions. On entry: cafe order 3 kg and simulator order 2 kg, both CREATED; stock 95/5.
+ */
+export async function adminChecks(cfg: Config, tokens: Record<Role, Tokens>, orderId: string, simOrderId: string): Promise<Check[]> {
+  const checks: Check[] = [];
+  const expect = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
+  const path = (id: string) => `/admin/tenants/${TENANT_ID}/orders/${id}`;
+  const patch = (id: string, status: string, token = tokens.staff.access) =>
+    call(cfg, path(id), token, { body: { status }, method: 'PATCH' });
+  const stock = async () => (await call(cfg, `/admin/products/${cfg.orderProductId}/stock`, tokens.staff.access)).body;
+
+  // --- 反向：授權與輸入 / Negative: authorization and input ---
+  let r = await patch(orderId, 'CONFIRMED', tokens.cafe.access);
+  expect('cafe PATCH admin order → 403', r.status === 403, `got ${r.status}`);
+  r = await call(cfg, path(orderId), undefined, { body: { status: 'CONFIRMED' }, method: 'PATCH' });
+  expect('PATCH without token → 401', r.status === 401, `got ${r.status}`);
+  r = await patch(orderId, 'LOST');
+  expect('unknown status → 400', r.status === 400, `got ${r.status}`);
+  r = await patch(orderId, 'SHIPPED');
+  expect('skip CREATED → SHIPPED → 409 with allowed list', r.status === 409 && Array.isArray(r.body?.error?.allowed), `got ${r.status}`);
+  r = await call(cfg, `/admin/tenants/${TENANT_B_ID}/orders/${orderId}`, tokens.staff.access);
+  expect('wrong tenant in path → 404', r.status === 404, `got ${r.status}`);
+
+  // --- 正向：staff 列表與明細 / Positive: staff list and detail ---
+  r = await call(cfg, '/admin/orders?status=CREATED&limit=50', tokens.staff.access);
+  const listed = Array.isArray(r.body?.items) ? r.body.items : [];
+  expect(
+    'staff GET /admin/orders?status=CREATED lists smoke orders with tenant_id',
+    r.status === 200 && listed.some((o: any) => o.order_id === orderId && o.tenant_id === TENANT_ID),
+    `items ${listed.length}`,
+  );
+  r = await call(cfg, '/admin/orders', tokens.cafe.access);
+  expect('cafe GET /admin/orders → 403', r.status === 403, `got ${r.status}`);
+
+  // --- 正向：完整流程與庫存 / Positive: full lifecycle and stock ---
+  let ok = true;
+  for (const s of ['CONFIRMED', 'ROASTING_SCHEDULED', 'ROASTED']) {
+    r = await patch(orderId, s);
+    ok &&= r.status === 200 && r.body?.status === s;
+  }
+  expect('CREATED → CONFIRMED → ROASTING_SCHEDULED → ROASTED', ok, `last ${r.status} ${r.body?.status}`);
+  r = await patch(orderId, 'CANCELLED');
+  expect('cancel after roasting is scheduled → 409', r.status === 409, `got ${r.status}`);
+  r = await patch(orderId, 'SHIPPED');
+  let st = await stock();
+  expect('SHIPPED consumes the reservation: 95/2', r.status === 200 && st?.available_kg === 95 && st?.reserved_kg === 2, `available ${st?.available_kg}, reserved ${st?.reserved_kg}`);
+  r = await patch(orderId, 'COMPLETED');
+  expect('SHIPPED → COMPLETED', r.status === 200 && r.body?.status === 'COMPLETED', `got ${r.status}`);
+  r = await patch(simOrderId, 'CANCELLED');
+  st = await stock();
+  expect('CANCELLED releases the reservation: 97/0', r.status === 200 && st?.available_kg === 97 && st?.reserved_kg === 0, `available ${st?.available_kg}, reserved ${st?.reserved_kg}`);
+  r = await patch(simOrderId, 'CANCELLED');
+  expect('cancel twice → 409 (no double release)', r.status === 409, `got ${r.status}`);
+  st = await stock();
+  expect('stock unchanged after the rejected cancel', st?.available_kg === 97 && st?.reserved_kg === 0, `available ${st?.available_kg}`);
+
+  // --- 咖啡廳看到的結果 / What the café sees ---
+  r = await call(cfg, `/orders/${orderId}`, tokens.cafe.access);
+  const hist = Array.isArray(r.body?.status_history) ? r.body.status_history : [];
+  expect(
+    'cafe sees COMPLETED with 5 history entries, without staff identity',
+    r.status === 200 && r.body?.status === 'COMPLETED' && hist.length === 5 && hist.every((h: any) => !('by' in h)),
+    `status ${r.body?.status}, history ${hist.length}`,
+  );
+  r = await call(cfg, path(orderId), tokens.staff.access);
+  expect(
+    'staff detail shows who changed it',
+    r.status === 200 && (r.body?.status_history ?? []).every((h: any) => typeof h.by === 'string' && h.by.startsWith('staff:')),
+    `got ${r.status}`,
+  );
   return checks;
 }
 

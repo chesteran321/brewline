@@ -153,6 +153,43 @@ export class ApiStack extends Stack {
     const listOrders = orderFn('ListOrders', 'list-orders', 'list', "GET /orders: own tenant's orders, newest first");
     const getOrder = orderFn('GetOrder', 'get-order', 'get', "GET /orders/{id}: own tenant's order");
 
+    // --- 3c) staff 訂單函數（A3c，ADR-027）/ Staff order functions ---
+    // 跨租戶，但**不扮演租戶角色**（角色名稱由 CloudFormation 產生，不符合 orders-*，信任政策不接受）。
+    // Cross-tenant, but they never assume the tenant role (generated role names do not match orders-*).
+    const tenantKeys = { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['TENANT#*'] } };
+    const statusIndexOnly = { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['STATUS#*'] } };
+    const adminList = fn('AdminListOrders', 'admin-list-orders', 'ordering/src/handlers/admin-list-orders.ts',
+      'GET /admin/orders?status=: all tenants, by status (GSI1)', [
+        new iam.PolicyStatement({ sid: 'QueryStatusIndex', actions: ['dynamodb:Query'], resources: [gsi1Arn], conditions: statusIndexOnly }),
+      ]);
+    const adminGet = fn('AdminGetOrder', 'admin-get-order', 'ordering/src/handlers/admin-get-order.ts',
+      'GET /admin/tenants/{tenantId}/orders/{orderId}: order detail with history', [
+        new iam.PolicyStatement({ sid: 'GetTenantOrder', actions: ['dynamodb:GetItem'], resources: [tableArn], conditions: tenantKeys }),
+      ]);
+    const adminUpdate = fn('AdminUpdateOrder', 'admin-update-order', 'ordering/src/handlers/admin-update-order.ts',
+      'PATCH /admin/tenants/{tenantId}/orders/{orderId}: status transition + stock in one transaction', [
+        new iam.PolicyStatement({
+          sid: 'TransitionTenantOrder',
+          actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+          resources: [tableArn],
+          conditions: tenantKeys,
+        }),
+        // 商品只能動庫存欄位（與租戶角色相同）→ 改不了價格 / Stock attributes only, like the tenant role.
+        new iam.PolicyStatement({
+          sid: 'AdjustStockOnly',
+          actions: ['dynamodb:UpdateItem'],
+          resources: [tableArn],
+          conditions: {
+            ...productKeysOnly,
+            'ForAllValues:StringEquals': {
+              'dynamodb:Attributes': ['pk', 'sk', 'available_kg', 'reserved_kg', 'version', 'updated_at'],
+            },
+            StringEqualsIfExists: { 'dynamodb:ReturnValues': ['NONE', 'UPDATED_NEW', 'UPDATED_OLD'] },
+          },
+        }),
+        kmsViaDynamo(['kms:Encrypt', 'kms:GenerateDataKey']),
+      ]);
+
     // --- 4) HTTP API ---
     this.httpApi = new apigwv2.HttpApi(this, 'HttpApi', {
       apiName: `brewline-${envName}-api`,
@@ -206,6 +243,9 @@ export class ApiStack extends Stack {
       [apigwv2.HttpMethod.POST, '/orders', createOrder, SCOPES.ordersWrite],
       [apigwv2.HttpMethod.GET, '/orders', listOrders, SCOPES.ordersRead],
       [apigwv2.HttpMethod.GET, '/orders/{id}', getOrder, SCOPES.ordersRead],
+      [apigwv2.HttpMethod.GET, '/admin/orders', adminList, SCOPES.admin],
+      [apigwv2.HttpMethod.GET, '/admin/tenants/{tenantId}/orders/{orderId}', adminGet, SCOPES.admin],
+      [apigwv2.HttpMethod.PATCH, '/admin/tenants/{tenantId}/orders/{orderId}', adminUpdate, SCOPES.admin],
     ];
     const routeConstructs: Construct[] = [];
     for (const [method, routePath, f, scope] of routes) {
@@ -383,7 +423,9 @@ export class ApiStack extends Stack {
     new CfnOutput(this, 'TenantAccessRoleArn', { value: this.tenantAccess.role.roleArn });
     new CfnOutput(this, 'ApiId', { value: this.httpApi.apiId });
     new CfnOutput(this, 'FunctionNames', {
-      value: [listProducts, getProduct, getStock, createOrder, listOrders, getOrder].map((f) => f.function.functionName).join(','),
+      value: [listProducts, getProduct, getStock, createOrder, listOrders, getOrder, adminList, adminGet, adminUpdate]
+        .map((f) => f.function.functionName)
+        .join(','),
     });
   }
 

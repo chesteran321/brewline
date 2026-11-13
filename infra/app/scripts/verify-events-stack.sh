@@ -95,6 +95,9 @@ if [[ "$want_orders" == true ]]; then
     sleep 10
   done
   check "Smoke-test OrderCreated events (last hour) ≥ 1" "$([[ "$created" =~ ^[0-9]+$ && "$created" -ge 1 ]] && echo true || echo "false ($created)")" "true"
+  # A3c：smoke test 由 staff 推進訂單狀態 → OrderStatusChanged / The smoke test walks an order through its lifecycle.
+  changed=$(count '{ ($.detail-type = "OrderStatusChanged") && ($.detail.status = "COMPLETED") && ($.detail.tenant_id = "t_01SMKTEST000000000000000A1") }')
+  check "Smoke-test OrderStatusChanged → COMPLETED (last hour) ≥ 1" "$([[ "$changed" =~ ^[0-9]+$ && "$changed" -ge 1 ]] && echo true || echo "false ($changed)")" "true"
   check "Events with source brewline.ordering" "$( n=$(count '{ $.source = "brewline.ordering" }'); [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 ]] && echo true || echo "false ($n)")" "true"
 fi
 # 反向：事件 detail 不可含使用者 sub、鍵、冪等鍵 / Negative: no user sub, keys or idempotency key in details.
