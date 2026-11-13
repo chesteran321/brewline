@@ -48,6 +48,9 @@
   - ❌ Macie 不提供 → 不啟用（RSK-013）
   - ❌ CloudShell 不提供 → 操作時在東京開 CloudShell，指令一律加 `--region ap-east-2`
   - ❌ Security Hub CSPM 的 finding aggregator 不支援 → 不能用中央組態（ADR-015）
+  - ❌ AWS Config **無法記錄全域 IAM 類型**（`AWS::IAM::Role`／`Policy`／`User`／`Group`）：只有 2022 年 2 月前已提供 Config 的區域可以（AWS 文件明載，2026-11-13 實測 0 筆）
+  - ❌ AWS Config 實測**未記錄 `AWS::ApiGatewayV2::Api`／`Stage`**（自 11-09 列入記錄清單，API 已存在仍為 0 筆；CSPM `APIGateway.9` 為「無資料 0/0」）→ 推論台北不支援此類型
+  - ⚠️ `put-configuration-recorder` 對不支援的類型**不會報錯**，只是不記錄 → 新增類型後一律用 `list-discovered-resources` 逐一確認
   - ✅ 已確認可用：Lambda、API Gateway、DynamoDB、Step Functions、EventBridge、Scheduler、SQS、SNS、SES、Cognito、S3、Firehose、Glue、Athena、SSM、KMS、X-Ray、CloudWatch、CodeDeploy、CloudFormation、Bedrock（模型清單需另查）、GuardDuty、Security Hub、Config、CloudTrail、Access Analyzer
 
 ---
@@ -300,10 +303,17 @@
 | brewline-dev | ✅ | DAILY | ap-east-2 |
 | brewline-security、Management | ❌ | — | — |
 
-- 記錄類型（8 種，`INCLUSION_BY_RESOURCE_TYPES`）：`AWS::IAM::Role`、`AWS::IAM::Policy`、`AWS::S3::Bucket`、`AWS::KMS::Key`、`AWS::Lambda::Function`、`AWS::DynamoDB::Table`、`AWS::ApiGatewayV2::Api`、`AWS::ApiGatewayV2::Stage`
+- 記錄類型（`INCLUSION_BY_RESOURCE_TYPES`）：
+  - **Dev：8 種**：`AWS::IAM::Role`、`AWS::IAM::Policy`、`AWS::S3::Bucket`、`AWS::KMS::Key`、`AWS::Lambda::Function`、`AWS::DynamoDB::Table`、`AWS::ApiGatewayV2::Api`、`AWS::ApiGatewayV2::Stage`
+  - **Prod：57 種**（2026-11-13）：上述 8 種 ＋ CSPM `Config.1` 要求的 49 種（EC2 VPC／Subnet／SecurityGroup／NetworkAcl／Instance…、CloudFormation::Stack、Cognito::UserPool、Events::EventBus、Athena::WorkGroup、StepFunctions::StateMachine、SNS::Topic、SecretsManager::Secret、ACM::Certificate、RDS／ECS／EFS／ELB／MSK 等）。原因：`Config.1`（CRITICAL）要求記錄所有啟用中控制項需要的類型；缺少時對應控制項只能顯示「不明」。
+  - **實際記錄到（Prod，2026-11-13 10:54）**：VPC 1、Subnet 3、SecurityGroup 1、NetworkAcl 1（預設 VPC）、CloudFormation::Stack 5、Cognito::UserPool 1、Events::EventBus 1、Athena::WorkGroup 1、Lambda::Function 6；**IAM::Role 0、ApiGatewayV2::Api／Stage 0**（台北限制，見 §2）；RDS 等 0（無資源）。
+  - 費用：Config 按**記錄到的設定項目**收費，沒有資源的類型為 0 元。新增 14 個資源 ≈ USD 0.04（一次）；之後主要是每次部署的 stack 變更 ≈ USD 0.4／月。
+  - 變更方式：Prod Admin，`describe-configuration-recorders` 備份 → `jq` 只合併 `resourceTypes` → `diff` 確認其他欄位不變 → `put-configuration-recorder`（整份覆寫）。`scp-baseline` 刻意允許 `PutConfigurationRecorder`（§4.1）。
 - 使用服務連結角色 `AWSServiceRoleForConfig`；保留期 365 天；快照每 24 小時。
 - 交付到 `brewline-security-config-978684888186`（Security 帳號；版本控制；無 Object Lock；目前版本 365 天過期、非目前版本 30 天）。Bucket policy 以 `aws:SourceAccount` 允許 062868712468、610935435571。
 - **缺口**：CloudFront 設定只記錄在 us-east-1 的 Config，本專案未記錄 → 改由 CDK + cdk-nag 部署前檢查。
+- **缺口（2026-11-13）**：台北無法記錄 IAM 與 ApiGatewayV2 → IAM 變更由 CloudTrail 管理事件留存（無 Config 時間軸）；HTTP API 的 access log 與授權由 `ApiGuardrailsChecker`（部署前）＋`verify-api-stack.sh`（部署後）確認。可選：之後在 us-east-1 另開只記錄 IAM 的 recorder（需評估費用）。
+- `get-discovered-resource-counts` 是定期彙總、會落後；確認某類型有無記錄用 `list-discovered-resources --resource-type`。
 - CLI 注意：`recordingMode` 要寫在 `--configuration-recorder` 的 JSON 內，不是獨立參數。
 
 ---
@@ -322,6 +332,18 @@
 
 - 不用 CIS：帳號基線項目已由 SCP、Identity Center 以預防性控制達成；FSBP 涵蓋本專案實際使用的 Serverless 服務。
 - 試用期：2026-11-09 起 30 天。
+
+已處理的 finding（Prod，2026-11-13）：
+
+| 控制項 | 狀態 | 處理 |
+|---|---|---|
+| `Config.1`（CRITICAL） | FAILED：`CONFIG_RECORDER_MISSING_REQUIRED_RESOURCE_TYPES`（49 種） | recorder 加入 49 種（§8）。預期仍會因 IAM、ApiGatewayV2 在台北無法記錄而失敗 → 等週期性重新評估（≤ 24 h）後確認剩餘原因；若只剩台北不支援的類型，改為 SUPPRESSED 並註明 §2 |
+| `Cognito.1`（中） | 原為「不明」（Config 未記錄 UserPool）→ 加入記錄類型後**數分鐘內**變成 FAILED | **SUPPRESSED**（`batch-update-findings`，備註引用 ADR-022：Plus 方案無免費額度；以不開放註冊、強密碼、JWT＋scope、限流緩解） |
+| `APIGateway.9`（中） | 「無資料」0/0（Config 不記錄 ApiGatewayV2） | 不處理；由 `ApiGuardrailsChecker`＋驗證腳本 `Stage access logs = true` 涵蓋（同 `KMS.4` 的作法） |
+
+- 控制項頁面的「不明」＝有資源但缺資料（WARNING）；「無資料」＝CSPM 看不到任何資源。
+- 「已隱藏」只改**工作流程狀態**，合規狀態仍為 FAILED；資源設定再變動時，同一筆 finding 會更新並保留 SUPPRESSED。
+- CLI：`--note` 的文字含逗號時不可用簡寫語法（會被切成 list）→ 用 `jq -n` 產生 JSON。
 
 ---
 
@@ -595,7 +617,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-12 | Node 24（PR #12，ADR-023）；訂貨 A1a：GSI1 部署 Dev、Prod 並驗證（§10.5，PR #13、#16） |
 | ✅ 2026-11-13 | Lambda 併發配額：Dev、Prod 原為 **10**（新帳號預設），2026-11-12 申請 1000（Service Quotas `L-B99A9384`）→ 轉 Support 案件（`CASE_OPENED`）→ 2026-11-13 `CASE_CLOSED`，`get-account-settings` 實際值 **1000／Unreserved 1000**（兩個帳號）。A1b、A1c 需求 Dev ≥ 122、Prod ≥ 141 |
 | ✅ 2026-11-13 | 訂貨 A1b 身分層（§10.6，PR #14）、A1c 商品唯讀 API（§10.7，PR #15、#18）部署 Dev、Prod 並驗證 |
-| 盡快 | Prod Security Hub CSPM：確認 `Cognito.1`（威脅防護）失敗並標記為已接受（ADR-022）；查看 `APIGateway.9`（HTTP API access log） |
+| ✅ 2026-11-13 | Prod Config 記錄類型 8 → 57（`Config.1` 要求）；`Cognito.1` SUPPRESSED（ADR-022）；發現台北 Config 無法記錄 IAM、ApiGatewayV2（§2、§8、§9） |
+| 2026-11-14 | 確認 `Config.1` 重新評估後的剩餘原因；若只剩台北不支援的類型 → SUPPRESSED（備註引用 §2） |
 | A2 前 | ORD-N-003 每租戶限流做法；聯絡人欄位層級加密；`LeadingKeys` 改完全比對 |
 | P1 | 下一步：訂貨模組 A2（下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
@@ -615,6 +638,9 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 反向測試用「不存在的資源」只適用於**先授權、後查資源**的服務（DynamoDB、IAM 是）。**KMS 會先找金鑰（要評估 key policy）**，不存在就回 `NotFoundException`，測不到 IAM Deny；這類情況改用 `aws iam simulate-principal-policy`（只計算 IAM 政策，不執行動作，不含 SCP／RCP／key policy）。
 - Identity Center 建立的角色路徑含區域：`/aws-reserved/sso.amazonaws.com/ap-east-2/`；查 ARN 用 `aws iam list-roles --path-prefix /aws-reserved/`，不要手打。
 - 許可集要能用 CloudShell，需另加 `AWSCloudShellFullAccess`（ViewOnlyAccess 不含）。
+- CloudShell 一開始先 `export AWS_PAGER=""`：否則長輸出會進入 `less`，之後貼上的指令會被當成分頁器按鍵。
+- 貼上多行指令時，`\` 結尾的下一行若是註解，指令會在那裡結束、後面參數被吃掉（2026-11-13：第一次隱藏 `Cognito.1` 沒有帶到備註）→ 一次貼一個完整指令，並用查詢驗證實際狀態。
+- Security Hub 的「資源 ID」是完整 ARN（例如 user pool 是 `…:userpool/<pool-id>`，不含名稱）；篩選控制項用「安全控制 ID」，或直接從「控制項」頁面搜尋。
 - `scp-budget-lockdown` 平時必須沒有任何目標。
 - 帳號層級的查詢（例如 `lambda:GetAccountSettings`，Resource 只能是 `*`）不在 Developer 許可集內 → 用 Admin（2026-11-12 實測 `no identity-based policy allows`）。
 - Service Quotas 是**每帳號、每區域**：申請一律加 `--region ap-east-2`。狀態 `CASE_OPENED` 代表轉為人工審核的 Support 案件，到該帳號的 Support Center 查看並回覆；結案後狀態是 `CASE_CLOSED`（不會顯示 `APPROVED`），**是否核准以 `aws lambda get-account-settings` 的實際值為準**（2026-11-13 實測，隔夜完成）。
