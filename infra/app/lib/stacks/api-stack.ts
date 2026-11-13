@@ -29,9 +29,13 @@ export interface ApiStackProps extends StackProps {
 
 /** Smoke test 使用的商品（必須存在於 seed/products.json）/ Product used by the smoke test. */
 const SMOKE_PRODUCT_ID = 'p-0001';
+/** Smoke test 下單用的 Dev 測試商品（seed/test-products.json）/ Dev test product the smoke test orders. */
+const SMOKE_ORDER_PRODUCT_ID = 'p-9002';
+/** Smoke test 的固定測試租戶（services/ordering/src/custom-resources/smoke-test.ts）/ Fixed smoke-test tenants. */
+const SMOKE_TENANTS = ['t_01SMKTEST000000000000000A1', 't_01SMKTEST000000000000000B1'];
 
 /**
- * 訂貨 API（A1：商品唯讀）。HTTP API ＋ Cognito JWT authorizer，以 scope 授權（ADR-021、ADR-022）。
+ * 訂貨 API（A1：商品唯讀；A2：訂單，ADR-025）。HTTP API ＋ Cognito JWT authorizer，以 scope 授權（ADR-021、ADR-022）。
  * Ordering API (A1: read-only catalog). HTTP API with a Cognito JWT authorizer and scope-based authorization.
  *
  * 不掛 WAF（ADR-020）：錢包阻斷防護靠 JWT（未登入在 Gateway 擋下）、stage 限流、Lambda 保留併發、
@@ -116,10 +120,40 @@ export class ApiStack extends Stack {
         new iam.PolicyStatement({ sid: 'GetStock', actions: ['dynamodb:GetItem'], resources: [tableArn], conditions: productKeysOnly }),
       ]);
 
+    // --- 3b) 訂單函數（A2，ADR-024／025）/ Order functions ---
+    // 角色名稱必須是 brewline-<env>-orders-*（租戶角色的信任政策）。函數角色本身**沒有任何 DynamoDB／KMS 權限**，
+    // 只能扮演租戶角色取得 TENANT#<自己> 範圍的憑證。
+    // Role names must match brewline-<env>-orders-* (the tenant role's trust policy). The function roles have NO
+    // DynamoDB/KMS permissions; they can only assume the tenant role for TENANT#<own>-scoped credentials.
+    const orderFn = (fid: string, name: string, roleSuffix: string, description: string) => {
+      const f = new BrewlineFunction(this, fid, {
+        envName,
+        lambda: props.lambda,
+        module: 'ordering',
+        name,
+        entry: `ordering/src/handlers/${name}.ts`,
+        description,
+        reservedConcurrency: props.lambda.reservedConcurrency.api,
+        roleName: `${TenantAccessRole.callerRolePrefix(envName)}${roleSuffix}`,
+        environment: {
+          TABLE_NAME: tableName,
+          TENANT_ROLE_ARN: this.tenantAccess.role.roleArn,
+          POWERTOOLS_SERVICE_NAME: `ordering-${name}`,
+          POWERTOOLS_TRACER_CAPTURE_RESPONSE: 'false',
+        },
+      });
+      this.tenantAccess.grantAssume(f.role);
+      return f;
+    };
+    const createOrder = orderFn('CreateOrder', 'create-order', 'create',
+      'POST /orders: idempotent order, reserves stock in one transaction (tenant-scoped credentials)');
+    const listOrders = orderFn('ListOrders', 'list-orders', 'list', "GET /orders: own tenant's orders, newest first");
+    const getOrder = orderFn('GetOrder', 'get-order', 'get', "GET /orders/{id}: own tenant's order");
+
     // --- 4) HTTP API ---
     this.httpApi = new apigwv2.HttpApi(this, 'HttpApi', {
       apiName: `brewline-${envName}-api`,
-      description: 'BrewLine ordering API (A1: read-only catalog)',
+      description: 'BrewLine ordering API (catalog + orders)',
       createDefaultStage: false,
       // A1 沒有前端 → 不開 CORS；之後經 CloudFront 同網域也不需要 / No CORS in A1.
     });
@@ -162,23 +196,39 @@ export class ApiStack extends Stack {
       identitySource: ['$request.header.Authorization'],
     });
 
-    const routes: Array<[string, BrewlineFunction, string]> = [
-      ['/products', listProducts, SCOPES.catalogRead],
-      ['/products/{id}', getProduct, SCOPES.catalogRead],
-      ['/admin/products/{id}/stock', getStock, SCOPES.admin],
+    const routes: Array<[apigwv2.HttpMethod, string, BrewlineFunction, string]> = [
+      [apigwv2.HttpMethod.GET, '/products', listProducts, SCOPES.catalogRead],
+      [apigwv2.HttpMethod.GET, '/products/{id}', getProduct, SCOPES.catalogRead],
+      [apigwv2.HttpMethod.GET, '/admin/products/{id}/stock', getStock, SCOPES.admin],
+      [apigwv2.HttpMethod.POST, '/orders', createOrder, SCOPES.ordersWrite],
+      [apigwv2.HttpMethod.GET, '/orders', listOrders, SCOPES.ordersRead],
+      [apigwv2.HttpMethod.GET, '/orders/{id}', getOrder, SCOPES.ordersRead],
     ];
     const routeConstructs: Construct[] = [];
-    for (const [routePath, f, scope] of routes) {
+    for (const [method, routePath, f, scope] of routes) {
       routeConstructs.push(
         ...this.httpApi.addRoutes({
           path: routePath,
-          methods: [apigwv2.HttpMethod.GET],
+          methods: [method],
           integration: new HttpLambdaIntegration(`${f.node.id}Integration`, f.function),
           authorizer,
           authorizationScopes: [scope],
         }),
       );
     }
+
+    // POST /orders 的路由限流（比 stage 預設更嚴；A2 決策 D3）。route key 必須已存在 → stage 依賴路由。
+    // Route-level throttle for POST /orders (stricter than the stage default). The route must exist first.
+    const cfnStage = stage.node.defaultChild as apigwv2.CfnStage;
+    // RouteSettings 是 Json 型別：CDK 不會轉換鍵名 → 必須直接用 CloudFormation 的 PascalCase。
+    // RouteSettings is typed as Json, so CDK passes keys through as-is: use CloudFormation's PascalCase.
+    cfnStage.routeSettings = {
+      'POST /orders': {
+        ThrottlingRateLimit: props.api.orderThrottleRateLimit,
+        ThrottlingBurstLimit: props.api.orderThrottleBurstLimit,
+      },
+    };
+    stage.node.addDependency(...routeConstructs);
 
     // --- 5) 商品目錄種子 / Catalog seed ---
     const seedFn = new BrewlineFunction(this, 'SeedCatalog', {
@@ -203,8 +253,13 @@ export class ApiStack extends Stack {
       resourceType: 'Custom::BrewlineCatalogSeed',
       properties: {
         TableName: tableName,
+        // Dev 才寫入隱藏的測試商品 p-9xxx（ADR-025）/ Hidden p-9xxx test products in Dev only.
+        IncludeTestProducts: String(props.api.testProducts),
         // 種子檔變更時才觸發 Update / Update only when the seed file changes.
-        SeedHash: createHash('sha256').update(seedFile).digest('hex'),
+        SeedHash: createHash('sha256')
+          .update(seedFile)
+          .update(props.api.testProducts ? readFileSync(path.join(SERVICES_ROOT, 'ordering', 'seed', 'test-products.json')) : '')
+          .digest('hex'),
       },
     });
     new CfnOutput(this, 'SeededProducts', { value: seed.getAttString('Products') });
@@ -218,9 +273,9 @@ export class ApiStack extends Stack {
         module: 'ordering',
         name: 'smoke-a1',
         entry: 'ordering/src/custom-resources/smoke-test.ts',
-        description: 'Dev-only A1 smoke test: throwaway users call the real API on every deploy',
+        description: 'Dev-only smoke test: throwaway users call the real API on every deploy',
         reservedConcurrency: props.lambda.reservedConcurrency.customResource,
-        timeout: Duration.seconds(120),
+        timeout: Duration.seconds(180),
         environment: { POWERTOOLS_SERVICE_NAME: 'ordering-smoke-a1' },
       });
       smokeFn.role.addToPolicy(
@@ -237,6 +292,26 @@ export class ApiStack extends Stack {
           resources: [userPoolArn],
         }),
       );
+      // 測試夾具：重設 Dev 測試商品庫存、刪除固定測試租戶的項目（key 完全比對，不能碰其他資料）
+      // Fixture: reset the Dev test product's stock and delete the fixed test tenants' items (exact keys only).
+      smokeFn.role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'ResetTestProductStock',
+          actions: ['dynamodb:PutItem'],
+          resources: [tableArn],
+          conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': [`PRODUCT#${SMOKE_ORDER_PRODUCT_ID}`] } },
+        }),
+      );
+      smokeFn.role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'CleanTestTenants',
+          actions: ['dynamodb:Query', 'dynamodb:DeleteItem'],
+          resources: [tableArn],
+          conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': SMOKE_TENANTS.map((t) => `TENANT#${t}`) } },
+        }),
+      );
+      smokeFn.role.addToPolicy(denyScan);
+      smokeFn.role.addToPolicy(kmsViaDynamo(['kms:Decrypt', 'kms:Encrypt', 'kms:GenerateDataKey']));
       const smoke = new CustomResource(this, 'SmokeTestRun', {
         serviceToken: this.provider('SmokeProvider', smokeFn).serviceToken,
         resourceType: 'Custom::BrewlineSmokeTest',
@@ -245,6 +320,8 @@ export class ApiStack extends Stack {
           UserPoolId: param(`${authPrefix}/user-pool-id`),
           ClientId: smokeClientId,
           ProductId: SMOKE_PRODUCT_ID,
+          OrderProductId: SMOKE_ORDER_PRODUCT_ID,
+          TableName: tableName,
           Commit: props.commitSha, // 每次部署都不同 → 每次都執行 / changes every deploy → always runs
         },
       });
@@ -257,7 +334,7 @@ export class ApiStack extends Stack {
     new CfnOutput(this, 'TenantAccessRoleArn', { value: this.tenantAccess.role.roleArn });
     new CfnOutput(this, 'ApiId', { value: this.httpApi.apiId });
     new CfnOutput(this, 'FunctionNames', {
-      value: [listProducts, getProduct, getStock].map((f) => f.function.functionName).join(','),
+      value: [listProducts, getProduct, getStock, createOrder, listOrders, getOrder].map((f) => f.function.functionName).join(','),
     });
   }
 

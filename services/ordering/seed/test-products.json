@@ -1,0 +1,38 @@
+[
+  {
+    "id": "p-9001",
+    "name": "Test Lot Concurrency",
+    "name_zh": "測試批次（併發）",
+    "origin_country": "BR",
+    "region": "Test Region",
+    "process": "natural",
+    "variety": "Test variety",
+    "altitude_m": 1000,
+    "cup_score": 80,
+    "roast_level": "medium",
+    "flavor_notes": ["test"],
+    "price_per_kg": 100,
+    "currency": "TWD",
+    "lot_id": "L-9999-001",
+    "initial_stock_kg": 10,
+    "low_threshold_kg": 0
+  },
+  {
+    "id": "p-9002",
+    "name": "Test Lot Smoke",
+    "name_zh": "測試批次（smoke）",
+    "origin_country": "BR",
+    "region": "Test Region",
+    "process": "washed",
+    "variety": "Test variety",
+    "altitude_m": 1000,
+    "cup_score": 80,
+    "roast_level": "medium",
+    "flavor_notes": ["test"],
+    "price_per_kg": 200,
+    "currency": "TWD",
+    "lot_id": "L-9999-002",
+    "initial_stock_kg": 100,
+    "low_threshold_kg": 10
+  }
+]

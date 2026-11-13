@@ -58,6 +58,8 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 商品資料 | `PRODUCT#<id>`／`META`（每次部署覆寫）、`STOCK`（只寫一次，部署不重設庫存）；目錄由 GSI1 `gsi1pk=CATALOG` 查詢 |
 | IAM | `dynamodb:LeadingKeys` 限定 `PRODUCT#*`／`CATALOG`；**絕不授予 Scan**（`ForAllValues` 對空集合為 true）並明確 Deny |
 | 驗證 | Dev 每次部署跑 smoke test custom resource（失敗即 rollback）；CI 跑 `scripts/verify-api-stack.sh` |
+| 訂單（ADR-025） | `POST /orders`（`orders.write`、`Idempotency-Key`）、`GET /orders`、`GET /orders/{id}`（`orders.read`）；一個 `TransactWriteItems`＝冪等記錄＋訂單＋扣庫存；sk `ORDER#<ULID>`；每筆 ≤ 25 個商品、每個 1–500 kg；訂單函數角色**沒有** DynamoDB 權限，只能扮演租戶角色 |
+| 測試商品 | Dev 專用 `p-9001`（併發）、`p-9002`（smoke），不設 `gsi1pk` → 不在目錄 |
 | 合約 | `api/openapi.yaml` |
 
 ### Lambda 標準 / Lambda standard（ADR-023）

@@ -1,7 +1,7 @@
 import { ConditionalCheckFailedException, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
-import { loadSeed, seed } from '../src/custom-resources/seed-catalog';
+import { loadSeed, loadTestSeed, seed } from '../src/custom-resources/seed-catalog';
 
 const ddb = mockClient(DynamoDBDocumentClient);
 const doc = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'ap-east-2' }));
@@ -42,5 +42,28 @@ describe('seed()', () => {
   test('other errors fail the seed (and therefore the deploy)', async () => {
     ddb.on(PutCommand).rejects(new Error('AccessDeniedException'));
     await expect(seed(doc, 't', loadSeed().slice(0, 1))).rejects.toThrow('AccessDeniedException');
+  });
+});
+
+describe('test products (Dev only, ADR-025)', () => {
+  test('are p-9xxx and are written WITHOUT gsi1pk (hidden from the catalog)', async () => {
+    ddb.on(PutCommand).resolves({});
+    const products = loadTestSeed();
+    expect(products.map((p) => p.id)).toEqual(['p-9001', 'p-9002']);
+    await seed(doc, 't', products, { inCatalog: false });
+    const meta = ddb.commandCalls(PutCommand).map((c) => c.args[0].input).filter((p) => p.Item?.sk === 'META');
+    expect(meta).toHaveLength(2);
+    for (const m of meta) {
+      expect(m.Item).not.toHaveProperty('gsi1pk');
+      expect(m.Item).toMatchObject({ status: 'active' });
+    }
+  });
+  test('never collide with real products', () => {
+    const real = new Set(loadSeed().map((p) => p.id));
+    expect(loadTestSeed().some((p) => real.has(p.id))).toBe(false);
+  });
+  test('non p-9xxx ids are rejected', () => {
+    const [p] = loadTestSeed();
+    expect(() => loadTestSeed([{ ...p, id: 'p-0001' }])).toThrow('p-9xxx');
   });
 });

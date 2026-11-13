@@ -3,6 +3,7 @@ import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { Logger } from '@aws-lambda-powertools/logger';
 import type { CloudFormationCustomResourceEvent } from 'aws-lambda';
 import rawProducts from '../../seed/products.json';
+import rawTestProducts from '../../seed/test-products.json';
 import { CATALOG_GSI_PK, META_SK, PRODUCT_PK_PREFIX, STOCK_SK, SeedProduct, SeedProductSchema, productPk } from '../lib/model';
 
 /**
@@ -13,6 +14,9 @@ import { CATALOG_GSI_PK, META_SK, PRODUCT_PK_PREFIX, STOCK_SK, SeedProduct, Seed
  *   META is upserted every time: the catalog is configuration, owned by code.
  * - STOCK：只在不存在時寫入（attribute_not_exists）→ 庫存是「執行期狀態」，部署永遠不會重設 Prod 的庫存。
  *   STOCK is written only if absent: stock is runtime state and a deploy never resets it.
+ * - 測試商品（seed/test-products.json，只在 Dev，`IncludeTestProducts=true`）：**不寫 gsi1pk** → 不在目錄
+ *   （稀疏索引），但可以用 ID 讀取與下單；給 smoke test 與併發測試用（ADR-025）。
+ *   Test products (Dev only) get no gsi1pk, so they stay out of the catalog (sparse index) yet can be ordered by id.
  * - Delete：什麼都不做（資料表本身由 data stack 管理）/ Delete is a no-op.
  */
 
@@ -33,7 +37,20 @@ export function loadSeed(raw: unknown = rawProducts): SeedProduct[] {
   return products;
 }
 
-export async function seed(client: DynamoDBDocumentClient, tableName: string, products: SeedProduct[]): Promise<SeedResult> {
+/** 測試商品：ID 必須是 p-9xxx，避免與正式商品混淆 / Test products must use p-9xxx ids. */
+export function loadTestSeed(raw: unknown = rawTestProducts): SeedProduct[] {
+  const products = loadSeed(raw);
+  const bad = products.filter((p) => !/^p-9\d{3}$/.test(p.id));
+  if (bad.length > 0) throw new Error(`Test product ids must be p-9xxx: ${bad.map((p) => p.id).join(',')}`);
+  return products;
+}
+
+export async function seed(
+  client: DynamoDBDocumentClient,
+  tableName: string,
+  products: SeedProduct[],
+  opts: { inCatalog: boolean } = { inCatalog: true },
+): Promise<SeedResult> {
   let stockCreated = 0;
   let stockKept = 0;
   const now = new Date().toISOString();
@@ -45,8 +62,7 @@ export async function seed(client: DynamoDBDocumentClient, tableName: string, pr
         Item: {
           pk: productPk(p.id),
           sk: META_SK,
-          gsi1pk: CATALOG_GSI_PK,
-          gsi1sk: `${PRODUCT_PK_PREFIX}${p.id}`,
+          ...(opts.inCatalog ? { gsi1pk: CATALOG_GSI_PK, gsi1sk: `${PRODUCT_PK_PREFIX}${p.id}` } : {}),
           entity: 'Product',
           status: 'active',
           ...meta,
@@ -92,9 +108,18 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
   const tableName = String(event.ResourceProperties.TableName ?? '');
   if (!tableName) throw new Error('TableName property is required');
   const result = await seed(doc, tableName, loadSeed());
-  logger.info('Catalog seeded', { ...result, requestType: event.RequestType });
+  let testProducts = 0;
+  if (String(event.ResourceProperties.IncludeTestProducts) === 'true') {
+    testProducts = (await seed(doc, tableName, loadTestSeed(), { inCatalog: false })).products;
+  }
+  logger.info('Catalog seeded', { ...result, testProducts, requestType: event.RequestType });
   return {
     PhysicalResourceId: physicalResourceId,
-    Data: { Products: String(result.products), StockCreated: String(result.stockCreated), StockKept: String(result.stockKept) },
+    Data: {
+      Products: String(result.products),
+      StockCreated: String(result.stockCreated),
+      StockKept: String(result.stockKept),
+      TestProducts: String(testProducts),
+    },
   };
 };
