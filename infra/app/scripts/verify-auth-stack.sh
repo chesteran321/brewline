@@ -65,6 +65,9 @@ check "Web client auth flows"        "$(jq -c '.UserPoolClient.ExplicitAuthFlows
 check "Web client cannot write tenant_id" \
   "$(jq -r '.UserPoolClient.WriteAttributes | index("custom:tenant_id") == null' <<<"$web")" "true"
 check "Web client token revocation"  "$(jq -r '.UserPoolClient.EnableTokenRevocation' <<<"$web")" "true"
+# 15 分鐘（A2）：縮短撤銷帳號後仍可呼叫 API 的時間（RSK-015）/ 15 minutes shrinks the post-revocation window.
+check "Web client access token validity" "$(jq -r '"\(.UserPoolClient.AccessTokenValidity) \(.UserPoolClient.TokenValidityUnits.AccessToken)"' <<<"$web")" "15 minutes"
+check "Web client ID token validity"     "$(jq -r '"\(.UserPoolClient.IdTokenValidity) \(.UserPoolClient.TokenValidityUnits.IdToken)"' <<<"$web")" "15 minutes"
 
 has_smoke=$(aws cognito-idp list-user-pool-clients --user-pool-id "$pool_id" --region "$region" \
   --query "length(UserPoolClients[?ClientName=='smoke-test'])" --output text)

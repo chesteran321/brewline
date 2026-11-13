@@ -156,6 +156,7 @@
   - 一律 fail closed：同時屬於 staff 與 cafe／simulator、缺 tenant_id 或格式錯誤 → 不加任何 scope（登入成功但 API 回 403）。
   - MFA：Cognito 只能整個 pool 設定，**無法只對 staff 強制** → OPTIONAL、只開 TOTP（不開 SMS，沒有 SNS 角色）；部署後驗證腳本偵測「已啟用的 staff 帳號沒有 TOTP」並讓 CI 失敗（偵測性控制）。
   - App client：`web`（SRP＋refresh、無 OAuth／hosted UI、token 撤銷、不洩漏帳號是否存在）；Dev 另有 `smoke-test`（`ADMIN_USER_PASSWORD_AUTH`，只能以 IAM 身分呼叫，供 A1c smoke test）。Access／ID token 60 分鐘、refresh 7 天。
+  - **修訂（2026-11-13，A2a）**：Access／ID token 改為 **15 分鐘**（RSK-015）；`cafe`／`simulator` 加上 `brewline/orders.read`、`brewline/orders.write`；`staff` 不屬於任何租戶，**不給**訂單 scope（跨租戶的訂單端點在 A3）。
   - 其他 stack 由 SSM `/brewline/<env>/auth/{user-pool-id,user-pool-arn,web-client-id,issuer[,smoke-test-client-id]}` 取得。
 - **後果 Consequences**：
   - 費用 0（MAU 遠低於免費額度）。
@@ -175,6 +176,25 @@
   - Node 24 runtime 移除了 callback 形式的 handler，一律寫 `async` handler。
   - 下一次主版本升級約在 2027 年底評估（Node 26）。
 - **替代方案 Alternatives considered**：維持 Node 22 → 一年內必須再遷移一次，且 cdk-nag `AwsSolutions-L1`（最新 runtime）可能需要例外。
+
+### ADR-024 租戶隔離：STS session tag ＋ `dynamodb:LeadingKeys` 完全比對 / Tenant Isolation via STS Session Tags and Exact LeadingKeys
+
+- **狀態 Status**：Accepted（2026-11-13，訂貨 A2a）；細化 ADR-010、修正 03 §5 的範例政策
+- **背景 Context**：ORD-N-001 要求租戶隔離「在資料層強制」：程式有 bug 時，IAM 仍要拒絕跨租戶讀寫。03 §5 的範例條件 `TENANT#${aws:PrincipalTag/tenant_id}*` 結尾的 `*` 是前綴比對，會讓 `t_1` 也能存取 `TENANT#t_12…`。
+- **決策 Decision**：
+  - 角色 `brewline-<env>-tenant-access`（api stack）。訂單 Lambda 從**已驗證的 JWT**（API Gateway JWT authorizer）取出 `tenant_id`，呼叫 `sts:AssumeRole` 並帶 session tag `tenant_id`，取得最長 1 小時的臨時憑證；Lambda 依租戶在記憶體中快取憑證。
+  - **信任政策**：只允許名稱為 `brewline-<env>-orders-*` 的角色；必須帶 `tenant_id`，長度固定為 `t_` ＋ 26 字元（以 26 個 `?` 比對，IAM 沒有正規表示式）；`aws:TagKeys` 只能是 `tenant_id`。動作 `sts:AssumeRole`＋`sts:TagSession`。呼叫端的身分政策也必須允許（`grantAssume`）。
+  - **權限政策**：
+    - `TENANT#<自己>`：`GetItem`／`Query`／`PutItem`／`ConditionCheckItem`，`ForAllValues:StringEquals dynamodb:LeadingKeys = TENANT#${aws:PrincipalTag/tenant_id}`（**完全比對**）。
+    - 商品：`GetItem`／`BatchGetItem`（`PRODUCT#*`）；`UpdateItem` 只能動 `pk, sk, available_kg, reserved_kg, version, updated_at`（`dynamodb:Attributes`），`ReturnValues` 不可為 `ALL_*` → **改不了價格**。
+    - 明確 Deny `dynamodb:Scan`；KMS 限 `kms:ViaService = dynamodb.<region>.amazonaws.com`；沒有 `DeleteItem`。
+  - `TransactWriteItems` 沒有獨立的 IAM 動作，依每個項目的 Put／Update／ConditionCheck 授權。
+- **後果 Consequences**：
+  - 驗證以 `aws iam simulate-principal-policy` 為主（`scripts/verify-tenant-access.sh`：13 個情境，含前綴攻擊、沒有 session tag、改價格、`ALL_NEW` 讀回、Scan）。
+  - 跨租戶存取的證據是應用層的 `AccessDenied` → 403／404 與結構化日誌（A2 決定 D4）；CloudTrail 未開資料事件，DynamoDB 的拒絕不會進 CloudTrail。
+  - 已知限制：`dynamodb:Attributes` 無法區分排序鍵，租戶憑證理論上可以在 META 項目新增 `available_kg` 等欄位（不影響價格），由程式的 `ConditionExpression` 防範。
+  - 費用 0（STS 免費）。
+- **替代方案 Alternatives considered**：只在程式中過濾（bug 即外洩）；每個租戶一個 IAM 角色（數量無法擴展）；DynamoDB 細粒度存取搭配 Cognito Identity Pool（需要前端直連 DynamoDB）。
 
 ### ADR 範本 / ADR Template
 
@@ -208,7 +228,7 @@
 | RSK-011 | GitHub 帳號遭入侵影響部署 / GitHub account compromise | L | H | GitHub 強制 MFA；Prod 需人工核准；OIDC 條件限制 | Chester |
 | RSK-012 | 非公開的第三方資料或格式不慎混入 / Non-public third-party data leakage into project | L | H | 限制 C-03；EDI 只依公開規格；提交前自我檢查清單 | Chester |
 | RSK-014 | 沒有 WAF，惡意流量只能靠限流與預算控制擋下；execute-api 網址可被直接呼叫 / No WAF; floods are stopped only by throttling and budgets | M | L | ADR-020 的六層控制；Budget Actions；前端上線時加 CloudFront＋WAF 並評估關閉 execute-api 預設端點 | Chester |
-| RSK-015 | 已撤銷的帳號在 access token 到期前仍可呼叫 API；staff MFA 無法由 Cognito 強制 / Revoked users keep API access until token expiry; staff MFA not enforceable per group | M | M | Token 60 分鐘；部署後驗證偵測 staff 未設 TOTP；高風險操作（A2 之後）在 Lambda 再查使用者狀態 | Chester |
+| RSK-015 | 已撤銷的帳號在 access token 到期前仍可呼叫 API；staff MFA 無法由 Cognito 強制 / Revoked users keep API access until token expiry; staff MFA not enforceable per group | M | M | Token **15 分鐘**（A2a）；部署後驗證偵測 staff 未設 TOTP；高風險操作（A2 之後）在 Lambda 再查使用者狀態 | Chester |
 
 風險清單於每季複查，新增或變更紀錄於 Git 歷史。
 The register is reviewed quarterly; changes are tracked in Git history.

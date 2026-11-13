@@ -126,6 +126,14 @@ jobs:
           { echo "### API stack (Dev)"; echo '```'; cat verify-api.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
 
+      - name: Verify tenant access role (trust + IAM policy simulation)
+        run: |
+          set +e
+          scripts/verify-tenant-access.sh dev outputs.json | tee verify-tenant.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### Tenant access role (Dev)"; echo '```'; cat verify-tenant.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
   deploy-prod:
     name: Deploy Prod
     needs: deploy-dev
@@ -224,4 +232,12 @@ jobs:
           scripts/verify-api-stack.sh prod outputs.json | tee verify-api.txt
           rc=${PIPESTATUS[0]}
           { echo "### API stack (Prod)"; echo '```'; cat verify-api.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Verify tenant access role (trust + IAM policy simulation)
+        run: |
+          set +e
+          scripts/verify-tenant-access.sh prod outputs.json | tee verify-tenant.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### Tenant access role (Prod)"; echo '```'; cat verify-tenant.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc

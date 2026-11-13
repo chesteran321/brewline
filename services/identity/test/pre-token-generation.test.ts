@@ -3,6 +3,7 @@ import { decide, handler } from '../src/pre-token-generation';
 import { SCOPES, TENANT_ID_PATTERN } from '../src/scopes';
 
 const TENANT = 't_01JD8Z3K5M7N9P0Q2R4S6T8V0W';
+const CAFE_SCOPES = [SCOPES.catalogRead, SCOPES.ordersRead, SCOPES.ordersWrite].sort();
 
 function event(groups: string[], attrs: Record<string, string> = {}): PreTokenGenerationV2TriggerEvent {
   return {
@@ -20,11 +21,18 @@ function event(groups: string[], attrs: Record<string, string> = {}): PreTokenGe
 describe('decide()', () => {
   // 正向 / Positive
   test('cafe with a valid tenant gets catalog.read and the tenant claim', () => {
-    expect(decide(['cafe'], TENANT)).toEqual({ scopes: [SCOPES.catalogRead], tenantId: TENANT });
+    expect(decide(['cafe'], TENANT)).toEqual({ scopes: CAFE_SCOPES, tenantId: TENANT });
   });
 
   test('simulator is treated like a café (ADR-011)', () => {
-    expect(decide(['simulator'], TENANT)).toEqual({ scopes: [SCOPES.catalogRead], tenantId: TENANT });
+    expect(decide(['simulator'], TENANT)).toEqual({ scopes: CAFE_SCOPES, tenantId: TENANT });
+  });
+
+  // staff 沒有租戶，不可拿到下單 scope / Staff have no tenant and must never get order scopes.
+  test('staff never get orders.read / orders.write', () => {
+    const { scopes } = decide(['staff'], undefined);
+    expect(scopes).not.toContain(SCOPES.ordersRead);
+    expect(scopes).not.toContain(SCOPES.ordersWrite);
   });
 
   test('staff gets admin + catalog.read and never a tenant claim', () => {
@@ -33,7 +41,7 @@ describe('decide()', () => {
   });
 
   test('unknown groups are ignored, duplicates collapse', () => {
-    expect(decide(['cafe', 'cafe', 'beta-testers'], TENANT).scopes).toEqual([SCOPES.catalogRead]);
+    expect(decide(['cafe', 'cafe', 'beta-testers'], TENANT).scopes).toEqual(CAFE_SCOPES);
   });
 
   // 反向：一律 fail closed / Negative: always fail closed
@@ -67,7 +75,7 @@ describe('handler', () => {
   test('writes scopes and tenant claim into the access token only', async () => {
     const out = await handler(event(['cafe'], { 'custom:tenant_id': TENANT }));
     expect(out.response.claimsAndScopeOverrideDetails).toEqual({
-      accessTokenGeneration: { scopesToAdd: [SCOPES.catalogRead], claimsToAddOrOverride: { tenant_id: TENANT } },
+      accessTokenGeneration: { scopesToAdd: CAFE_SCOPES, claimsToAddOrOverride: { tenant_id: TENANT } },
     });
   });
 
