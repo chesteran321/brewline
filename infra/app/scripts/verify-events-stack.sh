@@ -39,7 +39,8 @@ check "Mapping source = table stream (SSM)" "$(jq -r .EventSourceArn <<<"$esm")"
 check "Mapping partial failures" "$(jq -c .FunctionResponseTypes <<<"$esm")" '["ReportBatchItemFailures"]'
 check "Mapping retries"          "$(jq -r .MaximumRetryAttempts <<<"$esm")" "3"
 check "Mapping bisect on error"  "$(jq -r .BisectBatchOnFunctionError <<<"$esm")" "true"
-check "Mapping on-failure → DLQ" "$(jq -r '.DestinationConfig.OnFailure.Destination // "none" | test(":events-stream-dlq$")' <<<"$esm")" "true"
+check "Mapping on-failure → DLQ" "$(jq -r '.DestinationConfig.OnFailure.Destination // "none"' <<<"$esm")" \
+  "arn:aws:sqs:${region}:$(cut -d: -f5 <<<"$stream_arn"):brewline-${env_name}-events-stream-dlq"
 check "Mapping filters"          "$(jq -r '.FilterCriteria.Filters | length' <<<"$esm")" "2"
 
 fn=$(out PublisherFunctionName)
@@ -77,8 +78,12 @@ check "Stack termination protection" "$(aws cloudformation describe-stacks --sta
 # --- 事件內容 / Event content ---
 since=$(( ($(date +%s) - 3600) * 1000 ))
 count() { # count <filter pattern> → number of matching log events in the last hour
-  aws logs filter-log-events --log-group-name "$log_group" --region "$region" --start-time "$since" \
-    --filter-pattern "$1" --query 'length(events)' --output text 2>/dev/null || echo error
+  # CLI 會自動分頁，--query 套用在**每一頁**（length 會印出多行）→ 改成列出 eventId 再數
+  # The CLI paginates and applies --query per page, so list event ids and count them instead.
+  local ids
+  ids=$(aws logs filter-log-events --log-group-name "$log_group" --region "$region" --start-time "$since" \
+    --filter-pattern "$1" --query 'events[].eventId' --output text 2>/dev/null) || { echo error; return; }
+  wc -w <<<"${ids//None/}" | tr -d ' '
 }
 if [[ "$want_orders" == true ]]; then
   # smoke test 剛下過單（A 租戶）→ 應該有 OrderCreated；給 stream 與 bus 一點時間
