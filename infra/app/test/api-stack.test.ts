@@ -179,6 +179,48 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
     expect(acts.filter((a) => /dynamodb:(Put|Delete|Batch)/.test(a))).toEqual([]);
   });
 
+  test('order timeout workflow (A3d): Standard, wait = config, retries, logging ALL, tracing', () => {
+    const [[, sm]] = resources(template, 'AWS::StepFunctions::StateMachine') as [[string, Res]];
+    expect(sm.Properties).toMatchObject({
+      StateMachineName: `brewline-${envName}-order-lifecycle`,
+      StateMachineType: 'STANDARD',
+      TracingConfiguration: { Enabled: true },
+      LoggingConfiguration: { Level: 'ALL', IncludeExecutionData: false },
+    });
+    const def = JSON.stringify(sm.Properties.DefinitionString);
+    expect(def).toContain(`\\"Seconds\\":${cfg.api.orderTimeoutSeconds}`);
+    expect(def).toContain('RetryableError');
+    expect(def).toContain('States.ALL');
+    expect(cfg.api.orderTimeoutSeconds).toBe(envName === 'dev' ? 600 : 172800);
+  });
+
+  test('OrderCreated rule → state machine with a minimal input and a DLQ', () => {
+    const rules = resources(template, 'AWS::Events::Rule').map(([, r]) => r.Properties);
+    const rule = rules.find((r) => r.Name === `brewline-${envName}-order-timeout`)!;
+    expect(rule.EventPattern).toEqual({ source: ['brewline.ordering'], 'detail-type': ['OrderCreated'] });
+    expect(rule.EventBusName).toEqual({ Ref: expect.stringContaining('eventsbusname') });
+    const target = rule.Targets[0];
+    expect(target.InputTransformer.InputPathsMap).toEqual({
+      'detail-tenant_id': '$.detail.tenant_id',
+      'detail-order_id': '$.detail.order_id',
+      'detail-event_id': '$.detail.event_id',
+    });
+    expect(target.DeadLetterConfig.Arn).toEqual({ 'Fn::GetAtt': [expect.stringContaining('OrderTimeoutDlq'), 'Arn'] });
+    template.hasResourceProperties('AWS::SQS::Queue', { QueueName: `brewline-${envName}-order-timeout-dlq`, SqsManagedSseEnabled: true });
+    const alarms = resources(template, 'AWS::CloudWatch::Alarm').map(([, a]) => a.Properties.AlarmName);
+    expect(alarms).toEqual(expect.arrayContaining([`brewline-${envName}-order-lifecycle-failed`, `brewline-${envName}-order-timeout-dlq-not-empty`]));
+  });
+
+  test('timeout function: own role (not orders-*), tenant orders Get/Update, stock attributes only, no Put/Delete', () => {
+    const fnName = `brewline-${envName}-ordering-order-timeout`;
+    const [[, fn]] = resources(template, 'AWS::Lambda::Function').filter(([, r]) => r.Properties.FunctionName === fnName) as [[string, Res]];
+    expect(template.toJSON().Resources[fn.Properties.Role['Fn::GetAtt'][0]].Properties.RoleName).toBeUndefined();
+    const st = statementsFor(template, fnName);
+    const acts = st.filter((x) => x.Effect === 'Allow').flatMap((x) => [].concat(x.Action)) as string[];
+    expect(acts.filter((a) => /dynamodb:(Put|Delete|Batch|Query)/.test(a) || a === 'sts:AssumeRole')).toEqual([]);
+    expect(st.find((x) => x.Sid === 'ReleaseStockOnly').Condition['ForAllValues:StringEquals']['dynamodb:Attributes']).toContain('available_kg');
+  });
+
   test('order tests (A2b-2): Dev only, orders-tests role, fixture access limited to exact test keys', () => {
     const fns = resources(template, 'AWS::Lambda::Function').filter(([, r]) => r.Properties.FunctionName === `brewline-${envName}-ordering-order-tests`);
     if (!cfg.api.orderTests) {
@@ -193,11 +235,11 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
     expect(template.toJSON().Resources[roleId].Properties.RoleName).toBe(`brewline-${envName}-orders-tests`);
     const st = statementsFor(template, `brewline-${envName}-ordering-order-tests`);
     expect(st.find((x) => x.Sid === 'ResetRaceProduct')).toMatchObject({
-      Action: ['dynamodb:PutItem', 'dynamodb:GetItem'],
+      Action: ['dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:UpdateItem'],
       Condition: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['PRODUCT#p-9001'] } },
     });
     expect(st.find((x) => x.Sid === 'CleanTestTenants')).toMatchObject({
-      Action: ['dynamodb:Query', 'dynamodb:DeleteItem'],
+      Action: ['dynamodb:Query', 'dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:UpdateItem'],
       Condition: {
         'ForAllValues:StringEquals': {
           'dynamodb:LeadingKeys': ['TENANT#t_01CNCRTST000000000000000A1', 'TENANT#t_01CNCRTST000000000000000B1'],
@@ -257,7 +299,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   test('all first-party Lambdas follow the standard; provider framework functions are explicitly exempt', () => {
     const fns = resources(template, 'AWS::Lambda::Function');
     const ours = fns.filter(([, r]) => String(r.Properties.FunctionName ?? '').startsWith(`brewline-${envName}-`));
-    expect(ours).toHaveLength(10 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
+    expect(ours).toHaveLength(11 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
     for (const [, r] of ours) {
       expect(r.Properties).toMatchObject({ Runtime: 'nodejs24.x', Architectures: ['arm64'], TracingConfig: { Mode: 'Active' } });
     }

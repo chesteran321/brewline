@@ -14,8 +14,8 @@ region="${AWS_REGION:-ap-east-2}"
 stack="brewline-${env_name}-api"
 
 case "$env_name" in
-  dev)  want_rate=10; want_burst=20;  want_order_rate=2;  want_order_burst=5;  want_concurrency=5;  want_retention=7;  want_smoke=true;  want_termination_protection=false ;;
-  prod) want_rate=50; want_burst=100; want_order_rate=10; want_order_burst=20; want_concurrency=10; want_retention=30; want_smoke=false; want_termination_protection=true ;;
+  dev)  want_timeout=600;    want_rate=10; want_burst=20;  want_order_rate=2;  want_order_burst=5;  want_concurrency=5;  want_retention=7;  want_smoke=true;  want_termination_protection=false ;;
+  prod) want_timeout=172800; want_rate=50; want_burst=100; want_order_rate=10; want_order_burst=20; want_concurrency=10; want_retention=30; want_smoke=false; want_termination_protection=true ;;
   *) echo "unknown env: $env_name" >&2; exit 2 ;;
 esac
 
@@ -101,6 +101,31 @@ if [[ "$want_smoke" == true ]]; then
   echo "   ↳ $smoke"
 else
   check "No smoke test in $env_name" "${smoke:-none}" "none"
+fi
+
+# --- 逾時取消工作流（A3d，ADR-028）/ Order timeout workflow ---
+sm_arn=$(out OrderLifecycleStateMachineArn)
+sm=$(aws stepfunctions describe-state-machine --state-machine-arn "$sm_arn" --region "$region" --output json)
+check "Workflow type"            "$(jq -r .type <<<"$sm")" "STANDARD"
+check "Workflow wait (seconds)"  "$(jq -r '.definition | fromjson | .States.WaitForConfirmation.Seconds' <<<"$sm")" "$want_timeout"
+check "Workflow retries RetryableError" "$(jq -r '.definition | fromjson | [.States.CancelIfStillCreated.Retry[].ErrorEquals[]] | index("RetryableError") != null' <<<"$sm")" "true"
+check "Workflow logging"         "$(jq -r '.loggingConfiguration.level' <<<"$sm")" "ALL"
+check "Workflow tracing"         "$(jq -r '.tracingConfiguration.enabled' <<<"$sm")" "true"
+rule=$(aws events describe-rule --name "brewline-${env_name}-order-timeout" --event-bus-name "brewline-${env_name}" --region "$region" --output json)
+check "OrderCreated rule state"   "$(jq -r .State <<<"$rule")" "ENABLED"
+check "OrderCreated rule pattern" "$(jq -r .EventPattern <<<"$rule" | jq -c '{s: .source, d: ."detail-type"}')" '{"s":["brewline.ordering"],"d":["OrderCreated"]}'
+check "Timeout DLQ messages" "$(aws sqs get-queue-attributes --queue-url "$(out OrderTimeoutDlqUrl)" --region "$region" \
+  --attribute-names ApproximateNumberOfMessages --query Attributes.ApproximateNumberOfMessages --output text)" "0"
+day_ago=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%S)
+failed=$(aws stepfunctions list-executions --state-machine-arn "$sm_arn" --status-filter FAILED --max-items 100 --region "$region" --output json \
+  | jq --arg t "$day_ago" '[.executions[] | select(.startDate[0:19] >= $t)] | length')
+check "Workflow executions FAILED (24h)" "$failed" "0"
+if [[ "$want_smoke" == true ]]; then
+  # smoke test 剛下的單應該已啟動等待中的執行 / Smoke-test orders should have started executions.
+  hour_ago=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%S)
+  started=$(aws stepfunctions list-executions --state-machine-arn "$sm_arn" --max-items 100 --region "$region" --output json \
+    | jq --arg t "$hour_ago" '[.executions[] | select(.startDate[0:19] >= $t)] | length')
+  check "Workflow executions started by smoke orders (1h) ≥ 1" "$([[ "$started" -ge 1 ]] && echo true || echo "false ($started)")" "true"
 fi
 
 check "Stack termination protection" "$(aws cloudformation describe-stacks --stack-name "$stack" --region "$region" \

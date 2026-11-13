@@ -87,6 +87,11 @@ export interface ApiSettings {
    * Deploy the manually-invoked order-test function (needs testProducts).
    */
   readonly orderTests: boolean;
+  /**
+   * 未確認訂單的逾時取消（秒，A3 決策 D5：Dev 10 分鐘方便實測、Prod 48 小時）。
+   * Seconds before an unconfirmed order is cancelled (Dev 10 min to observe it, Prod 48 h).
+   */
+  readonly orderTimeoutSeconds: number;
 }
 
 export interface BrewlineEnv {
@@ -135,6 +140,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       orderThrottleBurstLimit: 5,
       testProducts: true,
       orderTests: true,
+      orderTimeoutSeconds: 10 * 60,
     },
   },
   prod: {
@@ -166,6 +172,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       orderThrottleBurstLimit: 20,
       testProducts: false,
       orderTests: false,
+      orderTimeoutSeconds: 48 * 60 * 60,
     },
   },
 };

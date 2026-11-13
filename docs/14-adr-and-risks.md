@@ -257,6 +257,23 @@
   - Dev smoke test 走完整個生命週期（58 項）。
 - **替代方案 Alternatives considered**：每個狀態一條路由（例如 `/confirm`、`/ship`）→ 路由多、規則分散；以 Step Functions callback 推進（A3 D2 的選項 A）→ 狀態有兩個來源。
 
+### ADR-028 未確認訂單的逾時取消 / Unconfirmed-Order Timeout (Step Functions)
+
+- **狀態 Status**：Accepted（2026-11-13，訂貨 A3d）；緩解 RSK-016；修正 09 §2.3
+- **背景 Context**：A3 決策 D2＝B：狀態以 DynamoDB 為準，Step Functions **只負責逾時保護**；D5：Dev 10 分鐘、Prod 48 小時。
+- **決策 Decision**：
+  - 規則 `brewline-<env>-order-timeout`（bus `brewline-<env>`，`OrderCreated`）→ Standard 狀態機 `brewline-<env>-order-lifecycle`：`Wait`（Dev 600 秒／Prod 172800 秒）→ `CancelIfStillCreated`（Lambda `brewline-<env>-ordering-order-timeout`）→ `Done`。規則只傳 `tenant_id`、`order_id`、`event_id`。
+  - 取消函數重用 ADR-027 的 `AdminOrderRepo.transition`，`onlyFrom: ['CREATED']`、`actor: system:timeout`：仍是 CREATED → 取消並釋放庫存；已確認／已取消 → `already_moved`；已刪除 → `not_found`；都算成功。`conflict`／`busy` 丟 `RetryableError` → 狀態機指數退避重試 3 次；其他錯誤 → `Fail` 狀態＋告警（取代 v0.1 的「發布 `WorkflowFailed` 事件」）。
+  - **冪等不靠執行名稱**：EventBridge 的 Step Functions 目標**無法指定執行名稱**，同一個事件重送會產生第二個執行。正確性來自條件寫入：第二個執行只會得到 `already_moved`。
+  - 狀態機：Standard（Express 最長 5 分鐘）、X-Ray、log level ALL 但**不含執行資料**（cdk-nag SF1／SF2）、整體逾時 = 等待時間 + 1 小時。
+  - 規則 DLQ `brewline-<env>-order-timeout-dlq`（SSE-SQS）；告警 `…-order-lifecycle-failed`、`…-order-timeout-dlq-not-empty`（無通知目標，A4 接上）。
+  - 取消函數用自己的角色（不扮演租戶角色）：Get／Update `TENANT#*`、商品只改庫存欄位，沒有 Put／Delete／Query。
+- **後果 Consequences**：
+  - Standard 只對狀態轉換計費，`Wait` 等待期間不收費；每筆訂單約 4 次轉換（4,000 次／月免費）→ 約 0。
+  - Dev 的 smoke test 訂單每次部署都會啟動執行，10 分鐘後因訂單已被清理而得到 `not_found`（正常）。
+  - 逾時取消的端到端測試是手動兩段式（`order-tests` 的 `timeout-setup`／`timeout-check`），因為要等 10 分鐘。
+- **替代方案 Alternatives considered**：每筆訂單一個 EventBridge Scheduler 一次性排程（更便宜，但作品集少了 Step Functions；A3 D2 選項 C）；EventBridge → Lambda → `StartExecution(name=order_id)`（多一個函數，只為了換到執行名稱冪等，而條件寫入已經足夠）。
+
 ### ADR 範本 / ADR Template
 
 ```markdown
@@ -290,7 +307,7 @@
 | RSK-012 | 非公開的第三方資料或格式不慎混入 / Non-public third-party data leakage into project | L | H | 限制 C-03；EDI 只依公開規格；提交前自我檢查清單 | Chester |
 | RSK-014 | 沒有 WAF，惡意流量只能靠限流與預算控制擋下；execute-api 網址可被直接呼叫 / No WAF; floods are stopped only by throttling and budgets | M | L | ADR-020 的六層控制；Budget Actions；前端上線時加 CloudFront＋WAF 並評估關閉 execute-api 預設端點 | Chester |
 | RSK-015 | 已撤銷的帳號在 access token 到期前仍可呼叫 API；staff MFA 無法由 Cognito 強制 / Revoked users keep API access until token expiry; staff MFA not enforceable per group | M | M | Token **15 分鐘**（A2a）；部署後驗證偵測 staff 未設 TOTP；高風險操作（A2 之後）在 Lambda 再查使用者狀態 | Chester |
-| RSK-016 | A3（取消、逾時釋放）之前，已預留的庫存不會自動釋放；單筆最多可預留 500 kg，可能佔滿某商品全部庫存 / Reserved stock is never released before A3; one order may reserve a product's entire stock | M | M | 只有核准開通的租戶能下單（不開放註冊）；路由限流；`GET /admin/products/{id}/stock` 監看 reserved；A3 加入取消與逾時釋放 | Chester |
+| RSK-016 | A3（取消、逾時釋放）之前，已預留的庫存不會自動釋放；單筆最多可預留 500 kg，可能佔滿某商品全部庫存 / Reserved stock is never released before A3; one order may reserve a product's entire stock | M | M | 只有核准開通的租戶能下單（不開放註冊）；路由限流；`GET /admin/products/{id}/stock` 監看 reserved；A3 加入取消與逾時釋放 | Chester（**A3c／A3d 已緩解**：staff 可取消、未確認訂單 Dev 10 分／Prod 48 小時自動取消並釋放；剩餘風險：48 小時內仍可佔住庫存） |
 
 風險清單於每季複查，新增或變更紀錄於 Git 歷史。
 The register is reviewed quarterly; changes are tracked in Git history.
