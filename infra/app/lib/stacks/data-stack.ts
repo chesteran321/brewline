@@ -58,9 +58,9 @@ export class DataStack extends Stack {
 
     // 2) DynamoDB 單表。TableV2 → AWS::DynamoDB::GlobalTable（ADR-018）。
     //    鍵名用通用的 pk / sk，實體型別寫在值裡（TENANT#、PRODUCT#…），日後新增實體不必改 schema。
-    //    GSI 一次 PR 只加一個（CloudFormation 每次更新只能新增一個 GSI）；Streams 延後到有 consumer。
+    //    GSI 一次 PR 只加一個（CloudFormation 每次更新只能新增一個 GSI）。
     // Generic pk/sk so new entity types never change the key schema.
-    // One GSI per PR (CloudFormation adds at most one GSI per update); Streams wait for a consumer.
+    // One GSI per PR (CloudFormation adds at most one GSI per update).
     this.table = new dynamodb.TableV2(this, 'CoreTable', {
       tableName: `brewline-${envName}-core`,
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
@@ -77,6 +77,11 @@ export class DataStack extends Stack {
       },
       deletionProtection: data.deletionProtection,
       timeToLiveAttribute: 'expires_at',
+      // Streams（A3a）：事件的來源（CDC／交易外送箱，A3 決策 D1）。NEW_AND_OLD_IMAGES 才能判斷「狀態從 X 變成 Y」、
+      // 「庫存跌破門檻」。**之後不要改 view type**：GlobalTable 有多個 replica 時無法修改，現在單一 replica 也要先停用再啟用。
+      // Streams are the event source (CDC / transactional outbox). Old+new images let consumers detect transitions.
+      // Do not change the view type later; it cannot be modified once the table has more than one replica.
+      dynamoStream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
       // GSI1：只有帶 gsi1pk 的項目會進索引（sparse）。projection ALL：項目小、讀取方便，儲存成本可忽略。
       // 最大吞吐量明確設成與資料表相同（COST-005）：CDK 不設時 template 不會出現上限 → 索引不受限。
       // 寫入上限不可低於資料表，否則 GSI 的反壓（back-pressure）會連帶節流資料表寫入。
@@ -104,6 +109,7 @@ export class DataStack extends Stack {
       ['TableNameParam', 'table-name', this.table.tableName],
       ['TableArnParam', 'table-arn', this.table.tableArn],
       ['KeyArnParam', 'kms-key-arn', this.key.keyArn],
+      ['TableStreamArnParam', 'table-stream-arn', this.table.tableStreamArn!],
     ];
     for (const [id, name, value] of params) {
       new ssm.StringParameter(this, id, {

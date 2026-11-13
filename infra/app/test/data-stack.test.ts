@@ -67,7 +67,7 @@ describe('DataStack', () => {
       SSESpecification: { SSEEnabled: true, SSEType: 'KMS' },
       TimeToLiveSpecification: { AttributeName: 'expires_at', Enabled: true },
       WriteOnDemandThroughputSettings: { MaxWriteRequestUnits: d.maxWriteRequestUnits },
-      // A1a：只有一個多用途 GSI1；Streams 仍延後 / A1a: exactly one overloaded GSI1; Streams still deferred.
+      // A1a：只有一個多用途 GSI1 / exactly one overloaded GSI1.
       GlobalSecondaryIndexes: [
         {
           IndexName: 'gsi1',
@@ -79,7 +79,8 @@ describe('DataStack', () => {
           WriteOnDemandThroughputSettings: { MaxWriteRequestUnits: d.maxWriteRequestUnits },
         },
       ],
-      StreamSpecification: Match.absent(),
+      // A3a：Streams 開啟，NEW_AND_OLD_IMAGES（事件來源）/ Streams on, old+new images (event source).
+      StreamSpecification: { StreamViewType: 'NEW_AND_OLD_IMAGES' },
       Replicas: [
         Match.objectLike({
           Region: 'ap-east-2',
@@ -135,9 +136,9 @@ describe('DataStack', () => {
     dev.hasResource('AWS::KMS::Key', { DeletionPolicy: 'Delete', Properties: Match.objectLike({ PendingWindowInDays: 7 }) });
   });
 
-  test.each(['dev', 'prod'] as const)('%s: publishes table and key ARNs to SSM', (envName) => {
+  test.each(['dev', 'prod'] as const)('%s: publishes table, key and stream ARNs to SSM', (envName) => {
     const { template } = buildApp(envName);
-    for (const name of ['table-name', 'table-arn', 'kms-key-arn']) {
+    for (const name of ['table-name', 'table-arn', 'kms-key-arn', 'table-stream-arn']) {
       template.hasResourceProperties('AWS::SSM::Parameter', {
         Name: `/brewline/${envName}/data/${name}`,
         Tier: 'Standard',

@@ -30,7 +30,8 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | Stack | `brewline-<env>-data`（Prod 終止保護） |
 | KMS CMK | `alias/brewline-<env>-data`，年度輪替；每帳號 1 把，之後 S3／SQS／SNS 共用 |
 | DynamoDB | `brewline-<env>-core`，CDK `TableV2`（= `AWS::DynamoDB::GlobalTable`），鍵 `pk`／`sk`，TTL `expires_at` |
-| 取得名稱／ARN | SSM `/brewline/<env>/data/{table-name,table-arn,kms-key-arn}`（不要用 CloudFormation Export） |
+| Streams | `NEW_AND_OLD_IMAGES`（A3a，事件來源）；**不要改 view type** |
+| 取得名稱／ARN | SSM `/brewline/<env>/data/{table-name,table-arn,kms-key-arn,table-stream-arn}`（不要用 CloudFormation Export） |
 
 - cdk-nag `AwsSolutions-DDB3` **不檢查** `CfnGlobalTable`；PITR／CMK／刪除保護由 `lib/aspects/data-protection.ts` 把關。
 - 新增 GSI：一次 PR 只加一個（CloudFormation 每次更新只能新增一個 GSI）。

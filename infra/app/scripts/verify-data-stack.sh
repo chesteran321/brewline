@@ -75,6 +75,30 @@ check "KMS rotation" "$(aws kms get-key-rotation-status --key-id "$key_arn" --re
 check "SSM table-name" "$(aws ssm get-parameter --name "/brewline/${env_name}/data/table-name" --region "$region" \
   --query Parameter.Value --output text)" "$table"
 
+# --- Streams（A3a）：事件來源 / Event source ---
+stream_arn=$(jq -r '.Table.LatestStreamArn // "none"' <<<"$desc")
+check "Stream enabled"   "$(jq -r '.Table.StreamSpecification.StreamEnabled // false' <<<"$desc")" "true"
+check "Stream view type" "$(jq -r '.Table.StreamSpecification.StreamViewType // "none"' <<<"$desc")" "NEW_AND_OLD_IMAGES"
+check "Stream status"    "$(aws dynamodbstreams describe-stream --stream-arn "$stream_arn" --region "$region" \
+  --query 'StreamDescription.StreamStatus' --output text 2>/dev/null || echo error)" "ENABLED"
+check "SSM table-stream-arn = latest stream" "$(aws ssm get-parameter --name "/brewline/${env_name}/data/table-stream-arn" \
+  --region "$region" --query Parameter.Value --output text)" "$stream_arn"
+# 資料表沒有被取代：建立時間早於 stream 建立時間 / Not replaced: the table predates its stream.
+created=$(jq -r '.Table.CreationDateTime' <<<"$desc")
+label=$(jq -r '.Table.LatestStreamLabel // ""' <<<"$desc")
+check "Table older than its stream (not replaced)" \
+  "$([[ -n "$label" ]] && python3 - "$created" "$label" <<'PY'
+import sys, datetime
+def parse(v):
+    try: return datetime.datetime.fromtimestamp(float(v), datetime.timezone.utc)
+    except ValueError:
+        d = datetime.datetime.fromisoformat(v.replace('Z', '+00:00'))
+        return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)  # stream label 是 UTC、沒有時區
+t, l = parse(sys.argv[1]), parse(sys.argv[2])
+print('true' if (l - t).total_seconds() > 3600 else 'false')
+PY
+)" "true"
+
 check "Stack termination protection" "$(aws cloudformation describe-stacks --stack-name "$stack" --region "$region" \
   --query 'Stacks[0].EnableTerminationProtection' --output text | tr '[:upper:]' '[:lower:]')" "$want_termination_protection"
 
