@@ -145,6 +145,38 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
     }
   });
 
+  test('order tests (A2b-2): Dev only, orders-tests role, fixture access limited to exact test keys', () => {
+    const fns = resources(template, 'AWS::Lambda::Function').filter(([, r]) => r.Properties.FunctionName === `brewline-${envName}-ordering-order-tests`);
+    if (!cfg.api.orderTests) {
+      expect(fns).toHaveLength(0);
+      expect(template.toJSON().Outputs).not.toHaveProperty('OrderTestsFunctionName');
+      return;
+    }
+    expect(fns).toHaveLength(1);
+    const [[, fn]] = fns as [[string, Res]];
+    expect(fn.Properties.Timeout).toBe(120);
+    const roleId = fn.Properties.Role['Fn::GetAtt'][0];
+    expect(template.toJSON().Resources[roleId].Properties.RoleName).toBe(`brewline-${envName}-orders-tests`);
+    const st = statementsFor(template, `brewline-${envName}-ordering-order-tests`);
+    expect(st.find((x) => x.Sid === 'ResetRaceProduct')).toMatchObject({
+      Action: ['dynamodb:PutItem', 'dynamodb:GetItem'],
+      Condition: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['PRODUCT#p-9001'] } },
+    });
+    expect(st.find((x) => x.Sid === 'CleanTestTenants')).toMatchObject({
+      Action: ['dynamodb:Query', 'dynamodb:DeleteItem'],
+      Condition: {
+        'ForAllValues:StringEquals': {
+          'dynamodb:LeadingKeys': ['TENANT#t_01CNCRTST000000000000000A1', 'TENANT#t_01CNCRTST000000000000000B1'],
+        },
+      },
+    });
+    expect(st).toContainEqual(expect.objectContaining({ Sid: 'DenyScan', Effect: 'Deny' }));
+    // 反向：沒有其他 DynamoDB 允許（只有兩段夾具）/ Negative: no other DynamoDB allows.
+    const ddbAllows = st.filter((x) => x.Effect === 'Allow' && [].concat(x.Action).some((a: string) => a.startsWith('dynamodb:')));
+    expect(ddbAllows.map((x) => x.Sid).sort()).toEqual(['CleanTestTenants', 'ResetRaceProduct']);
+    expect(st.find((x) => [].concat(x.Action).includes('sts:AssumeRole' as never))).toBeDefined();
+  });
+
   test('seed: PutItem on PRODUCT# keys only, never updates STOCK by property', () => {
     const st = statementsFor(template, `brewline-${envName}-ordering-seed-catalog`);
     const ddb = st.filter((s) => s.Effect === 'Allow' && [].concat(s.Action).some((a: string) => a.startsWith('dynamodb:')));
@@ -191,7 +223,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   test('all first-party Lambdas follow the standard; provider framework functions are explicitly exempt', () => {
     const fns = resources(template, 'AWS::Lambda::Function');
     const ours = fns.filter(([, r]) => String(r.Properties.FunctionName ?? '').startsWith(`brewline-${envName}-`));
-    expect(ours).toHaveLength(cfg.api.smokeTest ? 8 : 7);
+    expect(ours).toHaveLength(7 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
     for (const [, r] of ours) {
       expect(r.Properties).toMatchObject({ Runtime: 'nodejs24.x', Architectures: ['arm64'], TracingConfig: { Mode: 'Active' } });
     }

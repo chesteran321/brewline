@@ -33,6 +33,9 @@ const SMOKE_PRODUCT_ID = 'p-0001';
 const SMOKE_ORDER_PRODUCT_ID = 'p-9002';
 /** Smoke test 的固定測試租戶（services/ordering/src/custom-resources/smoke-test.ts）/ Fixed smoke-test tenants. */
 const SMOKE_TENANTS = ['t_01SMKTEST000000000000000A1', 't_01SMKTEST000000000000000B1'];
+/** 訂單測試（A2b-2）的商品與租戶（services/ordering/src/order-tests/run.ts）/ Order-test fixtures. */
+const ORDER_TEST_PRODUCT_ID = 'p-9001';
+const ORDER_TEST_TENANTS = ['t_01CNCRTST000000000000000A1', 't_01CNCRTST000000000000000B1'];
 
 /**
  * 訂貨 API（A1：商品唯讀；A2：訂單，ADR-025）。HTTP API ＋ Cognito JWT authorizer，以 scope 授權（ADR-021、ADR-022）。
@@ -328,6 +331,52 @@ export class ApiStack extends Stack {
       // 路由、stage、種子都就緒後才測 / Run only after routes, stage and seed exist.
       smoke.node.addDependency(stage, seed, ...routeConstructs);
       new CfnOutput(this, 'SmokeTestSummary', { value: smoke.getAttString('Summary') });
+    }
+
+    // --- 7) Dev 訂單測試（手動觸發，A2b-2）/ Dev order tests (manual) ---
+    if (props.api.orderTests) {
+      if (!props.api.testProducts) throw new Error('api.orderTests requires api.testProducts');
+      // 角色名稱符合 brewline-<env>-orders-* → 可以扮演租戶角色（真實憑證的 IAM 探測需要）
+      // The role name matches brewline-<env>-orders-*, so it can assume the tenant role for the IAM probe.
+      const testFn = new BrewlineFunction(this, 'OrderTests', {
+        envName,
+        lambda: props.lambda,
+        module: 'ordering',
+        name: 'order-tests',
+        entry: 'ordering/src/order-tests/run.ts',
+        description: 'Dev-only, manual: idempotency storm, stock race (no overselling), IAM probe with tenant credentials',
+        reservedConcurrency: 1,
+        memorySize: 512,
+        timeout: Duration.minutes(2),
+        roleName: `${TenantAccessRole.callerRolePrefix(envName)}tests`,
+        environment: {
+          TABLE_NAME: tableName,
+          TENANT_ROLE_ARN: this.tenantAccess.role.roleArn,
+          POWERTOOLS_SERVICE_NAME: 'ordering-order-tests',
+        },
+      });
+      this.tenantAccess.grantAssume(testFn.role);
+      // 夾具權限：只限測試商品 p-9001 與兩個固定測試租戶（完全比對）
+      // Fixture permissions: the p-9001 test product and two fixed test tenants only (exact keys).
+      testFn.role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'ResetRaceProduct',
+          actions: ['dynamodb:PutItem', 'dynamodb:GetItem'],
+          resources: [tableArn],
+          conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': [`PRODUCT#${ORDER_TEST_PRODUCT_ID}`] } },
+        }),
+      );
+      testFn.role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'CleanTestTenants',
+          actions: ['dynamodb:Query', 'dynamodb:DeleteItem'],
+          resources: [tableArn],
+          conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ORDER_TEST_TENANTS.map((t) => `TENANT#${t}`) } },
+        }),
+      );
+      testFn.role.addToPolicy(denyScan);
+      testFn.role.addToPolicy(kmsViaDynamo(['kms:Decrypt', 'kms:Encrypt', 'kms:GenerateDataKey']));
+      new CfnOutput(this, 'OrderTestsFunctionName', { value: testFn.function.functionName });
     }
 
     new CfnOutput(this, 'ApiUrl', { value: this.httpApi.apiEndpoint });
