@@ -196,6 +196,28 @@
   - 費用 0（STS 免費）。
 - **替代方案 Alternatives considered**：只在程式中過濾（bug 即外洩）；每個租戶一個 IAM 角色（數量無法擴展）；DynamoDB 細粒度存取搭配 Cognito Identity Pool（需要前端直連 DynamoDB）。
 
+### ADR-025 下單交易與冪等 / Order Transaction and Idempotency
+
+- **狀態 Status**：Accepted（2026-11-13，訂貨 A2b）；修正 03 §6（訂單 sk）、ORD-F-004（不用 Powertools Idempotency）
+- **背景 Context**：ORD-F-003「下單同時預留庫存，不足則整筆失敗」、ORD-F-004「Idempotency-Key 重送不重複」、ORD-N-001「租戶隔離在資料層強制」。A2 決策：D1 STS session tag（ADR-024）、D2 冪等記錄放在同一個交易、D3 只做路由限流。
+- **決策 Decision**：
+  - `POST /orders` 用**一個 `TransactWriteItems`**：`[0]` Put `TENANT#<t>/IDEMP#<key>`（`attribute_not_exists(pk) OR expires_at < :now`，TTL 24 小時）、`[1]` Put `TENANT#<t>/ORDER#<ULID>`、`[2..]` 每個商品 Update `PRODUCT#<p>/STOCK`（`available_kg >= :q` → 減 available、加 reserved、version + 1）。依 `CancellationReasons` 的位置判斷：`[0]` 失敗 → 讀冪等記錄（同一請求 200 回原訂單、內容不同 422）；`[2..]` 失敗 → 409 並列出商品；`TransactionConflict` → 重試 3 次後 503；throttle → 503。
+  - **定價在伺服器端**：先以租戶憑證 `BatchGetItem` 讀 META（價格、狀態），訂單保存價格快照；body 不接受價格（`strictObject`）。
+  - 訂單 sk 改為 **`ORDER#<ULID>`**（v0.1 為 `ORDER#<ts>#<id>`）：ULID 依時間排序，`GET /orders/{id}` 可直接 `GetItem`。`order_id = o_<ULID>`。GSI1：`STATUS#CREATED`／`<created_at>#<order_id>`。
+  - **輸入上限**（決策 D6 修訂）：每筆最多 **25** 個商品、每個 **1–500 kg**（整數）、商品不重複、body ≤ 16 KB。理由：交易最多 100 個項目；交易寫入為 2 倍 WRU，單一請求不可吃光表的寫入上限；下限 1 防止負數「增加」庫存。
+  - 付款：`payment_status = PAID_MOCK`（ORD-F-010）。訂單函數的角色（`brewline-<env>-orders-{create,list,get}`）**沒有任何 DynamoDB／KMS 權限**，只能扮演租戶角色；憑證依租戶快取（到期前 5 分鐘更新）。
+  - 讀取：`GET /orders` 以 `Query` 查自己的分割區（新的在前，`limit` 1–50，游標只帶 sk）；`GET /orders/{id}` 別的租戶 → **404**（不透露是否存在）。
+  - 路由限流 `POST /orders`：Dev 2／5、Prod 10／20 req/s（stage `RouteSettings`）。
+  - Dev 測試商品 `p-9001`（併發測試，A2b-2）、`p-9002`（smoke test）：只寫入 Dev，**不設 `gsi1pk`**（稀疏索引）→ 不在目錄、可以用 ID 下單。smoke test 每次重設 `p-9002` 庫存、結束後刪除兩個固定測試租戶的項目（角色權限以 `LeadingKeys` 完全比對限定）。
+- **後果 Consequences**：
+  - 讀價格與扣庫存**不是同一個原子操作**：租戶角色不能對商品做 `ConditionCheckItem`（ADR-024）。下單瞬間改價時，以讀到的價格成交（價格快照）。可接受：價格只由部署變更。
+  - 25 個商品的交易約 54 WRU，**超過 Dev 表 25 WRU/s 的上限** → 最大訂單在 Dev 可能被 throttle，回 503（可用同一個 key 重試）。Prod 上限 100。
+  - 一筆最多可預留 500 kg，可能等於某商品全部庫存；在取消與逾時釋放（A3）之前，預留無法自動釋放（RSK-016）。
+  - 冪等記錄的 TTL 是延遲刪除；程式以 `expires_at` 判斷，不依賴 TTL 準時。
+  - HTTP API 的 route key 必須先存在，stage 才能設定 `RouteSettings` → stage 依賴路由；`RouteSettings` 是 Json 型別，鍵名必須是 PascalCase。
+  - 費用：STS 免費；每筆訂單約 6–54 WRU，smoke test 規模每月 < USD 0.1。
+- **替代方案 Alternatives considered**：Powertools Idempotency（需要另一張表或另一套 key，且與訂單寫入不在同一交易，會有「記錄了冪等但訂單失敗」的視窗）；以 `version` 做樂觀鎖（多一次讀取，交易條件已足夠）；訂單 sk 用時間戳（需要另一個索引才能依 ID 查）。
+
 ### ADR 範本 / ADR Template
 
 ```markdown
@@ -229,6 +251,7 @@
 | RSK-012 | 非公開的第三方資料或格式不慎混入 / Non-public third-party data leakage into project | L | H | 限制 C-03；EDI 只依公開規格；提交前自我檢查清單 | Chester |
 | RSK-014 | 沒有 WAF，惡意流量只能靠限流與預算控制擋下；execute-api 網址可被直接呼叫 / No WAF; floods are stopped only by throttling and budgets | M | L | ADR-020 的六層控制；Budget Actions；前端上線時加 CloudFront＋WAF 並評估關閉 execute-api 預設端點 | Chester |
 | RSK-015 | 已撤銷的帳號在 access token 到期前仍可呼叫 API；staff MFA 無法由 Cognito 強制 / Revoked users keep API access until token expiry; staff MFA not enforceable per group | M | M | Token **15 分鐘**（A2a）；部署後驗證偵測 staff 未設 TOTP；高風險操作（A2 之後）在 Lambda 再查使用者狀態 | Chester |
+| RSK-016 | A3（取消、逾時釋放）之前，已預留的庫存不會自動釋放；單筆最多可預留 500 kg，可能佔滿某商品全部庫存 / Reserved stock is never released before A3; one order may reserve a product's entire stock | M | M | 只有核准開通的租戶能下單（不開放註冊）；路由限流；`GET /admin/products/{id}/stock` 監看 reserved；A3 加入取消與逾時釋放 | Chester |
 
 風險清單於每季複查，新增或變更紀錄於 Git 歷史。
 The register is reviewed quarterly; changes are tracked in Git history.

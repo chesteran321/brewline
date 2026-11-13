@@ -70,8 +70,16 @@ export interface ApiSettings {
   /** Stage 預設限流（每秒請求數）/ Stage default throttle (requests per second). */
   readonly throttleRateLimit: number;
   readonly throttleBurstLimit: number;
-  /** 部署時執行 A1 smoke test（需要 auth stack 的 smoke-test client）/ Run the A1 smoke test on deploy. */
+  /** 部署時執行 smoke test（需要 auth stack 的 smoke-test client）/ Run the smoke test on deploy. */
   readonly smokeTest: boolean;
+  /**
+   * `POST /orders` 的路由限流（A2 決策 D3：HTTP API 無法每租戶限流，改以路由限流控制下單量）。
+   * Route throttle for POST /orders (per-tenant throttling is not possible on HTTP API).
+   */
+  readonly orderThrottleRateLimit: number;
+  readonly orderThrottleBurstLimit: number;
+  /** 寫入 Dev 測試商品 p-9xxx（不在目錄）/ Seed hidden p-9xxx test products. */
+  readonly testProducts: boolean;
 }
 
 export interface BrewlineEnv {
@@ -112,7 +120,14 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       logRetentionDays: 7, // COST-007
       reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1 },
     },
-    api: { throttleRateLimit: 10, throttleBurstLimit: 20, smokeTest: true },
+    api: {
+      throttleRateLimit: 10,
+      throttleBurstLimit: 20,
+      smokeTest: true,
+      orderThrottleRateLimit: 2,
+      orderThrottleBurstLimit: 5,
+      testProducts: true,
+    },
   },
   prod: {
     name: 'prod',
@@ -135,7 +150,14 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       logRetentionDays: 30, // COST-007
       reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1 },
     },
-    api: { throttleRateLimit: 50, throttleBurstLimit: 100, smokeTest: false },
+    api: {
+      throttleRateLimit: 50,
+      throttleBurstLimit: 100,
+      smokeTest: false,
+      orderThrottleRateLimit: 10,
+      orderThrottleBurstLimit: 20,
+      testProducts: false,
+    },
   },
 };
 

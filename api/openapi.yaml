@@ -1,10 +1,10 @@
-# BrewLine 訂貨 API — A1（商品唯讀）/ BrewLine ordering API — A1 (read-only catalog)
+# BrewLine 訂貨 API — A1（商品）＋A2（訂單）/ BrewLine ordering API — A1 (catalog) + A2 (orders)
 # 真實來源是 infra/app/lib/stacks/api-stack.ts；此檔描述對外合約（docs/03 §7）。
 # The source of truth is api-stack.ts; this file documents the public contract.
 openapi: 3.1.0
 info:
   title: BrewLine Ordering API
-  version: 0.1.0-a1
+  version: 0.2.0-a2
   description: |
     驗證：Cognito access token（`Authorization: Bearer <token>`）。授權以 OAuth scope 在 API Gateway 執行，
     越權請求回 403，不會叫起 Lambda（ADR-022）。ID token 沒有 scope，會被拒絕。
@@ -73,6 +73,96 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /orders:
+    post:
+      operationId: createOrder
+      summary: 下單（冪等、原子性預留庫存）/ Create an order (idempotent, reserves stock atomically)
+      description: |
+        價格由伺服器讀取並保存快照，client 不能送價格。所有商品一起成功或一起失敗。
+        同一個 Idempotency-Key 在 24 小時內重送相同內容 → 200 回原訂單；內容不同 → 422。
+        Prices are read server-side and snapshotted. All lines succeed or none do.
+        Replaying a key within 24 h returns the original order (200); a different body with the same key → 422.
+        路由限流 Route throttle：Dev 2 req/s（突發 5）、Prod 10 req/s（突發 20）。
+      security:
+        - cognito: [brewline/orders.write]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[A-Za-z0-9_-]{16,64}$', example: 550e8400-e29b-41d4-a716-446655440000 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOrderRequest' }
+      responses:
+        '201':
+          description: 已建立 / Created
+          content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } }
+        '200':
+          description: 同一個 Idempotency-Key 重送，回原訂單 / Replay of the same key; original order
+          content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } }
+        '400':
+          description: 輸入錯誤、缺少 Idempotency-Key、商品不存在（`unknown_products`）/ Invalid input or unknown products
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: 庫存不足，沒有預留任何庫存（`insufficient_stock`，含 product_ids）/ Not enough stock; nothing reserved
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422':
+          description: Idempotency-Key 已用於不同內容（`idempotency_key_reused`）/ Key reused with a different body
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503':
+          description: 暫時忙碌，請用同一個 Idempotency-Key 重試（`try_again`）/ Busy; retry with the same key
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    get:
+      operationId: listOrders
+      summary: 自己租戶的訂單，新的在前 / Own tenant's orders, newest first
+      security:
+        - cognito: [brewline/orders.read]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+        - name: next_token
+          in: query
+          schema: { type: string, maxLength: 200 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Order' } }
+                  next_token: { type: string, description: 有下一頁時才出現 / present when more pages exist }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      summary: 自己租戶的訂單明細 / Own tenant's order
+      description: 別的租戶的訂單回 404（不透露是否存在）/ Another tenant's order returns 404.
+      security:
+        - cognito: [brewline/orders.read]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, pattern: '^o_[0-9A-HJKMNP-TV-Z]{26}$' }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 components:
   securitySchemes:
     cognito:
@@ -84,6 +174,8 @@ components:
           scopes:
             brewline/catalog.read: 讀商品目錄（cafe、simulator、staff）
             brewline/admin: 內部人員端點（staff）
+            brewline/orders.read: 讀自己租戶的訂單（cafe、simulator）
+            brewline/orders.write: 為自己租戶下單（cafe、simulator）
   parameters:
     ProductId:
       name: id
@@ -127,6 +219,46 @@ components:
         low_threshold_kg: { type: integer }
         version: { type: integer }
         stock_status: { $ref: '#/components/schemas/StockStatus' }
+    CreateOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 25
+          description: 每個商品只能出現一次 / each product at most once
+          items:
+            type: object
+            additionalProperties: false
+            required: [product_id, qty_kg]
+            properties:
+              product_id: { type: string, pattern: '^p-\d{4}$' }
+              qty_kg: { type: integer, minimum: 1, maximum: 500 }
+    Order:
+      type: object
+      additionalProperties: false
+      required: [order_id, status, payment_status, items, total, currency, created_at]
+      properties:
+        order_id: { type: string, pattern: '^o_[0-9A-HJKMNP-TV-Z]{26}$' }
+        status: { type: string, enum: [CREATED] }
+        payment_status: { type: string, enum: [PAID_MOCK], description: 模擬付款（ORD-F-010）/ mock payment }
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [product_id, name, qty_kg, price_per_kg, line_total]
+            properties:
+              product_id: { type: string }
+              name: { type: string }
+              qty_kg: { type: integer }
+              price_per_kg: { type: integer, description: 下單當下的價格快照 / price snapshot at order time }
+              line_total: { type: integer }
+        total: { type: integer }
+        currency: { type: string, enum: [TWD] }
+        created_at: { type: string, format: date-time }
     Error:
       type: object
       properties:
@@ -135,6 +267,9 @@ components:
           properties:
             code: { type: string }
             message: { type: string }
+            product_ids: { type: array, items: { type: string }, description: unknown_products／insufficient_stock }
+            issues: { type: array, items: { type: object }, description: invalid_request 的欄位路徑與規則 / paths and rules }
+            limits: { type: object, description: invalid_request 時附上輸入上限 / input limits }
   responses:
     BadRequest:
       description: 參數格式錯誤 / Invalid parameter
@@ -147,4 +282,4 @@ components:
       description: 找不到 / Not found
       content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     TooManyRequests:
-      description: 超過 stage 限流 / Stage throttling exceeded
+      description: 超過 stage 或路由限流 / Stage or route throttling exceeded

@@ -96,7 +96,9 @@ describe('smoke test tenant id', () => {
     const src = await import('node:fs').then((fs) =>
       fs.readFileSync(require.resolve('../src/custom-resources/smoke-test.ts'), 'utf8'),
     );
-    const m = /const TENANT_ID = '([^']+)'/.exec(src);
-    expect(m && TENANT_ID_PATTERN.test(m[1]!)).toBe(true);
+    for (const name of ['TENANT_ID', 'TENANT_B_ID']) {
+      const m = new RegExp(`const ${name} = '([^']+)'`).exec(src);
+      expect(m && TENANT_ID_PATTERN.test(m[1]!)).toBe(true);
+    }
   });
 });

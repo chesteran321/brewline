@@ -77,4 +77,38 @@ sim "Create product (Put)"               implicitDeny dynamodb:PutItem       "$A
 sim "Delete own order"                   implicitDeny dynamodb:DeleteItem    "$A" "TENANT#$A"
 sim "Scan"                               explicitDeny dynamodb:Scan          "$A" ""
 
+# --- 呼叫端：訂單函數角色（A2b）/ Callers: order function roles ---
+# 函數角色只能扮演租戶角色，本身沒有任何 DynamoDB／KMS 權限 / They may only assume the tenant role.
+for suffix in create list get; do
+  caller="brewline-${env_name}-orders-${suffix}"
+  if ! caller_arn=$(aws iam get-role --role-name "$caller" --query Role.Arn --output text 2>/dev/null); then
+    check "Caller role $caller exists" "missing" "present"; continue
+  fi
+  check "Caller role $caller exists" "present" "present"
+  managed=$(aws iam list-attached-role-policies --role-name "$caller" --query 'length(AttachedPolicies)' --output text)
+  check "$caller managed policies" "$managed" "0"
+  actions=$(for p in $(aws iam list-role-policies --role-name "$caller" --query 'PolicyNames[]' --output text); do
+      aws iam get-role-policy --role-name "$caller" --policy-name "$p" --query 'PolicyDocument.Statement' --output json
+    done | jq -s -c '[.[][] | select(.Effect == "Allow") | .Action] | flatten | map(select(startswith("dynamodb:") or startswith("kms:"))) | unique')
+  check "$caller DynamoDB/KMS allows" "$actions" "[]"
+  for action in sts:AssumeRole sts:TagSession; do
+    if out=$(aws iam simulate-principal-policy --policy-source-arn "$caller_arn" --action-names "$action" \
+          --resource-arns "$role_arn" --query 'EvaluationResults[0].EvalDecision' --output text 2>&1); then
+      check "$caller → $action tenant role" "$out" "allowed"
+    elif grep -q 'AccessDenied' <<<"$out"; then
+      echo "⚠️  $caller → $action: simulation not permitted (skipped)"
+    else
+      echo "❌ $caller → $action: $out"; fail=1
+    fi
+  done
+  if out=$(aws iam simulate-principal-policy --policy-source-arn "$caller_arn" --action-names dynamodb:GetItem \
+        --resource-arns "$table_arn" --query 'EvaluationResults[0].EvalDecision' --output text 2>&1); then
+    check "$caller → table directly" "$out" "implicitDeny"
+  elif grep -q 'AccessDenied' <<<"$out"; then
+    echo "⚠️  $caller → table: simulation not permitted (skipped)"
+  else
+    echo "❌ $caller → table: $out"; fail=1
+  fi
+done
+
 exit "$fail"

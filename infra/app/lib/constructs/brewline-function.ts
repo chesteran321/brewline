@@ -26,6 +26,11 @@ export interface BrewlineFunctionProps {
   /** 預設 10 秒（API 函數）/ Default 10 s (API functions). */
   readonly timeout?: Duration;
   readonly environment?: Record<string, string>;
+  /**
+   * 固定的 IAM 角色名稱（例如訂單函數必須是 brewline-<env>-orders-*，ADR-024）；預設由 CloudFormation 產生。
+   * Fixed role name (order functions must be brewline-<env>-orders-*); CloudFormation generates one by default.
+   */
+  readonly roleName?: string;
 }
 
 /**
@@ -61,6 +66,7 @@ export class BrewlineFunction extends Construct {
     this.role = new iam.Role(this, 'Role', {
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
       description: `Execution role for ${functionName}`,
+      roleName: props.roleName,
     });
     // 只能寫自己的 log group / Write only to its own log group.
     this.role.addToPolicy(

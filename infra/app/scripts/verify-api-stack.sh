@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 部署後驗證訂貨 API（A1）：查詢 AWS 實際狀態，並以 HTTP 做不需要登入的反向測試。
+# 部署後驗證訂貨 API（A1 商品＋A2 訂單）：查詢 AWS 實際狀態，並以 HTTP 做不需要登入的反向測試。
 # Post-deploy verification of the ordering API (A1): real AWS state plus unauthenticated HTTP negative tests.
 #
 # 用法 Usage: scripts/verify-api-stack.sh <dev|prod> <outputs.json>
@@ -14,8 +14,8 @@ region="${AWS_REGION:-ap-east-2}"
 stack="brewline-${env_name}-api"
 
 case "$env_name" in
-  dev)  want_rate=10; want_burst=20;  want_concurrency=5;  want_retention=7;  want_smoke=true;  want_termination_protection=false ;;
-  prod) want_rate=50; want_burst=100; want_concurrency=10; want_retention=30; want_smoke=false; want_termination_protection=true ;;
+  dev)  want_rate=10; want_burst=20;  want_order_rate=2;  want_order_burst=5;  want_concurrency=5;  want_retention=7;  want_smoke=true;  want_termination_protection=false ;;
+  prod) want_rate=50; want_burst=100; want_order_rate=10; want_order_burst=20; want_concurrency=10; want_retention=30; want_smoke=false; want_termination_protection=true ;;
   *) echo "unknown env: $env_name" >&2; exit 2 ;;
 esac
 
@@ -46,10 +46,14 @@ aws sts get-caller-identity --query Arn --output text
 # --- 路由與授權 / Routes and authorization ---
 routes=$(aws apigatewayv2 get-routes --api-id "$api_id" --region "$region" --output json)
 check "Routes" "$(jq -c '[.Items[].RouteKey] | sort' <<<"$routes")" \
-  '["GET /admin/products/{id}/stock","GET /products","GET /products/{id}"]'
+  '["GET /admin/products/{id}/stock","GET /orders","GET /orders/{id}","GET /products","GET /products/{id}","POST /orders"]'
 check "Routes without JWT" "$(jq -r '[.Items[] | select(.AuthorizationType != "JWT")] | length' <<<"$routes")" "0"
 check "Routes without a scope" "$(jq -r '[.Items[] | select((.AuthorizationScopes // []) | length == 0)] | length' <<<"$routes")" "0"
-check "Admin route scope" "$(jq -c '.Items[] | select(.RouteKey == "GET /admin/products/{id}/stock") | .AuthorizationScopes' <<<"$routes")" '["brewline/admin"]'
+scope_of() { jq -c --arg k "$1" '.Items[] | select(.RouteKey == $k) | .AuthorizationScopes' <<<"$routes"; }
+check "Admin route scope" "$(scope_of 'GET /admin/products/{id}/stock')" '["brewline/admin"]'
+check "POST /orders scope" "$(scope_of 'POST /orders')" '["brewline/orders.write"]'
+check "GET /orders scope" "$(scope_of 'GET /orders')" '["brewline/orders.read"]'
+check "GET /orders/{id} scope" "$(scope_of 'GET /orders/{id}')" '["brewline/orders.read"]'
 
 authz=$(aws apigatewayv2 get-authorizers --api-id "$api_id" --region "$region" --output json)
 issuer=$(aws ssm get-parameter --name "/brewline/${env_name}/auth/issuer" --region "$region" --query Parameter.Value --output text)
@@ -61,12 +65,14 @@ stage=$(aws apigatewayv2 get-stage --api-id "$api_id" --stage-name '$default' --
 # ThrottlingRateLimit 是浮點數（API 回 10.0），先轉整數再比對 / The API returns the rate as a float (10.0).
 check "Stage throttle rate"  "$(jq -r '.DefaultRouteSettings.ThrottlingRateLimit | floor' <<<"$stage")" "$want_rate"
 check "Stage throttle burst" "$(jq -r '.DefaultRouteSettings.ThrottlingBurstLimit | floor' <<<"$stage")" "$want_burst"
+check "POST /orders route throttle rate"  "$(jq -r '.RouteSettings["POST /orders"].ThrottlingRateLimit // 0 | floor' <<<"$stage")" "$want_order_rate"
+check "POST /orders route throttle burst" "$(jq -r '.RouteSettings["POST /orders"].ThrottlingBurstLimit // 0 | floor' <<<"$stage")" "$want_order_burst"
 check "Stage access logs"    "$(jq -r '.AccessLogSettings.DestinationArn // "none" | test("^arn:aws:logs:")' <<<"$stage")" "true"
 check "No CORS configured"   "$(aws apigatewayv2 get-api --api-id "$api_id" --region "$region" --query 'CorsConfiguration' --output text)" "None"
 
 # --- Lambda ---
 IFS=',' read -r -a fns <<<"$(out FunctionNames)"
-check "API function count" "${#fns[@]}" "3"
+check "API function count" "${#fns[@]}" "6"
 for fn in "${fns[@]}"; do
   cfg=$(aws lambda get-function-configuration --function-name "$fn" --region "$region" --output json)
   short=${fn#brewline-${env_name}-ordering-}
@@ -110,6 +116,9 @@ check "GET /products with garbage token"      "$(http_status GET /products 'Bear
 check "GET /admin/... with forged admin JWT"  "$(http_status GET /admin/products/p-0001/stock "Bearer ${forged}")" "401"
 check "Unknown route"                         "$(http_status GET /no-such-route)" "404"
 check "POST /products (no such method)"       "$(http_status POST /products)" "404"
+check "POST /orders without token"            "$(http_status POST /orders)" "401"
+check "GET /orders without token"             "$(http_status GET /orders)" "401"
+check "POST /orders with forged JWT"          "$(http_status POST /orders "Bearer ${forged}")" "401"
 
 # --- 反向：唯讀角色讀不到資料內容（表層 CMK）/ Negative: read-only role cannot read item contents (CMK) ---
 table=$(aws ssm get-parameter --name "/brewline/${env_name}/data/table-name" --region "$region" --query Parameter.Value --output text)
