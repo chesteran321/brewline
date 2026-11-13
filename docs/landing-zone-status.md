@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -561,7 +561,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 教訓 / Lessons：
 - （2026-11-13）IAM `get-role` 會把**只有一個值的條件陣列**回傳成字串（部署 `["tenant_id"]` → 讀回 `"tenant_id"`），驗證腳本誤判失敗、Prod 延後一次 → jq `[.] | flatten` 正規化後比對（PR #21）。
 
-### 10.9 訂單 API / Orders API（P1，2026-11-13，ADR-025，PR #23、#25）
+### 10.9 訂單 API / Orders API（P1，2026-11-13，ADR-025、ADR-027，PR #23、#25、#31）
 
 | 項目 | Dev | Prod |
 |---|---|---|
@@ -572,7 +572,9 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 交易 | 一個 `TransactWriteItems`：`IDEMP#<key>`（TTL 24h）＋`ORDER#<ULID>`＋每個商品扣 `STOCK`；伺服器端定價（價格快照）；`PAID_MOCK` | 同左 |
 | 輸入上限 | 每筆 ≤ 25 個商品、每個 1–500 kg、商品不重複、body ≤ 16 KB | 同左 |
 | 測試商品 | `p-9001`（併發，10 kg）、`p-9002`（smoke，每次重設 100 kg）；**不設 `gsi1pk`** → 不在目錄 | 無 |
-| Smoke test | **41 項**（A1 的 18 項＋訂單 23 項） | 無 |
+| Smoke test | **57 項**（A1 18＋訂單 23＋staff 16） | 無 |
+| staff 端點（A3c） | `GET /admin/orders?status=`、`GET`／`PATCH /admin/tenants/{tenantId}/orders/{orderId}`（`brewline/admin`）；函數 `brewline-dev-ordering-admin-{list-orders,get-order,update-order}`，角色由 CloudFormation 命名（**不能**扮演租戶角色）；只能 Query GSI1 `STATUS#*`、Get／Update `TENANT#*`、商品只改庫存欄位；無 Put／Delete／Batch | 同左，保留併發 10 |
+| 狀態機 | `CREATED → CONFIRMED → ROASTING_SCHEDULED → ROASTED → SHIPPED → COMPLETED`；`CREATED`／`CONFIRMED → CANCELLED`；一個交易＝訂單（條件：原狀態）＋庫存（SHIPPED 消耗、CANCELLED 釋放，`reserved >= q`） | 同左 |
 | 訂單測試（手動） | `brewline-dev-ordering-order-tests`（角色 `brewline-dev-orders-tests`，保留併發 1）；`infra/app/scripts/run-order-tests.sh`；夾具權限只限 `PRODUCT#p-9001` 與兩個 `TENANT#t_01CNCRTST…` | 無 |
 
 - 回應：201 建立；200 同一個 key 重送（回原訂單）；422 同一個 key 不同內容；409 庫存不足（什麼都沒扣）；400 輸入錯誤／商品不存在；503 交易衝突或 throttle（同一個 key 重試）；別的租戶的訂單 → 404。
@@ -589,6 +591,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
   - 搶庫存：100 個請求搶 10 kg（約 4.1 秒）→ `created 10`、`insufficient_stock 58`、`busy 32`；`available 0`、`reserved 1 → 11`，資料表 10 筆訂單。**03 §11「100 個並發搶最後 10 kg 不超賣」達成。**
   - IAM 探測（租戶 A 的真實臨時憑證）：讀自己的訂單成功；讀 B、Query B、寫進 B、改價格、Query GSI1、Scan、刪除自己的訂單 → 全部 `AccessDeniedException`。**ORD-N-001「跨租戶存取 100% 失敗」在資料層達成。**
   - 清理 22 個項目（11 筆訂單＋11 筆冪等記錄）。
+
+- **A3c（2026-11-13，commit `3692008`）**：Dev smoke **57/57**：staff 依序推進到 `COMPLETED`、出貨後庫存 **95／2**、取消後釋放回 **97／0**；反向：cafe PATCH 403、無 token 401、未知狀態 400、跳級 409（附 allowed）、錯誤租戶 404、排程烘焙後取消 409、**重複取消 409 且庫存不變**；咖啡廳看到 5 筆 `status_history`、**不含 `by`**。`verify-api-stack.sh` Dev／Prod：9 條路由、3 個 admin scope、9 個函數、偽造 admin JWT 的 PATCH 401。Events（Dev）：`OrderStatusChanged → COMPLETED` 已寫入 log。
 
 教訓 / Lessons：
 - （2026-11-13）搶庫存時 32 筆是 `busy`（`TransactionConflict` 重試 3 次後放棄）而不是 throttle：多個交易同時更新**同一個 STOCK 項目**，DynamoDB 直接取消衝突的交易，不會排隊等待。對 client 而言是 503，用同一個 Idempotency-Key 重試即可。熱門商品的單一庫存項目是寫入熱點（hot key）；正式流量若需要更高併發，可考慮庫存分片或佇列化下單（A3 之後評估）。
@@ -638,6 +642,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22 |
 | ADR-024 | 租戶隔離：STS session tag ＋ `LeadingKeys` 完全比對 | Accepted（2026-11-13） | 訂單函數（`brewline-<env>-orders-*`）帶 `tenant_id` 扮演 `brewline-<env>-tenant-access`；商品只能改庫存欄位；Scan 明確 Deny（§10.8） |
 | ADR-025 | 下單交易與冪等 | Accepted（2026-11-13） | 冪等記錄＋訂單＋扣庫存在同一個交易；sk `ORDER#<ULID>`；伺服器端定價；≤ 25 個商品、1–500 kg；路由限流（§10.9） |
+| ADR-027 | 訂單狀態機與 staff 端點 | Accepted（2026-11-13） | 狀態以 DynamoDB 為準；一個交易＝訂單（樂觀鎖：原狀態）＋庫存；staff 函數不扮演租戶角色、無 Put／Delete（§10.9） |
 | ADR-026 | 事件層：Streams → Lambda → EventBridge | Accepted（2026-11-13） | 台北沒有 Pipes／Archive；自訂 bus、白名單 detail、`event_id` 去重、Logs 規則留存、DLQ SSE-SQS（§10.10） |
 
 | 風險 | 內容 | L | I | 緩解 |
@@ -720,7 +725,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-13 | A3 決策：D1 Streams → Lambda → EventBridge；D2 狀態以 DynamoDB 為準、Step Functions 只做逾時取消；D5 逾時 Dev 10 分／Prod 48 小時；D6 咖啡廳自行取消延後；D7 先建告警、通知待 A4 |
 | ✅ 2026-11-13 | 訂貨 A3a Streams（§10.5，PR #27）、A3b 事件層（§10.10，PR #28、#29）部署 Dev、Prod 並驗證 |
 | 有空時 | Developer 權限集加上 EventBridge、Step Functions、SQS 唯讀（目前 `events:ListEventBuses` 被拒） |
-| P1 | 下一步：訂貨模組 A3c（staff 端點＋狀態轉換）→ A3d（Step Functions 逾時取消）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
+| ✅ 2026-11-13 | 訂貨 A3c：staff 端點＋狀態機部署 Dev、Prod 並驗證（§10.9，PR #31） |
+| P1 | 下一步：訂貨模組 A3d（Step Functions 逾時取消）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 

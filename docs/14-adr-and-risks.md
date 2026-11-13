@@ -254,7 +254,7 @@
 - **後果 Consequences**：
   - staff 是跨租戶的高權限操作 → 結構化稽核日誌（staff sub、tenant、order、from→to、結果）；之後 A4 可加上告警。
   - 預留庫存可由 staff 取消釋放；**逾時自動釋放**在 A3d（RSK-016 仍為 Open，直到 A3d 完成）。
-  - Dev smoke test 走完整個生命週期（58 項）。
+  - Dev smoke test 走完整個生命週期（共 57 項）。
 - **替代方案 Alternatives considered**：每個狀態一條路由（例如 `/confirm`、`/ship`）→ 路由多、規則分散；以 Step Functions callback 推進（A3 D2 的選項 A）→ 狀態有兩個來源。
 
 ### ADR 範本 / ADR Template
