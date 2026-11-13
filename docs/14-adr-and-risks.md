@@ -220,6 +220,25 @@
   - **A2b-2（Dev，手動）**：`brewline-dev-ordering-order-tests`（角色 `brewline-dev-orders-tests`）以 `infra/app/scripts/run-order-tests.sh` 觸發：冪等風暴（同一個 key 同時 10 次 → 1 筆）、搶庫存（100 個請求搶 10 kg → 不超賣、帳目一致；Dev 寫入上限造成的 throttle 視為預期）、IAM 探測（租戶 A 的真實憑證讀／寫 B、改價格、查 GSI1、Scan、刪除 → `AccessDeniedException`）。
 - **替代方案 Alternatives considered**：Powertools Idempotency（需要另一張表或另一套 key，且與訂單寫入不在同一交易，會有「記錄了冪等但訂單失敗」的視窗）；以 `version` 做樂觀鎖（多一次讀取，交易條件已足夠）；訂單 sk 用時間戳（需要另一個索引才能依 ID 查）。
 
+### ADR-026 事件層：DynamoDB Streams → Lambda → EventBridge / Event Layer
+
+- **狀態 Status**：Accepted（2026-11-13，訂貨 A3b）；修正 01 §5、09 §2.4
+- **背景 Context**：03 §8 要求發布 `OrderCreated`、`OrderStatusChanged`、`StockLow`。台北（ap-east-2）**沒有 EventBridge Pipes、Archive and replay、Schema registry**（EventBridge 各區域功能表；2026-11-13 已實測可以建立自訂 bus）。
+- **決策 Decision**（A3 決策 D1＝B）：
+  - **事件來源是 DynamoDB Streams**（`NEW_AND_OLD_IMAGES`，A3a），不是業務 Lambda 直接 `PutEvents` → 沒有雙寫問題；API、staff、Step Functions 任何寫入路徑都會自動產生事件。
+  - 新 stack `brewline-<env>-events`：自訂 bus `brewline-<env>`；發布函數 `brewline-<env>-events-stream-publisher`。事件來源對應設定：`LATEST`、batch 25、**事件過濾**（只處理 `entity = Order` 與 `sk = STOCK` 的 MODIFY）、`ReportBatchItemFailures`、bisect、重試 3 次、紀錄最長 1 小時、失敗批次送 SQS DLQ。
+  - 事件格式：`source = brewline.ordering`，`detail-type` 為事件名稱；detail **白名單**（不含使用者 sub、pk／sk、冪等鍵）；`event_id` = stream `eventID`（重試時相同，下游可去重）。`StockLow` 只在「從 ≥ 門檻跌破門檻」時發一次。
+  - 留存：用規則把 `brewline.*` 事件寫入 CloudWatch Logs `/aws/events/brewline-<env>`（Dev 7 天、Prod 30 天），取代台北沒有的 Archive。使用原生 `AWS::Logs::ResourcePolicy`，以 `aws:SourceArn` 限定這條規則；**不用** `targets.CloudWatchLogGroup`（它會部署一個 AwsCustomResource Lambda）。
+  - DLQ 使用 **SSE-SQS**：stream DLQ 只放批次位置資訊、規則 DLQ 放白名單 detail；若用 CMK，需要在 data stack 的 key policy 加上 `events.amazonaws.com`。
+  - 告警（決策 D7）：IteratorAge > 5 分鐘、兩個 DLQ 有訊息；**A4 之前沒有通知目標**。
+  - 其他 stack 由 SSM `/brewline/<env>/events/{bus-name,bus-arn}` 取得 bus。api stack 依賴 events stack，讓 Dev smoke test 下的單會經過發布函數（驗證腳本檢查 `OrderCreated`）。
+- **後果 Consequences**：
+  - 至少一次（at-least-once）傳遞：部分失敗時會從第一筆失敗的紀錄重送，下游必須以 `event_id` 去重（A3d 的 Step Functions 以 `order_id` 當執行名稱）。
+  - 同一個 shard 內的順序保持；跨 shard（不同分割區）不保證順序。
+  - 不能重播歷史事件（沒有 Archive）。需要時可從 Logs 匯出或依 PITR 重建。
+  - 費用：Lambda 觸發器讀 Streams 免費；自訂事件 USD 1／百萬筆；Logs、SQS、3 個告警在免費額度內 → 每月約 0。
+- **替代方案 Alternatives considered**：EventBridge Pipes（台北沒有）；業務 Lambda 交易後直接 `PutEvents`（雙寫，可能遺失事件）；另建 outbox 表（Streams 已經提供同樣的保證）。
+
 ### ADR 範本 / ADR Template
 
 ```markdown

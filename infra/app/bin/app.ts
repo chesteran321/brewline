@@ -9,6 +9,7 @@ import { resolveEnv } from '../lib/config';
 import { ApiStack } from '../lib/stacks/api-stack';
 import { AuthStack } from '../lib/stacks/auth-stack';
 import { DataStack } from '../lib/stacks/data-stack';
+import { EventsStack } from '../lib/stacks/events-stack';
 import { PipelineCheckStack } from '../lib/stacks/pipeline-check-stack';
 
 const app = new App();
@@ -48,6 +49,17 @@ const authStack = new AuthStack(app, `brewline-${env.name}-auth`, {
 });
 Tags.of(authStack).add('module', 'identity', { priority: 200 });
 
+// 事件層（A3b，ADR-026）：bus、Streams → EventBridge、稽核 log、DLQ、告警 / Event layer.
+const eventsStack = new EventsStack(app, `brewline-${env.name}-events`, {
+  envName: env.name,
+  lambda: env.lambda,
+  env: { account: env.account, region: env.region },
+  description: 'BrewLine event layer: EventBridge bus, Streams publisher, audit log, DLQs, alarms',
+  terminationProtection: env.name === 'prod',
+});
+eventsStack.addStackDependency(dataStack, 'reads /brewline/<env>/data/* (stream ARN, key ARN) from SSM');
+Tags.of(eventsStack).add('module', 'events', { priority: 200 });
+
 // 訂貨 API（A1：商品唯讀）：HTTP API + JWT scope 授權（ADR-020、ADR-021）/ Ordering API.
 // 無狀態 → 不開終止保護也可重建；仍在 Prod 開啟以防誤刪 / Stateless, but protected in Prod anyway.
 // 依賴關係只用來排定部署順序（值經 SSM 傳遞，不產生 Export）/ Ordering only; values flow through SSM.
@@ -62,6 +74,8 @@ const apiStack = new ApiStack(app, `brewline-${env.name}-api`, {
 });
 apiStack.addStackDependency(dataStack, 'reads /brewline/<env>/data/* from SSM');
 apiStack.addStackDependency(authStack, 'reads /brewline/<env>/auth/* from SSM');
+// 先有事件層，Dev smoke test 下的單才會產生事件（驗證 OrderCreated 用）/ So smoke-test orders produce events.
+apiStack.addStackDependency(eventsStack, 'smoke-test orders must flow through the stream publisher');
 Tags.of(apiStack).add('module', 'ordering', { priority: 200 });
 
 // 全 app 共用標籤；module 之後由各 stack 覆寫。

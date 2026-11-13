@@ -59,6 +59,8 @@ export interface LambdaSettings {
     readonly api: number;
     /** 部署時才執行的 custom resource（種子、smoke test）/ Deploy-time custom resources. */
     readonly customResource: number;
+    /** DynamoDB Streams 事件發布（每個 shard 一個並行）/ Stream publisher (one concurrent batch per shard). */
+    readonly streamPublisher: number;
   };
 }
 
@@ -123,7 +125,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 7, // COST-007
-      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1 },
+      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1, streamPublisher: 2 },
     },
     api: {
       throttleRateLimit: 10,
@@ -154,7 +156,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 30, // COST-007
-      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1 },
+      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1, streamPublisher: 2 },
     },
     api: {
       throttleRateLimit: 50,
