@@ -553,6 +553,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
   - implicitDeny：讀 B 的訂單、寫進 B、前綴攻擊（tag `t_1` → `TENANT#t_1…`）、沒有 session tag、改價格、扣庫存但 `ReturnValues=ALL_NEW`、新增商品、刪除自己的訂單。
   - explicitDeny：`Scan`。
 - `cdk-hnb659fds-lookup-role`（ReadOnlyAccess）可以執行 `iam:SimulatePrincipalPolicy`。
+- 手動反向（Dev，SSO Admin，帶 `tenant_id` tag 呼叫 `sts assume-role`）→ **`AccessDenied ... not authorized to perform: sts:TagSession`**：Admin 的身分政策允許，但信任政策的 `aws:PrincipalArn` 不符。帶 tag 的請求會同時檢查 `AssumeRole` 與 `TagSession`，錯誤訊息顯示其中一個被拒的動作。
 
 教訓 / Lessons：
 - （2026-11-13）IAM `get-role` 會把**只有一個值的條件陣列**回傳成字串（部署 `["tenant_id"]` → 讀回 `"tenant_id"`），驗證腳本誤判失敗、Prod 延後一次 → jq `[.] | flatten` 正規化後比對（PR #21）。
@@ -645,7 +646,6 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 2026-11-14 | 確認 `Config.1` 重新評估後的剩餘原因；若只剩台北不支援的類型 → SUPPRESSED（備註引用 §2） |
 | ✅ 2026-11-13 | A2 決策：每租戶限流 → 只做路由限流並接受限制（D3）；聯絡人欄位層級加密 → 延到 A4（D5）；`LeadingKeys` 完全比對 → A2a 完成 |
 | ✅ 2026-11-13 | 訂貨 A2a：租戶存取角色、訂單 scope、token 15 分鐘，部署 Dev、Prod 並驗證（§10.6、§10.8，PR #20、#21） |
-| 盡快 | Dev Admin 手動反向：`sts assume-role` 租戶角色 → 預期 `AccessDenied`（信任政策 `aws:PrincipalArn` 不符） |
 | P1 | 下一步：訂貨模組 A2b（訂單 API：下單交易＋冪等）→ A3（Step Functions＋事件）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
