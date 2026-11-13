@@ -239,6 +239,24 @@
   - 費用：Lambda 觸發器讀 Streams 免費；自訂事件 USD 1／百萬筆；Logs、SQS、3 個告警在免費額度內 → 每月約 0。
 - **替代方案 Alternatives considered**：EventBridge Pipes（台北沒有）；業務 Lambda 交易後直接 `PutEvents`（雙寫，可能遺失事件）；另建 outbox 表（Streams 已經提供同樣的保證）。
 
+### ADR-027 訂單狀態機與 staff 端點 / Order State Machine and Staff Endpoints
+
+- **狀態 Status**：Accepted（2026-11-13，訂貨 A3c）；實作 ORD-F-005、ORD-F-009；部分緩解 RSK-016
+- **背景 Context**：A3 決策 D2：**狀態以 DynamoDB 為準**，staff 以 API 推進；Step Functions 只負責逾時取消（A3d）。
+- **決策 Decision**：
+  - 狀態：`CREATED → CONFIRMED → ROASTING_SCHEDULED → ROASTED → SHIPPED → COMPLETED`；`CREATED`／`CONFIRMED → CANCELLED`。不可跳級、不可倒退；`COMPLETED`、`CANCELLED` 為終態。規則集中在 `services/ordering/src/lib/order-lifecycle.ts`。
+  - **一個交易**：訂單 `Update`（條件 `status = <讀到的狀態>`，樂觀鎖；同時移動 GSI1 `STATUS#<新狀態>`、`list_append` 到 `status_history`）＋ 每個商品的庫存：`→ SHIPPED` 消耗（`reserved −q`）、`→ CANCELLED` 釋放（`reserved −q`、`available +q`），條件 `reserved >= q`（帳目不會變負）。
+  - 路由（scope `brewline/admin`）：`GET /admin/orders?status=`（GSI1）、`GET`／`PATCH /admin/tenants/{tenantId}/orders/{orderId}`。路徑帶 `tenantId`，因為 pk 是 `TENANT#<t>`。
+  - IAM：staff 函數用**自己的角色**，不扮演租戶角色（角色名稱由 CloudFormation 產生，不符合 `orders-*`）。list 只能 Query GSI1 的 `STATUS#*`；get 只能 GetItem `TENANT#*`；update 只能 Get／Update `TENANT#*`，商品只能改庫存欄位；**沒有 Put／Delete／Batch**；明確 Deny Scan。
+  - `status_history[].by` 記錄 `staff:<sub>` 或 `system:<原因>`；咖啡廳看到的 DTO **不含** `by`；staff DTO 含 `by` 與 `tenant_id`。
+  - 回應：409 `invalid_transition`（附 `current_status`、`allowed`）、409 `conflict`（同時被修改）、404、400、503。
+  - 狀態改變自動產生 `OrderStatusChanged` 事件（ADR-026，經 Streams）。
+- **後果 Consequences**：
+  - staff 是跨租戶的高權限操作 → 結構化稽核日誌（staff sub、tenant、order、from→to、結果）；之後 A4 可加上告警。
+  - 預留庫存可由 staff 取消釋放；**逾時自動釋放**在 A3d（RSK-016 仍為 Open，直到 A3d 完成）。
+  - Dev smoke test 走完整個生命週期（58 項）。
+- **替代方案 Alternatives considered**：每個狀態一條路由（例如 `/confirm`、`/ship`）→ 路由多、規則分散；以 Step Functions callback 推進（A3 D2 的選項 A）→ 狀態有兩個來源。
+
 ### ADR 範本 / ADR Template
 
 ```markdown

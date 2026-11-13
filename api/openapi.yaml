@@ -4,7 +4,7 @@
 openapi: 3.1.0
 info:
   title: BrewLine Ordering API
-  version: 0.2.0-a2
+  version: 0.3.0-a3c
   description: |
     驗證：Cognito access token（`Authorization: Bearer <token>`）。授權以 OAuth scope 在 API Gateway 執行，
     越權請求回 403，不會叫起 Lambda（ADR-022）。ID token 沒有 scope，會被拒絕。
@@ -163,6 +163,92 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /admin/orders:
+    get:
+      operationId: adminListOrders
+      summary: 各租戶指定狀態的訂單（staff）/ Orders of every tenant by status (staff)
+      security:
+        - cognito: [brewline/admin]
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/OrderStatus' }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+        - name: next_token
+          in: query
+          schema: { type: string, maxLength: 400 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/AdminOrder' } }
+                  next_token: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/tenants/{tenantId}/orders/{orderId}:
+    parameters:
+      - name: tenantId
+        in: path
+        required: true
+        schema: { type: string, pattern: '^t_[0-9A-HJKMNP-TV-Z]{26}$' }
+      - name: orderId
+        in: path
+        required: true
+        schema: { type: string, pattern: '^o_[0-9A-HJKMNP-TV-Z]{26}$' }
+    get:
+      operationId: adminGetOrder
+      summary: 訂單明細（含變更者）/ Order detail with who changed it (staff)
+      security:
+        - cognito: [brewline/admin]
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AdminOrder' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: adminUpdateOrderStatus
+      summary: 變更訂單狀態（staff）/ Change the order status (staff)
+      description: |
+        允許的轉換 Allowed：CREATED→CONFIRMED→ROASTING_SCHEDULED→ROASTED→SHIPPED→COMPLETED；
+        CREATED／CONFIRMED→CANCELLED。→SHIPPED 消耗預留（reserved −qty）；→CANCELLED 釋放（reserved −qty、available +qty）。
+        訂單與庫存在同一個交易中更新。Order and stock change in one transaction.
+      security:
+        - cognito: [brewline/admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/OrderStatus' }
+      responses:
+        '200':
+          description: 已變更 / Changed
+          content: { application/json: { schema: { $ref: '#/components/schemas/AdminOrder' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 不允許的轉換（`invalid_transition`，含 `current_status`、`allowed`）或同時被修改（`conflict`）
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '503':
+          description: 暫時忙碌，請重試 / Busy, retry
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 components:
   securitySchemes:
     cognito:
@@ -239,10 +325,10 @@ components:
     Order:
       type: object
       additionalProperties: false
-      required: [order_id, status, payment_status, items, total, currency, created_at]
+      required: [order_id, status, payment_status, items, total, currency, created_at, updated_at, status_history]
       properties:
         order_id: { type: string, pattern: '^o_[0-9A-HJKMNP-TV-Z]{26}$' }
-        status: { type: string, enum: [CREATED] }
+        status: { $ref: '#/components/schemas/OrderStatus' }
         payment_status: { type: string, enum: [PAID_MOCK], description: 模擬付款（ORD-F-010）/ mock payment }
         items:
           type: array
@@ -259,6 +345,29 @@ components:
         total: { type: integer }
         currency: { type: string, enum: [TWD] }
         created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        status_history:
+          type: array
+          description: 狀態變更紀錄（不含變更者）/ Status changes (without who made them)
+          items:
+            type: object
+            additionalProperties: false
+            required: [from, to, at]
+            properties:
+              from: { $ref: '#/components/schemas/OrderStatus' }
+              to: { $ref: '#/components/schemas/OrderStatus' }
+              at: { type: string, format: date-time }
+    OrderStatus:
+      type: string
+      enum: [CREATED, CONFIRMED, ROASTING_SCHEDULED, ROASTED, SHIPPED, COMPLETED, CANCELLED]
+    AdminOrder:
+      description: Order 加上 tenant_id，status_history 另含 `by`（`staff:<sub>` 或 `system:<原因>`）
+      allOf:
+        - $ref: '#/components/schemas/Order'
+        - type: object
+          required: [tenant_id]
+          properties:
+            tenant_id: { type: string }
     Error:
       type: object
       properties:

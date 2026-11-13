@@ -46,7 +46,7 @@ aws sts get-caller-identity --query Arn --output text
 # --- 路由與授權 / Routes and authorization ---
 routes=$(aws apigatewayv2 get-routes --api-id "$api_id" --region "$region" --output json)
 check "Routes" "$(jq -c '[.Items[].RouteKey] | sort' <<<"$routes")" \
-  '["GET /admin/products/{id}/stock","GET /orders","GET /orders/{id}","GET /products","GET /products/{id}","POST /orders"]'
+  '["GET /admin/orders","GET /admin/products/{id}/stock","GET /admin/tenants/{tenantId}/orders/{orderId}","GET /orders","GET /orders/{id}","GET /products","GET /products/{id}","PATCH /admin/tenants/{tenantId}/orders/{orderId}","POST /orders"]'
 check "Routes without JWT" "$(jq -r '[.Items[] | select(.AuthorizationType != "JWT")] | length' <<<"$routes")" "0"
 check "Routes without a scope" "$(jq -r '[.Items[] | select((.AuthorizationScopes // []) | length == 0)] | length' <<<"$routes")" "0"
 scope_of() { jq -c --arg k "$1" '.Items[] | select(.RouteKey == $k) | .AuthorizationScopes' <<<"$routes"; }
@@ -54,6 +54,9 @@ check "Admin route scope" "$(scope_of 'GET /admin/products/{id}/stock')" '["brew
 check "POST /orders scope" "$(scope_of 'POST /orders')" '["brewline/orders.write"]'
 check "GET /orders scope" "$(scope_of 'GET /orders')" '["brewline/orders.read"]'
 check "GET /orders/{id} scope" "$(scope_of 'GET /orders/{id}')" '["brewline/orders.read"]'
+check "GET /admin/orders scope" "$(scope_of 'GET /admin/orders')" '["brewline/admin"]'
+check "GET admin order scope"   "$(scope_of 'GET /admin/tenants/{tenantId}/orders/{orderId}')" '["brewline/admin"]'
+check "PATCH admin order scope" "$(scope_of 'PATCH /admin/tenants/{tenantId}/orders/{orderId}')" '["brewline/admin"]'
 
 authz=$(aws apigatewayv2 get-authorizers --api-id "$api_id" --region "$region" --output json)
 issuer=$(aws ssm get-parameter --name "/brewline/${env_name}/auth/issuer" --region "$region" --query Parameter.Value --output text)
@@ -72,7 +75,7 @@ check "No CORS configured"   "$(aws apigatewayv2 get-api --api-id "$api_id" --re
 
 # --- Lambda ---
 IFS=',' read -r -a fns <<<"$(out FunctionNames)"
-check "API function count" "${#fns[@]}" "6"
+check "API function count" "${#fns[@]}" "9"
 for fn in "${fns[@]}"; do
   cfg=$(aws lambda get-function-configuration --function-name "$fn" --region "$region" --output json)
   short=${fn#brewline-${env_name}-ordering-}
@@ -119,6 +122,9 @@ check "POST /products (no such method)"       "$(http_status POST /products)" "4
 check "POST /orders without token"            "$(http_status POST /orders)" "401"
 check "GET /orders without token"             "$(http_status GET /orders)" "401"
 check "POST /orders with forged JWT"          "$(http_status POST /orders "Bearer ${forged}")" "401"
+check "GET /admin/orders without token"       "$(http_status GET /admin/orders)" "401"
+check "PATCH admin order with forged admin JWT" \
+  "$(http_status PATCH /admin/tenants/t_01AAAAAAAAAAAAAAAAAAAAAAAA/orders/o_01AAAAAAAAAAAAAAAAAAAAAAAA "Bearer ${forged}")" "401"
 
 # --- 反向：唯讀角色讀不到資料內容（表層 CMK）/ Negative: read-only role cannot read item contents (CMK) ---
 table=$(aws ssm get-parameter --name "/brewline/${env_name}/data/table-name" --region "$region" --query Parameter.Value --output text)

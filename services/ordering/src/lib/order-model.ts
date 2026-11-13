@@ -68,7 +68,18 @@ export function requestHash(req: CreateOrderRequest): string {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
-export const OrderStatusSchema = z.enum(['CREATED']);
+/** 訂單狀態（ORD-F-005，A3c）/ Order lifecycle states. */
+export const ORDER_STATUSES = ['CREATED', 'CONFIRMED', 'ROASTING_SCHEDULED', 'ROASTED', 'SHIPPED', 'COMPLETED', 'CANCELLED'] as const;
+export const OrderStatusSchema = z.enum(ORDER_STATUSES);
+export type OrderStatus = z.infer<typeof OrderStatusSchema>;
+
+export const StatusChangeSchema = z.object({
+  from: OrderStatusSchema,
+  to: OrderStatusSchema,
+  at: z.string(),
+  /** 'staff:<sub>' 或 'system:<原因>'；不放進公開 DTO / Never exposed in the public DTO. */
+  by: z.string(),
+});
 export const PaymentStatusSchema = z.enum(['PAID_MOCK']);
 
 export const OrderLineSchema = z.object({
@@ -94,6 +105,8 @@ export const OrderItemSchema = z.object({
   created_by: z.string(),
   created_at: z.string(),
   idempotency_key: z.string(),
+  updated_at: z.string().optional(),
+  status_history: z.array(StatusChangeSchema).optional(),
 });
 export type OrderItem = z.infer<typeof OrderItemSchema>;
 
@@ -125,6 +138,9 @@ export function toPublicOrder(o: OrderItem) {
     total: o.total,
     currency: o.currency,
     created_at: o.created_at,
+    updated_at: o.updated_at ?? o.created_at,
+    // 給咖啡廳看狀態何時改變，但不透露是哪位 staff / When it changed, not which staff member.
+    status_history: (o.status_history ?? []).map((h) => ({ from: h.from, to: h.to, at: h.at })),
   };
 }
 export type PublicOrder = ReturnType<typeof toPublicOrder>;
@@ -140,6 +156,36 @@ export function decodeCursor(token: string): string | undefined {
       .strictObject({ sk: z.string().regex(/^ORDER#[0-9A-HJKMNP-TV-Z]{26}$/) })
       .safeParse(JSON.parse(Buffer.from(token, 'base64url').toString('utf8')));
     return parsed.success ? parsed.data.sk : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** staff 用 DTO：多了 tenant_id 與變更者 / Staff DTO adds the tenant and who changed what. */
+export function toAdminOrder(o: OrderItem) {
+  return {
+    ...toPublicOrder(o),
+    tenant_id: o.tenant_id,
+    status_history: (o.status_history ?? []).map((h) => ({ from: h.from, to: h.to, at: h.at, by: h.by })),
+  };
+}
+
+/** staff 列表游標：GSI1 的 LastEvaluatedKey，狀態必須與查詢相同 / GSI1 cursor bound to the queried status. */
+export function encodeAdminCursor(key: Record<string, unknown>): string {
+  return Buffer.from(JSON.stringify(key), 'utf8').toString('base64url');
+}
+
+export function decodeAdminCursor(token: string, status: OrderStatus): Record<string, string> | undefined {
+  try {
+    const parsed = z
+      .strictObject({
+        pk: z.string().regex(/^TENANT#t_[0-9A-HJKMNP-TV-Z]{26}$/),
+        sk: z.string().regex(/^ORDER#[0-9A-HJKMNP-TV-Z]{26}$/),
+        gsi1pk: z.literal(`STATUS#${status}`),
+        gsi1sk: z.string().max(100),
+      })
+      .safeParse(JSON.parse(Buffer.from(token, 'base64url').toString('utf8')));
+    return parsed.success ? parsed.data : undefined;
   } catch {
     return undefined;
   }
