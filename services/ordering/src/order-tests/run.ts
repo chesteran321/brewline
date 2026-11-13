@@ -11,6 +11,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { Logger } from '@aws-lambda-powertools/logger';
 import { ulid } from '../lib/ulid';
+import { AdminOrderRepo } from '../lib/admin-order-repo';
 import { CreateOrderResult, OrderRepo } from '../lib/order-repo';
 import { TenantCredentials } from '../lib/tenant-credentials';
 
@@ -21,6 +22,8 @@ import { TenantCredentials } from '../lib/tenant-credentials';
  * 1. 冪等風暴：同一個 Idempotency-Key 同時送 10 次 → 只產生 1 筆訂單（03 §11）。
  * 2. 搶庫存：100 個不同的 key 同時各訂 1 kg，庫存 10 kg → 不超賣（03 §11）。
  * 3. IAM 探測：用租戶 A 的**真實憑證**直接呼叫 DynamoDB，越權動作必須 AccessDeniedException（A2 決策 D4）。
+ * 4. 逾時取消（A3d，兩段）：`timeout-setup` 建立兩筆訂單並確認其中一筆；等逾時後 `timeout-check`
+ *    確認未確認的那筆被 `system:timeout` 取消、庫存釋放，已確認的那筆不受影響。
  *
  * 1. Idempotency storm  2. Stock race (no overselling)  3. IAM probe with real tenant credentials.
  */
@@ -266,8 +269,67 @@ export async function runAll(d: Deps): Promise<{ passed: boolean; checks: Check[
   return { passed: checks.every((c) => c.ok), checks, stats };
 }
 
+/**
+ * 逾時取消測試，第一段：租戶 B 下兩筆 1 kg 訂單（X、Y），以 staff 邏輯確認 Y；X 保持 CREATED。
+ * Timeout test, part 1: two 1 kg orders for tenant B; Y is confirmed, X stays CREATED.
+ */
+export async function timeoutSetup(d: Deps, admin: AdminOrderRepo, timeoutSeconds: number) {
+  await cleanTenants(d);
+  await resetStock(d, RACE_STOCK_KG);
+  const repo = new OrderRepo(d.forTenant, d.tableName);
+  const place = async () => {
+    const r = await repo.createOrder({
+      tenantId: TENANT_B,
+      createdBy: 'order-tests',
+      idempotencyKey: `timeout-${ulid()}`,
+      request: { items: [{ product_id: TEST_PRODUCT_ID, qty_kg: 1 }] },
+      orderId: `o_${ulid()}`,
+      now: new Date(),
+    });
+    if (r.kind !== 'created') throw new Error(`setup order: ${r.kind}`);
+    return r.order.order_id;
+  };
+  const cancelId = await place();
+  const keepId = await place();
+  const confirmed = await admin.transition({ tenantId: TENANT_B, orderId: keepId, to: 'CONFIRMED', actor: 'test:confirm', now: new Date() });
+  if (confirmed.kind !== 'updated') throw new Error(`confirm: ${confirmed.kind}`);
+  const stock = await readStock(d);
+  return {
+    tenant_id: TENANT_B,
+    cancel_order_id: cancelId,
+    keep_order_id: keepId,
+    stock,
+    check_after: new Date(Date.now() + (timeoutSeconds + 60) * 1000).toISOString(),
+  };
+}
+
+/** 第二段：逾時之後檢查，最後清理 / Part 2: check after the timeout, then clean up. */
+export async function timeoutCheck(d: Deps, admin: AdminOrderRepo, cancelId: string, keepId: string) {
+  const checks: Check[] = [];
+  try {
+    const x = await admin.get(TENANT_B, cancelId, true);
+    const y = await admin.get(TENANT_B, keepId, true);
+    const last = x?.status_history?.at(-1);
+    checks.push(
+      { name: 'timeout: unconfirmed order is CANCELLED', ok: x?.status === 'CANCELLED', detail: String(x?.status) },
+      { name: 'timeout: cancelled by system:timeout', ok: last?.by === 'system:timeout' && last?.from === 'CREATED', detail: JSON.stringify(last ?? null) },
+      { name: 'timeout: confirmed order untouched (CONFIRMED)', ok: y?.status === 'CONFIRMED', detail: String(y?.status) },
+    );
+    const stock = await readStock(d);
+    checks.push({
+      name: 'timeout: stock released for the cancelled order only (9/1)',
+      ok: stock.available_kg === RACE_STOCK_KG - 1 && stock.reserved_kg === 1,
+      detail: JSON.stringify(stock),
+    });
+  } finally {
+    await cleanTenants(d).catch(() => undefined);
+    await resetStock(d, RACE_STOCK_KG).catch(() => undefined);
+  }
+  return { passed: checks.every((c) => c.ok), checks };
+}
+
 /** Lambda 進入點（只由 scripts/run-order-tests.sh 手動呼叫）/ Entry point, invoked manually. */
-export const handler = async () => {
+export const handler = async (event: { mode?: string; cancel_order_id?: string; keep_order_id?: string } = {}) => {
   const tableName = process.env.TABLE_NAME;
   const roleArn = process.env.TENANT_ROLE_ARN;
   if (!tableName || !roleArn) throw new Error('TABLE_NAME and TENANT_ROLE_ARN are required');
@@ -281,7 +343,20 @@ export const handler = async () => {
     }
     return c;
   };
-  const result = await runAll({ fixture: DynamoDBDocumentClient.from(new DynamoDBClient({})), forTenant, tableName });
+  const fixture = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
+  const deps: Deps = { fixture, forTenant, tableName };
+  // 夾具角色只允許測試租戶與 p-9001（IAM 完全比對）/ The fixture role is limited to the test tenants and p-9001.
+  const admin = new AdminOrderRepo(fixture, tableName, 'gsi1');
+  const mode = event.mode ?? 'all';
+  if (mode === 'timeout-setup') return timeoutSetup(deps, admin, Number(process.env.ORDER_TIMEOUT_SECONDS ?? '600'));
+  if (mode === 'timeout-check') {
+    if (!event.cancel_order_id || !event.keep_order_id) throw new Error('cancel_order_id and keep_order_id are required');
+    const r = await timeoutCheck(deps, admin, event.cancel_order_id, event.keep_order_id);
+    logger.info('timeout check finished', { passed: r.passed, failed: r.checks.filter((c) => !c.ok) });
+    return r;
+  }
+  if (mode !== 'all') throw new Error(`unknown mode ${mode}`);
+  const result = await runAll(deps);
   logger.info('order tests finished', { passed: result.passed, stats: result.stats, failed: result.checks.filter((c) => !c.ok) });
   return result;
 };

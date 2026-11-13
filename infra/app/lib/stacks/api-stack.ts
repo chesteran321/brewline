@@ -15,7 +15,9 @@ import { SCOPES } from '../../../../services/identity/src/scopes';
 import { LambdaGuardrailsChecker } from '../aspects/lambda-guardrails';
 import { ApiSettings, EnvName, LambdaSettings } from '../config';
 import { BrewlineFunction, SERVICES_ROOT } from '../constructs/brewline-function';
+import { OrderTimeoutWorkflow } from '../constructs/order-timeout-workflow';
 import { TenantAccessRole } from '../constructs/tenant-access-role';
+import { EventsStack } from './events-stack';
 import { AuthStack } from './auth-stack';
 import { DataStack } from './data-stack';
 
@@ -51,6 +53,7 @@ const ORDER_TEST_TENANTS = ['t_01CNCRTST000000000000000A1', 't_01CNCRTST00000000
  */
 export class ApiStack extends Stack {
   public readonly httpApi: apigwv2.HttpApi;
+  public readonly orderTimeout: OrderTimeoutWorkflow;
   public readonly tenantAccess: TenantAccessRole;
 
   constructor(scope: Construct, id: string, props: ApiStackProps) {
@@ -373,6 +376,22 @@ export class ApiStack extends Stack {
       new CfnOutput(this, 'SmokeTestSummary', { value: smoke.getAttString('Summary') });
     }
 
+    // --- 6b) 未確認訂單的逾時取消（A3d，ADR-028）/ Unconfirmed-order timeout ---
+    this.orderTimeout = new OrderTimeoutWorkflow(this, 'OrderTimeout', {
+      envName,
+      lambda: props.lambda,
+      tableName,
+      tableArn,
+      keyArn,
+      gsi1Name: DataStack.GSI1.indexName,
+      busName: param(`${EventsStack.parameterPrefix(envName)}/bus-name`),
+      timeoutSeconds: props.api.orderTimeoutSeconds,
+    });
+    // smoke test 下的單要能啟動工作流 → 先建好規則與狀態機 / Smoke-test orders must reach the workflow.
+    this.node.tryFindChild('SmokeTestRun')?.node.addDependency(this.orderTimeout);
+    new CfnOutput(this, 'OrderLifecycleStateMachineArn', { value: this.orderTimeout.stateMachine.stateMachineArn });
+    new CfnOutput(this, 'OrderTimeoutDlqUrl', { value: this.orderTimeout.dlq.queueUrl });
+
     // --- 7) Dev 訂單測試（手動觸發，A2b-2）/ Dev order tests (manual) ---
     if (props.api.orderTests) {
       if (!props.api.testProducts) throw new Error('api.orderTests requires api.testProducts');
@@ -393,6 +412,7 @@ export class ApiStack extends Stack {
           TABLE_NAME: tableName,
           TENANT_ROLE_ARN: this.tenantAccess.role.roleArn,
           POWERTOOLS_SERVICE_NAME: 'ordering-order-tests',
+          ORDER_TIMEOUT_SECONDS: String(props.api.orderTimeoutSeconds),
         },
       });
       this.tenantAccess.grantAssume(testFn.role);
@@ -401,7 +421,7 @@ export class ApiStack extends Stack {
       testFn.role.addToPolicy(
         new iam.PolicyStatement({
           sid: 'ResetRaceProduct',
-          actions: ['dynamodb:PutItem', 'dynamodb:GetItem'],
+          actions: ['dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:UpdateItem'],
           resources: [tableArn],
           conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': [`PRODUCT#${ORDER_TEST_PRODUCT_ID}`] } },
         }),
@@ -409,7 +429,8 @@ export class ApiStack extends Stack {
       testFn.role.addToPolicy(
         new iam.PolicyStatement({
           sid: 'CleanTestTenants',
-          actions: ['dynamodb:Query', 'dynamodb:DeleteItem'],
+          // GetItem／UpdateItem：逾時測試以 staff 邏輯確認測試訂單（A3d）/ The timeout test confirms a test order.
+          actions: ['dynamodb:Query', 'dynamodb:DeleteItem', 'dynamodb:GetItem', 'dynamodb:UpdateItem'],
           resources: [tableArn],
           conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ORDER_TEST_TENANTS.map((t) => `TENANT#${t}`) } },
         }),
