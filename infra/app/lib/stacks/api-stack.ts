@@ -15,6 +15,7 @@ import { SCOPES } from '../../../../services/identity/src/scopes';
 import { LambdaGuardrailsChecker } from '../aspects/lambda-guardrails';
 import { ApiSettings, EnvName, LambdaSettings } from '../config';
 import { BrewlineFunction, SERVICES_ROOT } from '../constructs/brewline-function';
+import { TenantAccessRole } from '../constructs/tenant-access-role';
 import { AuthStack } from './auth-stack';
 import { DataStack } from './data-stack';
 
@@ -43,6 +44,7 @@ const SMOKE_PRODUCT_ID = 'p-0001';
  */
 export class ApiStack extends Stack {
   public readonly httpApi: apigwv2.HttpApi;
+  public readonly tenantAccess: TenantAccessRole;
 
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
@@ -79,6 +81,10 @@ export class ApiStack extends Stack {
         conditions: { StringEquals: { 'kms:ViaService': `dynamodb.${this.region}.amazonaws.com` } },
       });
     const tableEnv = { TABLE_NAME: tableName, GSI1_NAME: DataStack.GSI1.indexName };
+
+    // 租戶存取角色（A2a，ADR-024）：A2b 的訂單函數以 session tag 扮演，只能碰自己的 TENANT#。
+    // Tenant access role: A2b order functions assume it with a session tag and reach only their own TENANT#.
+    this.tenantAccess = new TenantAccessRole(this, 'TenantAccess', { envName, tableArn, keyArn });
 
     const fn = (fid: string, name: string, entry: string, description: string, statements: iam.PolicyStatement[]) => {
       const f = new BrewlineFunction(this, fid, {
@@ -248,6 +254,7 @@ export class ApiStack extends Stack {
     }
 
     new CfnOutput(this, 'ApiUrl', { value: this.httpApi.apiEndpoint });
+    new CfnOutput(this, 'TenantAccessRoleArn', { value: this.tenantAccess.role.roleArn });
     new CfnOutput(this, 'ApiId', { value: this.httpApi.apiId });
     new CfnOutput(this, 'FunctionNames', {
       value: [listProducts, getProduct, getStock].map((f) => f.function.functionName).join(','),

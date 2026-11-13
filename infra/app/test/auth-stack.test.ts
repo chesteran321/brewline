@@ -79,8 +79,8 @@ describe.each(['dev', 'prod'] as const)('AuthStack (%s)', (envName) => {
       AllowedOAuthFlowsUserPoolClient: false,
       EnableTokenRevocation: true,
       PreventUserExistenceErrors: 'ENABLED',
-      AccessTokenValidity: 60,
-      IdTokenValidity: 60,
+      AccessTokenValidity: 15,
+      IdTokenValidity: 15,
       RefreshTokenValidity: 7 * 24 * 60,
     });
   });

@@ -45,6 +45,8 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 授權 | pre token 觸發器 V2 把群組轉成 access token scope（`services/identity/src/scopes.ts`）；API 路由用 scope 授權 |
 | 租戶 | `custom:tenant_id`（`t_<ULID>`，任何 app client 都不能寫；**建立後不可刪除或改名**） |
 | 取得 ID | SSM `/brewline/<env>/auth/{user-pool-id,user-pool-arn,web-client-id,issuer}` |
+| Token | Access／ID **15 分鐘**、refresh 7 天（RSK-015） |
+| 租戶隔離 | 角色 `brewline-<env>-tenant-access`：訂單函數（角色名稱必須是 `brewline-<env>-orders-*`）以 session tag `tenant_id` 扮演；`LeadingKeys = TENANT#${aws:PrincipalTag/tenant_id}` **完全比對**；商品只能改庫存欄位（ADR-024） |
 
 ### 訂貨 API / Ordering API（ADR-020、ADR-021）
 

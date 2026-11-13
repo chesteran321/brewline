@@ -147,8 +147,10 @@ export class AuthStack extends Stack {
       disableOAuth: true, // A1 不用 managed login／hosted UI / no hosted UI in A1
       preventUserExistenceErrors: true,
       enableTokenRevocation: true,
-      accessTokenValidity: Duration.minutes(60),
-      idTokenValidity: Duration.minutes(60),
+      // 15 分鐘（A2 決定）：JWT authorizer 不檢查撤銷，token 越短，撤銷帳號後仍可呼叫 API 的時間越短（RSK-015）。
+      // 15 minutes: the JWT authorizer does not check revocation, so shorter tokens shrink that window (RSK-015).
+      accessTokenValidity: Duration.minutes(15),
+      idTokenValidity: Duration.minutes(15),
       refreshTokenValidity: Duration.days(7),
       authSessionValidity: Duration.minutes(3),
       readAttributes,

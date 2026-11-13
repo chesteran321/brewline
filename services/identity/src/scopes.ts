@@ -9,6 +9,10 @@ export const SCOPES = {
   catalogRead: 'brewline/catalog.read',
   /** 內部人員端點（/admin/*）/ Staff-only endpoints. */
   admin: 'brewline/admin',
+  /** 讀自己租戶的訂單（A2）/ Read own tenant's orders. */
+  ordersRead: 'brewline/orders.read',
+  /** 為自己租戶下單（A2）/ Place orders for own tenant. */
+  ordersWrite: 'brewline/orders.write',
 } as const;
 
 export type Scope = (typeof SCOPES)[keyof typeof SCOPES];
@@ -18,9 +22,11 @@ export type Group = (typeof GROUPS)[number];
 
 /** 每個群組授予的 scope / Scopes granted per group. */
 export const GROUP_SCOPES: Record<Group, readonly Scope[]> = {
-  cafe: [SCOPES.catalogRead],
+  cafe: [SCOPES.catalogRead, SCOPES.ordersRead, SCOPES.ordersWrite],
   // 模擬器以咖啡廳身分呼叫公開 API（ADR-011）/ The simulator acts as a café (ADR-011).
-  simulator: [SCOPES.catalogRead],
+  simulator: [SCOPES.catalogRead, SCOPES.ordersRead, SCOPES.ordersWrite],
+  // staff 不屬於任何租戶，不能以租戶身分下單；跨租戶的訂單端點在 A3（/admin/orders）。
+  // Staff belong to no tenant and cannot order as one; cross-tenant order endpoints come in A3.
   staff: [SCOPES.catalogRead, SCOPES.admin],
 };
 
