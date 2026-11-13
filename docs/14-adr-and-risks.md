@@ -100,6 +100,7 @@
   - Stack `brewline-<env>-data`：KMS 對稱 CMK `alias/brewline-<env>-data`（年度自動輪替）＋ DynamoDB `brewline-<env>-core`。
   - 使用 CDK `TableV2`（合成為 `AWS::DynamoDB::GlobalTable`），保留日後東京 DR 演練加 replica 的彈性，且不需 custom resource。
   - 鍵名用通用 `pk` / `sk`（String）；實體型別寫在值裡。GSI 與 Streams 延後到需要的模組 PR（CloudFormation 每次更新只能新增一個 GSI）。
+  - **修訂（2026-11-13，A3a）**：開啟 Streams `NEW_AND_OLD_IMAGES`，作為事件來源（A3 決策 D1：Streams → Lambda → EventBridge；台北沒有 EventBridge Pipes）。Stream ARN 發布到 SSM `/brewline/<env>/data/table-stream-arn`。之後**不要修改 view type**（GlobalTable 有多個 replica 時無法修改）。
   - On-demand 加最大吞吐量上限（COST-005）：Dev 50 / 25、Prod 200 / 100 RRU / WRU；TTL 屬性 `expires_at`。
   - Prod：刪除保護、RETAIN、終止保護；Dev：可刪除，金鑰等待期 7 天。
   - 其他 stack 由 SSM 參數 `/brewline/<env>/data/*` 取得名稱與 ARN，不用 CloudFormation Export。
