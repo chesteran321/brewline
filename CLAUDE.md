@@ -64,6 +64,16 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 訂單測試 | Dev 手動：`infra/app/scripts/run-order-tests.sh`（冪等風暴、搶庫存、IAM 探測；函數 `brewline-dev-ordering-order-tests`） |
 | 合約 | `api/openapi.yaml` |
 
+### 事件層 / Event layer（ADR-026）
+
+| 項目 Item | 值 Value |
+|---|---|
+| Stack | `brewline-<env>-events`（module `events`；Prod 終止保護） |
+| Bus | `brewline-<env>`；SSM `/brewline/<env>/events/{bus-name,bus-arn}` |
+| 來源 | DynamoDB Streams → `brewline-<env>-events-stream-publisher`（台北**沒有** Pipes、Archive）；事件過濾只處理訂單與庫存 |
+| 事件 | `source=brewline.ordering`：`OrderCreated`、`OrderStatusChanged`、`StockLow`；detail 白名單、`event_id`＝stream eventID（下游去重） |
+| 留存 | 規則寫入 `/aws/events/brewline-<env>`（取代 Archive）；DLQ SSE-SQS |
+
 ### Lambda 標準 / Lambda standard（ADR-023）
 
 - 一律用 `lib/constructs/brewline-function.ts`：Node 24、arm64、X-Ray、保留併發、自建 log group（Dev 7 天／Prod 30 天）、esbuild 打包（含 AWS SDK）。
