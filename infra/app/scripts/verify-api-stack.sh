@@ -47,8 +47,8 @@ aws sts get-caller-identity --query Arn --output text
 routes=$(aws apigatewayv2 get-routes --api-id "$api_id" --region "$region" --output json)
 check "Routes" "$(jq -c '[.Items[].RouteKey] | sort' <<<"$routes")" \
   '["GET /admin/products/{id}/stock","GET /products","GET /products/{id}"]'
-check "Every route uses JWT" "$(jq -r '[.Items[] | select(.AuthorizationType != "JWT")] | length' <<<"$routes")" "0"
-check "Every route requires a scope" "$(jq -r '[.Items[] | select((.AuthorizationScopes // []) | length == 0)] | length' <<<"$routes")" "0"
+check "Routes without JWT" "$(jq -r '[.Items[] | select(.AuthorizationType != "JWT")] | length' <<<"$routes")" "0"
+check "Routes without a scope" "$(jq -r '[.Items[] | select((.AuthorizationScopes // []) | length == 0)] | length' <<<"$routes")" "0"
 check "Admin route scope" "$(jq -c '.Items[] | select(.RouteKey == "GET /admin/products/{id}/stock") | .AuthorizationScopes' <<<"$routes")" '["brewline/admin"]'
 
 authz=$(aws apigatewayv2 get-authorizers --api-id "$api_id" --region "$region" --output json)
@@ -58,8 +58,9 @@ check "Authorizer issuer = user pool" "$(jq -r '.Items[0].JwtConfiguration.Issue
 check "Authorizer audience has web client" "$(jq -r --arg c "$web_client" '.Items[0].JwtConfiguration.Audience | index($c) != null' <<<"$authz")" "true"
 
 stage=$(aws apigatewayv2 get-stage --api-id "$api_id" --stage-name '$default' --region "$region" --output json)
-check "Stage throttle rate"  "$(jq -r '.DefaultRouteSettings.ThrottlingRateLimit' <<<"$stage")" "$want_rate"
-check "Stage throttle burst" "$(jq -r '.DefaultRouteSettings.ThrottlingBurstLimit' <<<"$stage")" "$want_burst"
+# ThrottlingRateLimit 是浮點數（API 回 10.0），先轉整數再比對 / The API returns the rate as a float (10.0).
+check "Stage throttle rate"  "$(jq -r '.DefaultRouteSettings.ThrottlingRateLimit | floor' <<<"$stage")" "$want_rate"
+check "Stage throttle burst" "$(jq -r '.DefaultRouteSettings.ThrottlingBurstLimit | floor' <<<"$stage")" "$want_burst"
 check "Stage access logs"    "$(jq -r '.AccessLogSettings.DestinationArn // "none" | test("^arn:aws:logs:")' <<<"$stage")" "true"
 check "No CORS configured"   "$(aws apigatewayv2 get-api --api-id "$api_id" --region "$region" --query 'CorsConfiguration' --output text)" "None"
 

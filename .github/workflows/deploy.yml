@@ -101,18 +101,30 @@ jobs:
 
       - name: Verify data stack (KMS CMK, PITR, TTL, protections)
         run: |
+          # 失敗時也寫入 Job Summary / Write the summary even when checks fail
+          set +e
           scripts/verify-data-stack.sh dev outputs.json | tee verify.txt
+          rc=${PIPESTATUS[0]}
           { echo "### Data stack (Dev)"; echo '```'; cat verify.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
 
       - name: Verify auth stack (Cognito, pre token trigger, negative tests)
         run: |
+          # 失敗時也寫入 Job Summary / Write the summary even when checks fail
+          set +e
           scripts/verify-auth-stack.sh dev outputs.json | tee verify-auth.txt
+          rc=${PIPESTATUS[0]}
           { echo "### Auth stack (Dev)"; echo '```'; cat verify-auth.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
 
       - name: Verify API stack (routes, scopes, throttling, negative HTTP tests)
         run: |
+          # 失敗時也寫入 Job Summary / Write the summary even when checks fail
+          set +e
           scripts/verify-api-stack.sh dev outputs.json | tee verify-api.txt
+          rc=${PIPESTATUS[0]}
           { echo "### API stack (Dev)"; echo '```'; cat verify-api.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
 
   deploy-prod:
     name: Deploy Prod
@@ -189,15 +201,27 @@ jobs:
 
       - name: Verify data stack (KMS CMK, PITR, TTL, protections)
         run: |
+          # 失敗時也寫入 Job Summary / Write the summary even when checks fail
+          set +e
           scripts/verify-data-stack.sh prod outputs.json | tee verify.txt
+          rc=${PIPESTATUS[0]}
           { echo "### Data stack (Prod)"; echo '```'; cat verify.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
 
       - name: Verify auth stack (Cognito, pre token trigger, negative tests)
         run: |
+          # 失敗時也寫入 Job Summary / Write the summary even when checks fail
+          set +e
           scripts/verify-auth-stack.sh prod outputs.json | tee verify-auth.txt
+          rc=${PIPESTATUS[0]}
           { echo "### Auth stack (Prod)"; echo '```'; cat verify-auth.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
 
       - name: Verify API stack (routes, scopes, throttling, negative HTTP tests)
         run: |
+          # 失敗時也寫入 Job Summary / Write the summary even when checks fail
+          set +e
           scripts/verify-api-stack.sh prod outputs.json | tee verify-api.txt
+          rc=${PIPESTATUS[0]}
           { echo "### API stack (Prod)"; echo '```'; cat verify-api.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
