@@ -216,6 +216,7 @@
   - 冪等記錄的 TTL 是延遲刪除；程式以 `expires_at` 判斷，不依賴 TTL 準時。
   - HTTP API 的 route key 必須先存在，stage 才能設定 `RouteSettings` → stage 依賴路由；`RouteSettings` 是 Json 型別，鍵名必須是 PascalCase。
   - 費用：STS 免費；每筆訂單約 6–54 WRU，smoke test 規模每月 < USD 0.1。
+  - **A2b-2（Dev，手動）**：`brewline-dev-ordering-order-tests`（角色 `brewline-dev-orders-tests`）以 `infra/app/scripts/run-order-tests.sh` 觸發：冪等風暴（同一個 key 同時 10 次 → 1 筆）、搶庫存（100 個請求搶 10 kg → 不超賣、帳目一致；Dev 寫入上限造成的 throttle 視為預期）、IAM 探測（租戶 A 的真實憑證讀／寫 B、改價格、查 GSI1、Scan、刪除 → `AccessDeniedException`）。
 - **替代方案 Alternatives considered**：Powertools Idempotency（需要另一張表或另一套 key，且與訂單寫入不在同一交易，會有「記錄了冪等但訂單失敗」的視窗）；以 `version` 做樂觀鎖（多一次讀取，交易條件已足夠）；訂單 sk 用時間戳（需要另一個索引才能依 ID 查）。
 
 ### ADR 範本 / ADR Template

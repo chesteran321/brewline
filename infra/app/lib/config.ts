@@ -80,6 +80,11 @@ export interface ApiSettings {
   readonly orderThrottleBurstLimit: number;
   /** 寫入 Dev 測試商品 p-9xxx（不在目錄）/ Seed hidden p-9xxx test products. */
   readonly testProducts: boolean;
+  /**
+   * 部署手動觸發的訂單測試函數（冪等風暴、搶庫存、IAM 探測；A2b-2）。需要 testProducts。
+   * Deploy the manually-invoked order-test function (needs testProducts).
+   */
+  readonly orderTests: boolean;
 }
 
 export interface BrewlineEnv {
@@ -127,6 +132,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       orderThrottleRateLimit: 2,
       orderThrottleBurstLimit: 5,
       testProducts: true,
+      orderTests: true,
     },
   },
   prod: {
@@ -157,6 +163,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       orderThrottleRateLimit: 10,
       orderThrottleBurstLimit: 20,
       testProducts: false,
+      orderTests: false,
     },
   },
 };
