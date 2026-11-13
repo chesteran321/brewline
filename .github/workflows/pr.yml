@@ -42,7 +42,23 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: infra/app/package-lock.json
+          cache-dependency-path: |
+            infra/app/package-lock.json
+            services/package-lock.json
+
+      # Lambda 程式碼（services/）：型別檢查與單元測試；cdk synth 打包時也需要它的 node_modules。
+      # Lambda code: typecheck and unit tests; cdk synth bundling also needs its node_modules.
+      - name: Install (services)
+        working-directory: services
+        run: npm ci
+
+      - name: Typecheck (services)
+        working-directory: services
+        run: npm run typecheck
+
+      - name: Unit tests (services)
+        working-directory: services
+        run: npm test
 
       - name: Install
         run: npm ci
