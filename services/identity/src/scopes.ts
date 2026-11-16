@@ -13,6 +13,10 @@ export const SCOPES = {
   ordersRead: 'brewline/orders.read',
   /** 為自己租戶下單（A2）/ Place orders for own tenant. */
   ordersWrite: 'brewline/orders.write',
+  /** 讀自己租戶的聯絡人（A4c）/ Read own tenant's contact. */
+  profileRead: 'brewline/profile.read',
+  /** 更新自己租戶的聯絡人（A4c）/ Update own tenant's contact. */
+  profileWrite: 'brewline/profile.write',
 } as const;
 
 export type Scope = (typeof SCOPES)[keyof typeof SCOPES];
@@ -22,7 +26,9 @@ export type Group = (typeof GROUPS)[number];
 
 /** 每個群組授予的 scope / Scopes granted per group. */
 export const GROUP_SCOPES: Record<Group, readonly Scope[]> = {
-  cafe: [SCOPES.catalogRead, SCOPES.ordersRead, SCOPES.ordersWrite],
+  // 聯絡人（個資）只給 cafe：模擬器不需要、也不該讀寫真人聯絡資料（ADR-029 D4）。
+  // Contacts (PII) are cafe-only: the simulator has no reason to touch real contact data.
+  cafe: [SCOPES.catalogRead, SCOPES.ordersRead, SCOPES.ordersWrite, SCOPES.profileRead, SCOPES.profileWrite],
   // 模擬器以咖啡廳身分呼叫公開 API（ADR-011）/ The simulator acts as a café (ADR-011).
   simulator: [SCOPES.catalogRead, SCOPES.ordersRead, SCOPES.ordersWrite],
   // staff 不屬於任何租戶，不能以租戶身分下單；跨租戶的訂單端點在 A3（/admin/orders）。

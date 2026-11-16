@@ -22,6 +22,7 @@ role_arn=$(jq -r --arg s "$stack" '.[$s].TenantAccessRoleArn // empty' "$outputs
 role_name="brewline-${env_name}-tenant-access"
 table_arn=$(aws ssm get-parameter --name "/brewline/${env_name}/data/table-arn" --region "$region" --query Parameter.Value --output text)
 account=$(cut -d: -f5 <<<"$table_arn")
+key_arn=$(aws ssm get-parameter --name "/brewline/${env_name}/data/kms-key-arn" --region "$region" --query Parameter.Value --output text)
 
 aws sts get-caller-identity --query Arn --output text
 
@@ -77,9 +78,44 @@ sim "Create product (Put)"               implicitDeny dynamodb:PutItem       "$A
 sim "Delete own order"                   implicitDeny dynamodb:DeleteItem    "$A" "TENANT#$A"
 sim "Scan"                               explicitDeny dynamodb:Scan          "$A" ""
 
+# --- KMS 欄位加密（A4c，ADR-029 D2）/ Contact field encryption ---
+# ksim <label> <expected> <action> <principal tag> <context tenant_id or ""> <context field or ""> [extra context key]
+ksim() {
+  local label=$1 want=$2 action=$3 tag=$4 ctenant=$5 cfield=$6 extra=${7:-}
+  local ctx=("ContextKeyName=kms:EncryptionAlgorithm,ContextKeyValues=SYMMETRIC_DEFAULT,ContextKeyType=string")
+  local keys=()
+  [[ -n "$tag" ]] && ctx+=("ContextKeyName=aws:PrincipalTag/tenant_id,ContextKeyValues=${tag},ContextKeyType=string")
+  [[ -n "$ctenant" ]] && { ctx+=("ContextKeyName=kms:EncryptionContext:tenant_id,ContextKeyValues=${ctenant},ContextKeyType=string"); keys+=(tenant_id); }
+  [[ -n "$cfield" ]] && { ctx+=("ContextKeyName=kms:EncryptionContext:field,ContextKeyValues=${cfield},ContextKeyType=string"); keys+=(field); }
+  [[ -n "$extra" ]] && keys+=("$extra")
+  if [[ ${#keys[@]} -gt 0 ]]; then
+    ctx+=("ContextKeyName=kms:EncryptionContextKeys,ContextKeyValues=$(IFS=,; echo "${keys[*]}"),ContextKeyType=stringList")
+  fi
+  local out
+  if ! out=$(aws iam simulate-principal-policy --policy-source-arn "$role_arn" --action-names "$action" \
+        --resource-arns "$key_arn" --context-entries "${ctx[@]}" \
+        --query 'EvaluationResults[0].EvalDecision' --output text 2>&1); then
+    if grep -q 'AccessDenied' <<<"$out"; then
+      echo "⚠️  $label: this identity cannot call iam:SimulatePrincipalPolicy (skipped)"; return
+    fi
+    echo "❌ $label: $out"; fail=1; return
+  fi
+  check "$label" "$out" "$want"
+}
+
+ksim "KMS: A encrypts own email"               allowed      kms:Encrypt "$A" "$A" email
+ksim "KMS: A decrypts own address"             allowed      kms:Decrypt "$A" "$A" address
+ksim "KMS: A decrypts with B's tenant_id"      implicitDeny kms:Decrypt "$A" "$B" email
+ksim "KMS: A encrypts with B's tenant_id"      implicitDeny kms:Encrypt "$A" "$B" email
+ksim "KMS: unknown field"                      implicitDeny kms:Encrypt "$A" "$A" notes
+ksim "KMS: extra context key"                  implicitDeny kms:Encrypt "$A" "$A" email extra
+ksim "KMS: no encryption context"              implicitDeny kms:Encrypt "$A" ""   ""
+ksim "KMS: no session tag"                     implicitDeny kms:Decrypt ""   "$A" email
+ksim "KMS: GenerateDataKey directly"           implicitDeny kms:GenerateDataKey "$A" "$A" email
+
 # --- 呼叫端：訂單函數角色（A2b）/ Callers: order function roles ---
 # 函數角色只能扮演租戶角色，本身沒有任何 DynamoDB／KMS 權限 / They may only assume the tenant role.
-for suffix in create list get; do
+for suffix in create list get contact-get contact-put; do
   caller="brewline-${env_name}-orders-${suffix}"
   if ! caller_arn=$(aws iam get-role --role-name "$caller" --query Role.Arn --output text 2>/dev/null); then
     check "Caller role $caller exists" "missing" "present"; continue
@@ -108,6 +144,14 @@ for suffix in create list get; do
     echo "⚠️  $caller → table: simulation not permitted (skipped)"
   else
     echo "❌ $caller → table: $out"; fail=1
+  fi
+  if out=$(aws iam simulate-principal-policy --policy-source-arn "$caller_arn" --action-names kms:Decrypt \
+        --resource-arns "$key_arn" --query 'EvaluationResults[0].EvalDecision' --output text 2>&1); then
+    check "$caller → key directly" "$out" "implicitDeny"
+  elif grep -q 'AccessDenied' <<<"$out"; then
+    echo "⚠️  $caller → key: simulation not permitted (skipped)"
+  else
+    echo "❌ $caller → key: $out"; fail=1
   fi
 done
 

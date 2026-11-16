@@ -46,14 +46,16 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   const { app, stack, template } = buildApp(envName);
   const cfg = ENVIRONMENTS[envName];
 
-  test('HTTP API with nine routes, all JWT + scope', () => {
+  test('HTTP API with eleven routes, all JWT + scope', () => {
     template.resourceCountIs('AWS::ApiGatewayV2::Api', 1);
     const routes = Object.fromEntries(resources(template, 'AWS::ApiGatewayV2::Route').map(([, r]) => [r.Properties.RouteKey, r.Properties]));
     expect(Object.keys(routes).sort()).toEqual([
       'GET /admin/orders', 'GET /admin/products/{id}/stock', 'GET /admin/tenants/{tenantId}/orders/{orderId}',
       'GET /orders', 'GET /orders/{id}', 'GET /products', 'GET /products/{id}',
-      'PATCH /admin/tenants/{tenantId}/orders/{orderId}', 'POST /orders',
+      'GET /tenant/contact', 'PATCH /admin/tenants/{tenantId}/orders/{orderId}', 'POST /orders', 'PUT /tenant/contact',
     ]);
+    expect(routes['GET /tenant/contact']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/profile.read'] });
+    expect(routes['PUT /tenant/contact']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/profile.write'] });
     // staff 端點只接受 admin scope / Staff endpoints need the admin scope.
     for (const k of ['GET /admin/orders', 'GET /admin/tenants/{tenantId}/orders/{orderId}', 'PATCH /admin/tenants/{tenantId}/orders/{orderId}']) {
       expect(routes[k]).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/admin'] });
@@ -135,7 +137,10 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   });
 
   test('order functions: fixed orders-* role names, NO DynamoDB/KMS permissions, may only assume the tenant role', () => {
-    for (const [name, suffix] of [['create-order', 'create'], ['list-orders', 'list'], ['get-order', 'get']] as const) {
+    for (const [name, suffix] of [
+      ['create-order', 'create'], ['list-orders', 'list'], ['get-order', 'get'],
+      ['get-contact', 'contact-get'], ['put-contact', 'contact-put'],
+    ] as const) {
       const fnName = `brewline-${envName}-ordering-${name}`;
       const [[, fn]] = resources(template, 'AWS::Lambda::Function').filter(([, r]) => r.Properties.FunctionName === fnName) as [[string, Res]];
       const roleId = fn.Properties.Role['Fn::GetAtt'][0];
@@ -148,6 +153,13 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
       const assume = st.find((s) => [].concat(s.Action).includes('sts:AssumeRole' as never));
       expect([].concat(assume.Action).sort()).toEqual(['sts:AssumeRole', 'sts:TagSession']);
       expect(JSON.stringify(assume.Resource)).toContain('TenantAccess');
+    }
+  });
+
+  test('contact functions (A4c) get the CMK ARN from SSM (used only through tenant credentials)', () => {
+    for (const name of ['get-contact', 'put-contact']) {
+      const [[, fn]] = resources(template, 'AWS::Lambda::Function').filter(([, r]) => r.Properties.FunctionName === `brewline-${envName}-ordering-${name}`) as [[string, Res]];
+      expect(JSON.stringify(fn.Properties.Environment.Variables.KMS_KEY_ARN)).toContain('datakmskeyarn');
     }
   });
 
@@ -274,7 +286,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
       expect(s.Properties).toMatchObject({ ProductId: 'p-0001', OrderProductId: 'p-9002', Commit: 'abc1234' });
       expect(s.DependsOn).toEqual(expect.arrayContaining(['CatalogSeed']));
       expect(s.DependsOn!.some((d) => d.startsWith('DefaultStage'))).toBe(true);
-      expect(s.DependsOn!.filter((d) => /^HttpApi(GET|POST|PATCH)/.test(d) && !d.includes('Integration'))).toHaveLength(9);
+      expect(s.DependsOn!.filter((d) => /^HttpApi(GET|POST|PUT|PATCH)/.test(d) && !d.includes('Integration'))).toHaveLength(11);
       // 只能管理這個 pool 的使用者 / User management limited to this pool.
       const st = statementsFor(template, `brewline-${envName}-ordering-smoke-a1`);
       const cognito = st.find((x) => x.Sid === 'ManageThrowawayUsers');
@@ -299,7 +311,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   test('all first-party Lambdas follow the standard; provider framework functions are explicitly exempt', () => {
     const fns = resources(template, 'AWS::Lambda::Function');
     const ours = fns.filter(([, r]) => String(r.Properties.FunctionName ?? '').startsWith(`brewline-${envName}-`));
-    expect(ours).toHaveLength(11 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
+    expect(ours).toHaveLength(13 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
     for (const [, r] of ours) {
       expect(r.Properties).toMatchObject({ Runtime: 'nodejs24.x', Architectures: ['arm64'], TracingConfig: { Mode: 'Active' } });
     }

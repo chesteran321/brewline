@@ -1,5 +1,5 @@
 import { TENANT_ID_PATTERN } from '../../identity/src/scopes';
-import { TENANT_A, TENANT_B, TEST_PRODUCT_ID, evaluateRace, probe, tally } from '../src/order-tests/run';
+import { TENANT_A, TENANT_B, TEST_PRODUCT_ID, evaluateRace, kmsProbes, probe, tally } from '../src/order-tests/run';
 import { loadTestSeed } from '../src/custom-resources/seed-catalog';
 
 const ok = (checks: ReturnType<typeof evaluateRace>) => checks.every((c) => c.ok);
@@ -50,6 +50,33 @@ describe('probe', () => {
   test('control: success passes; any error fails', async () => {
     expect((await probe('x', false, () => Promise.resolve({}))).ok).toBe(true);
     expect((await probe('x', false, denied)).ok).toBe(false);
+  });
+});
+
+describe('kmsProbes', () => {
+  // 假 KMS 模擬 IAM 條件：只接受 {tenant_id: A, field ∈ 四欄位} 且沒有其他鍵；不允許 GenerateDataKey
+  // Fake KMS that mimics the IAM conditions.
+  const fields = ['name', 'email', 'phone', 'address'];
+  const allowed = (ctx?: Record<string, string>) =>
+    !!ctx && ctx.tenant_id === TENANT_A && fields.includes(ctx.field ?? '') && Object.keys(ctx).every((k) => ['tenant_id', 'field'].includes(k));
+  const deny = () => Promise.reject(Object.assign(new Error('no'), { name: 'AccessDeniedException' }));
+  const correct = {
+    send: (cmd: any) => {
+      const name = cmd.constructor.name;
+      if (name === 'GenerateDataKeyCommand' || !allowed(cmd.input.EncryptionContext)) return deny();
+      return Promise.resolve(name === 'EncryptCommand' ? { CiphertextBlob: new Uint8Array([1]) } : { Plaintext: new Uint8Array([1]) });
+    },
+  };
+  test('correct policy: all probes pass', async () => {
+    const checks = await kmsProbes(correct, 'arn:key');
+    expect(checks).toHaveLength(8);
+    expect(checks.filter((c) => !c.ok)).toEqual([]);
+  });
+  // 反向：政策太寬（任何 context 都允許）→ 探測失敗 / Negative: an over-broad policy fails the probes.
+  test('over-broad policy: probes fail', async () => {
+    const permissive = { send: () => Promise.resolve({ CiphertextBlob: new Uint8Array([1]), Plaintext: new Uint8Array([1]) }) };
+    const failed = (await kmsProbes(permissive, 'arn:key')).filter((c) => !c.ok).map((c) => c.name);
+    expect(failed).toHaveLength(6);
   });
 });
 

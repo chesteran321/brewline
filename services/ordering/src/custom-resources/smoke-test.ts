@@ -102,7 +102,7 @@ async function call(
   cfg: Config,
   path: string,
   token?: string,
-  post?: { body: unknown; key?: string; method?: 'POST' | 'PATCH' },
+  post?: { body: unknown; key?: string; method?: 'POST' | 'PATCH' | 'PUT' },
 ): Promise<{ status: number; body: any }> {
   const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
   if (post) {
@@ -192,10 +192,66 @@ export async function runChecks(cfg: Config, tokens: Record<Role, Tokens>): Prom
   expect('staff access token has admin scope', String(staff.scope).includes('brewline/admin'), String(staff.scope));
   expect('staff access token has no tenant_id', staff.tenant_id === undefined, String(staff.tenant_id));
 
+  checks.push(...(await contactChecks(cfg, tokens)));
   const orders = await orderChecks(cfg, tokens);
   checks.push(...orders.checks);
   if (orders.orderId && orders.simOrderId) checks.push(...(await adminChecks(cfg, tokens, orders.orderId, orders.simOrderId)));
   else checks.push({ name: 'admin checks need both smoke orders', ok: false, detail: 'missing order ids' });
+  return checks;
+}
+
+/**
+ * A4c 聯絡人（ADR-029 D2／D4）：只有 cafe 有 profile scope；租戶 B 讀不到 A；DynamoDB 裡只有密文。
+ * Contacts: cafe-only scopes, tenant isolation, and ciphertext-only storage.
+ */
+export async function contactChecks(cfg: Config, tokens: Record<Role, Tokens>): Promise<Check[]> {
+  const checks: Check[] = [];
+  const expect = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
+  // 假資料：example.com 是保留網域（RFC 2606），不是任何人的信箱 / Reserved example domain, nobody's address.
+  const contact = { name: 'Smoke Contact', email: `smoke-${randomBytes(4).toString('hex')}@example.com`, phone: '+886900000000' };
+  const put = (body: unknown, token = tokens.cafe.access) => call(cfg, '/tenant/contact', token, { body, method: 'PUT' });
+
+  let r = await call(cfg, '/tenant/contact', tokens.cafe.access);
+  expect('contact: GET before PUT → 404', r.status === 404, `got ${r.status}`);
+  r = await put(contact);
+  expect('contact: cafe PUT → 200', r.status === 200 && r.body?.email === contact.email, `got ${r.status}`);
+  r = await call(cfg, '/tenant/contact', tokens.cafe.access);
+  expect(
+    'contact: cafe GET → same values (KMS round trip)',
+    r.status === 200 && r.body?.name === contact.name && r.body?.email === contact.email && r.body?.phone === contact.phone,
+    `got ${r.status}`,
+  );
+
+  // 反向 / Negative
+  r = await call(cfg, '/tenant/contact', tokens.cafeB.access);
+  expect("contact: tenant B GET → 404 (cannot see A's)", r.status === 404, `got ${r.status}`);
+  r = await call(cfg, '/tenant/contact', tokens.simulator.access);
+  expect('contact: simulator GET → 403 (no profile scope)', r.status === 403, `got ${r.status}`);
+  r = await put(contact, tokens.staff.access);
+  expect('contact: staff PUT → 403', r.status === 403, `got ${r.status}`);
+  r = await put({ name: 'x', email: 'not-an-email' });
+  expect('contact: invalid email → 400', r.status === 400 && r.body?.error?.code === 'invalid_contact', `got ${r.status}`);
+  r = await put({ ...contact, tenant_id: TENANT_B_ID });
+  expect('contact: tenant_id in body → 400', r.status === 400, `got ${r.status}`);
+
+  // DynamoDB 裡沒有明文 / No plaintext at rest (read with the fixture role, which cannot decrypt fields).
+  const raw = await doc.send(
+    new QueryCommand({
+      TableName: cfg.tableName,
+      KeyConditionExpression: 'pk = :pk AND sk = :sk',
+      ExpressionAttributeValues: { ':pk': `TENANT#${TENANT_ID}`, ':sk': 'CONTACT#primary' },
+    }),
+  );
+  const text = JSON.stringify(raw.Items ?? []);
+  expect(
+    'contact: stored item has ciphertext only',
+    (raw.Items?.length ?? 0) === 1 && !text.includes(contact.email) && !text.includes(contact.name) && !text.includes(contact.phone),
+    `items ${raw.Items?.length ?? 0}`,
+  );
+  const cafe = decodeClaims(tokens.cafe.access);
+  const sim = decodeClaims(tokens.simulator.access);
+  expect('cafe token has profile scopes', String(cafe.scope).includes('brewline/profile.write'), String(cafe.scope));
+  expect('simulator token has no profile scope', !String(sim.scope).includes('brewline/profile.'), String(sim.scope));
   return checks;
 }
 

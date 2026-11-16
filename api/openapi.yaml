@@ -4,7 +4,7 @@
 openapi: 3.1.0
 info:
   title: BrewLine Ordering API
-  version: 0.3.0-a3c
+  version: 0.4.0-a4c
   description: |
     驗證：Cognito access token（`Authorization: Bearer <token>`）。授權以 OAuth scope 在 API Gateway 執行，
     越權請求回 403，不會叫起 Lambda（ADR-022）。ID token 沒有 scope，會被拒絕。
@@ -163,6 +163,40 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /tenant/contact:
+    get:
+      operationId: getTenantContact
+      summary: 自己租戶的聯絡人 / Own tenant's contact
+      description: |
+        租戶來自 access token 的 `tenant_id`（路徑上沒有租戶 ID）。欄位在 DynamoDB 以 KMS 逐欄加密（ADR-029 D2）。
+        The tenant comes from the token's `tenant_id`; fields are encrypted per field with KMS at rest.
+      security:
+        - cognito: [brewline/profile.read]
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/TenantContact' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      operationId: putTenantContact
+      summary: 取代自己租戶的聯絡人 / Replace own tenant's contact
+      description: 整筆取代；省略的選填欄位會被移除 / Full replacement; omitted optional fields are removed.
+      security:
+        - cognito: [brewline/profile.write]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/TenantContactInput' } } }
+      responses:
+        '200':
+          description: 已更新 / Updated
+          content: { application/json: { schema: { $ref: '#/components/schemas/TenantContact' } } }
+        '400':
+          description: '`invalid_contact`，`fields` 列出有問題的欄位路徑（不回傳欄位值）/ Field paths only, never values'
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /admin/orders:
     get:
       operationId: adminListOrders
@@ -262,6 +296,8 @@ components:
             brewline/admin: 內部人員端點（staff）
             brewline/orders.read: 讀自己租戶的訂單（cafe、simulator）
             brewline/orders.write: 為自己租戶下單（cafe、simulator）
+            brewline/profile.read: 讀自己租戶的聯絡人（只有 cafe）
+            brewline/profile.write: 更新自己租戶的聯絡人（只有 cafe）
   parameters:
     ProductId:
       name: id
@@ -368,6 +404,22 @@ components:
           required: [tenant_id]
           properties:
             tenant_id: { type: string }
+    TenantContactInput:
+      type: object
+      additionalProperties: false
+      required: [name, email]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        email: { type: string, format: email, maxLength: 254, description: 存成小寫 / stored lower-cased }
+        phone: { type: string, pattern: '^\+[1-9]\d{7,14}$', description: E.164, example: '+886912345678' }
+        address: { type: string, minLength: 1, maxLength: 500, description: 可多行 / may contain newlines }
+    TenantContact:
+      allOf:
+        - $ref: '#/components/schemas/TenantContactInput'
+        - type: object
+          required: [updated_at]
+          properties:
+            updated_at: { type: string, format: date-time }
     Error:
       type: object
       properties:

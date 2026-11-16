@@ -157,6 +157,13 @@ export class ApiStack extends Stack {
     const listOrders = orderFn('ListOrders', 'list-orders', 'list', "GET /orders: own tenant's orders, newest first");
     const getOrder = orderFn('GetOrder', 'get-order', 'get', "GET /orders/{id}: own tenant's order");
 
+    // --- 3b-2) 租戶聯絡人（A4c，ADR-029 D2／D4）/ Tenant contact ---
+    // 同樣只扮演租戶角色；KMS 也用租戶憑證（encryption context 的 tenant_id 必須是自己）。
+    // Same pattern: tenant role only; KMS calls also use tenant credentials (context tenant_id must be own).
+    const getContact = orderFn('GetContact', 'get-contact', 'contact-get', "GET /tenant/contact: own tenant's contact (field-level KMS)");
+    const putContact = orderFn('PutContact', 'put-contact', 'contact-put', "PUT /tenant/contact: replace own tenant's contact (field-level KMS)");
+    for (const f of [getContact, putContact]) f.function.addEnvironment('KMS_KEY_ARN', keyArn);
+
     // --- 3c) staff 訂單函數（A3c，ADR-027）/ Staff order functions ---
     // 跨租戶，但**不扮演租戶角色**（角色名稱由 CloudFormation 產生，不符合 orders-*，信任政策不接受）。
     // Cross-tenant, but they never assume the tenant role (generated role names do not match orders-*).
@@ -247,6 +254,8 @@ export class ApiStack extends Stack {
       [apigwv2.HttpMethod.POST, '/orders', createOrder, SCOPES.ordersWrite],
       [apigwv2.HttpMethod.GET, '/orders', listOrders, SCOPES.ordersRead],
       [apigwv2.HttpMethod.GET, '/orders/{id}', getOrder, SCOPES.ordersRead],
+      [apigwv2.HttpMethod.GET, '/tenant/contact', getContact, SCOPES.profileRead],
+      [apigwv2.HttpMethod.PUT, '/tenant/contact', putContact, SCOPES.profileWrite],
       [apigwv2.HttpMethod.GET, '/admin/orders', adminList, SCOPES.admin],
       [apigwv2.HttpMethod.GET, '/admin/tenants/{tenantId}/orders/{orderId}', adminGet, SCOPES.admin],
       [apigwv2.HttpMethod.PATCH, '/admin/tenants/{tenantId}/orders/{orderId}', adminUpdate, SCOPES.admin],
@@ -415,6 +424,8 @@ export class ApiStack extends Stack {
           TENANT_ROLE_ARN: this.tenantAccess.role.roleArn,
           POWERTOOLS_SERVICE_NAME: 'ordering-order-tests',
           ORDER_TIMEOUT_SECONDS: String(props.api.orderTimeoutSeconds),
+          // KMS 探測（A4c）只用租戶憑證；函數角色本身不能直接用金鑰 / KMS probes use tenant credentials only.
+          KMS_KEY_ARN: keyArn,
         },
       });
       this.tenantAccess.grantAssume(testFn.role);
@@ -446,7 +457,7 @@ export class ApiStack extends Stack {
     new CfnOutput(this, 'TenantAccessRoleArn', { value: this.tenantAccess.role.roleArn });
     new CfnOutput(this, 'ApiId', { value: this.httpApi.apiId });
     new CfnOutput(this, 'FunctionNames', {
-      value: [listProducts, getProduct, getStock, createOrder, listOrders, getOrder, adminList, adminGet, adminUpdate]
+      value: [listProducts, getProduct, getStock, createOrder, listOrders, getOrder, getContact, putContact, adminList, adminGet, adminUpdate]
         .map((f) => f.function.functionName)
         .join(','),
     });
