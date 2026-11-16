@@ -78,7 +78,12 @@ fn=$(out NotifierFunctionName)
 cfg=$(aws lambda get-function-configuration --function-name "$fn" --region "$region" --output json)
 check "Notifier runtime" "$(jq -r .Runtime <<<"$cfg")" "nodejs24.x"
 check "Notifier role" "$(jq -r '.Role | split("/") | last' <<<"$cfg")" "brewline-${env_name}-orders-notify"
-check "Notifier From address" "$(jq -r .Environment.Variables.FROM_ADDRESS <<<"$cfg")" "orders@${domain}"
+# 唯讀驗證角色看不到環境變數的值（回傳 null）→ 只在看得到時判定；寄件地址由下方的 IAM 條件（SES 只允許這個 From）把關。
+# The read-only verify role does not see environment values (null); judge only when visible. The IAM condition below
+# (SES may only send From this address) is the enforced control.
+from_env=$(jq -r '.Environment.Variables.FROM_ADDRESS // empty' <<<"$cfg")
+if [[ -n "$from_env" ]]; then check "Notifier From address" "$from_env" "orders@${domain}"
+else echo "ℹ️  Notifier From address: environment not visible to this role (enforced by the SendOrderMail condition below)"; fi
 check "Notifier reserved concurrency" "$(aws lambda get-function-concurrency --function-name "$fn" --region "$region" \
   --query ReservedConcurrentExecutions --output text)" "1"
 eic=$(aws lambda get-function-event-invoke-config --function-name "$fn" --region "$region" --output json)
