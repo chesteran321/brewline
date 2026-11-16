@@ -303,29 +303,63 @@ export async function timeoutSetup(d: Deps, admin: AdminOrderRepo, timeoutSecond
   };
 }
 
-/** 第二段：逾時之後檢查，最後清理 / Part 2: check after the timeout, then clean up. */
-export async function timeoutCheck(d: Deps, admin: AdminOrderRepo, cancelId: string, keepId: string) {
-  const checks: Check[] = [];
-  try {
-    const x = await admin.get(TENANT_B, cancelId, true);
-    const y = await admin.get(TENANT_B, keepId, true);
-    const last = x?.status_history?.at(-1);
-    checks.push(
-      { name: 'timeout: unconfirmed order is CANCELLED', ok: x?.status === 'CANCELLED', detail: String(x?.status) },
-      { name: 'timeout: cancelled by system:timeout', ok: last?.by === 'system:timeout' && last?.from === 'CREATED', detail: JSON.stringify(last ?? null) },
-      { name: 'timeout: confirmed order untouched (CONFIRMED)', ok: y?.status === 'CONFIRMED', detail: String(y?.status) },
-    );
-    const stock = await readStock(d);
-    checks.push({
-      name: 'timeout: stock released for the cancelled order only (9/1)',
-      ok: stock.available_kg === RACE_STOCK_KG - 1 && stock.reserved_kg === 1,
-      detail: JSON.stringify(stock),
-    });
-  } finally {
+/**
+ * 第二段：逾時之後檢查。**只在全部通過時清理**；太早執行或資料不存在時不動任何資料，可以重跑。
+ * Part 2: check after the timeout. Cleans up only when every check passes; running too early or after the
+ * data is gone changes nothing, so it can be re-run.
+ */
+export async function timeoutCheck(
+  d: Deps,
+  admin: AdminOrderRepo,
+  cancelId: string,
+  keepId: string,
+  timeoutSeconds: number,
+  now: Date = new Date(),
+) {
+  const x = await admin.get(TENANT_B, cancelId, true);
+  const y = await admin.get(TENANT_B, keepId, true);
+  if (!x || !y) {
+    // 被清理過（例如提早執行的舊版檢查、或完整測試）→ 必須重跑 setup
+    // The data is gone (e.g. an earlier run cleaned it up) → run timeout-setup again.
+    return {
+      passed: false,
+      state: 'data_missing',
+      message: 'Test orders no longer exist; run {"mode":"timeout-setup"} again',
+      checks: [{ name: 'timeout: test orders exist', ok: false, detail: `cancel=${x ? 'found' : 'missing'}, keep=${y ? 'found' : 'missing'}` }],
+    };
+  }
+  // 逾時加 60 秒緩衝之前，工作流可能還在等待 → 不判定、不清理
+  // Before timeout + 60 s the workflow may still be waiting → no verdict, no cleanup.
+  const readyAt = new Date(new Date(x.created_at).getTime() + (timeoutSeconds + 60) * 1000);
+  if (x.status === 'CREATED' && now < readyAt) {
+    const wait = Math.ceil((readyAt.getTime() - now.getTime()) / 1000);
+    return {
+      passed: false,
+      state: 'too_early',
+      message: `The timeout has not elapsed; run timeout-check again after ${readyAt.toISOString()} (about ${wait} s)`,
+      checks: [{ name: 'timeout: waited long enough', ok: false, detail: `ready at ${readyAt.toISOString()}` }],
+    };
+  }
+
+  const last = x.status_history?.at(-1);
+  const checks: Check[] = [
+    { name: 'timeout: unconfirmed order is CANCELLED', ok: x.status === 'CANCELLED', detail: x.status },
+    { name: 'timeout: cancelled by system:timeout', ok: last?.by === 'system:timeout' && last?.from === 'CREATED', detail: JSON.stringify(last ?? null) },
+    { name: 'timeout: confirmed order untouched (CONFIRMED)', ok: y.status === 'CONFIRMED', detail: y.status },
+  ];
+  const stock = await readStock(d);
+  checks.push({
+    name: 'timeout: stock released for the cancelled order only (9/1)',
+    ok: stock.available_kg === RACE_STOCK_KG - 1 && stock.reserved_kg === 1,
+    detail: JSON.stringify(stock),
+  });
+  const passed = checks.every((c) => c.ok);
+  if (passed) {
     await cleanTenants(d).catch(() => undefined);
     await resetStock(d, RACE_STOCK_KG).catch(() => undefined);
   }
-  return { passed: checks.every((c) => c.ok), checks };
+  // 失敗時保留資料，方便查 DynamoDB 與工作流歷程 / Keep the data on failure for investigation.
+  return { passed, state: passed ? 'passed' : 'failed_data_kept', checks };
 }
 
 /** Lambda 進入點（只由 scripts/run-order-tests.sh 手動呼叫）/ Entry point, invoked manually. */
@@ -351,8 +385,8 @@ export const handler = async (event: { mode?: string; cancel_order_id?: string; 
   if (mode === 'timeout-setup') return timeoutSetup(deps, admin, Number(process.env.ORDER_TIMEOUT_SECONDS ?? '600'));
   if (mode === 'timeout-check') {
     if (!event.cancel_order_id || !event.keep_order_id) throw new Error('cancel_order_id and keep_order_id are required');
-    const r = await timeoutCheck(deps, admin, event.cancel_order_id, event.keep_order_id);
-    logger.info('timeout check finished', { passed: r.passed, failed: r.checks.filter((c) => !c.ok) });
+    const r = await timeoutCheck(deps, admin, event.cancel_order_id, event.keep_order_id, Number(process.env.ORDER_TIMEOUT_SECONDS ?? '600'));
+    logger.info('timeout check finished', { passed: r.passed, state: r.state, failed: r.checks.filter((c) => !c.ok) });
     return r;
   }
   if (mode !== 'all') throw new Error(`unknown mode ${mode}`);

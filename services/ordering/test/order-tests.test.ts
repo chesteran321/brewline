@@ -52,3 +52,50 @@ describe('probe', () => {
     expect((await probe('x', false, denied)).ok).toBe(false);
   });
 });
+
+describe('timeoutCheck guards (no destructive early runs)', () => {
+  // 以最小的假物件模擬：admin.get、fixture（readStock／cleanTenants／resetStock 走 fixture.send）
+  // Minimal fakes: admin.get plus a fixture client whose send() records commands.
+  const { timeoutCheck } = jest.requireActual('../src/order-tests/run') as typeof import('../src/order-tests/run');
+  const created = '2026-11-16T01:39:55.000Z';
+  const order = (status: string, history: object[] = []) => ({ status, created_at: created, status_history: history });
+  function deps(stock = { available_kg: 9, reserved_kg: 1 }) {
+    const sent: string[] = [];
+    const fixture = {
+      send: async (cmd: { constructor: { name: string } }) => {
+        sent.push(cmd.constructor.name);
+        if (cmd.constructor.name === 'GetCommand') return { Item: stock };
+        if (cmd.constructor.name === 'QueryCommand') return { Items: [] };
+        return {};
+      },
+    };
+    return { d: { fixture, forTenant: () => fixture, tableName: 't' } as never, sent };
+  }
+  const admin = (x?: object, y?: object) => ({ get: async (_t: string, id: string) => (id === 'X' ? x : y) }) as never;
+
+  test('too early: no verdict, nothing written', async () => {
+    const { d, sent } = deps();
+    const r = await timeoutCheck(d, admin(order('CREATED'), order('CONFIRMED')), 'X', 'Y', 600, new Date('2026-11-16T01:41:05Z'));
+    expect(r).toMatchObject({ passed: false, state: 'too_early' });
+    expect(sent.filter((c) => c !== 'GetCommand')).toEqual([]);
+  });
+  test('data missing: explicit state, nothing written', async () => {
+    const { d, sent } = deps();
+    const r = await timeoutCheck(d, admin(undefined, undefined), 'X', 'Y', 600);
+    expect(r).toMatchObject({ passed: false, state: 'data_missing' });
+    expect(sent).toEqual([]);
+  });
+  test('passed: cleans up', async () => {
+    const { d, sent } = deps();
+    const hist = [{ from: 'CREATED', to: 'CANCELLED', at: 'x', by: 'system:timeout' }];
+    const r = await timeoutCheck(d, admin(order('CANCELLED', hist), order('CONFIRMED')), 'X', 'Y', 600, new Date('2026-11-16T01:52:00Z'));
+    expect(r).toMatchObject({ passed: true, state: 'passed' });
+    expect(sent).toContain('PutCommand'); // 重設庫存 / stock reset
+  });
+  test('failed after the timeout: data kept for investigation', async () => {
+    const { d, sent } = deps({ available_kg: 8, reserved_kg: 2 });
+    const r = await timeoutCheck(d, admin(order('CREATED'), order('CONFIRMED')), 'X', 'Y', 600, new Date('2026-11-16T01:52:00Z'));
+    expect(r).toMatchObject({ passed: false, state: 'failed_data_kept' });
+    expect(sent.filter((c) => c === 'PutCommand' || c === 'DeleteCommand')).toEqual([]);
+  });
+});
