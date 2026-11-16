@@ -46,6 +46,10 @@ export class Replenishment extends Construct {
     const { account, region } = Stack.of(this);
     const groupName = Replenishment.groupName(envName);
     const schedulesArn = `arn:aws:scheduler:${region}:${account}:schedule/${groupName}/*`;
+    // Scheduler 扮演角色時帶的 aws:SourceArn 是**排程群組**的 ARN（不是個別排程）；寫成 schedule/... 會讓
+    // CreateSchedule 回 ValidationException（2026-11-16 實際踩到）。
+    // Scheduler presents the *schedule group* ARN as aws:SourceArn; scoping to schedule/... makes CreateSchedule fail.
+    const groupArn = `arn:aws:scheduler:${region}:${account}:schedule-group/${groupName}`;
 
     // CDK 內建區域資料可能過時（A4d 的 SES 即是）；部署前已以 describe-type 確認 / Verified with describe-type.
     this.group = new scheduler.CfnScheduleGroup(this, 'Group', { name: groupName });
@@ -110,8 +114,7 @@ export class Replenishment extends Construct {
       description: 'Assumed by EventBridge Scheduler for brewline replenishment schedules (A4e)',
       assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com', {
         conditions: {
-          StringEquals: { 'aws:SourceAccount': account },
-          ArnLike: { 'aws:SourceArn': schedulesArn },
+          StringEquals: { 'aws:SourceAccount': account, 'aws:SourceArn': groupArn },
         },
       }),
     });

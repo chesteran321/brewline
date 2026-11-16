@@ -192,7 +192,8 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
     const [role] = resources(template, 'AWS::IAM::Role').filter(([, r]) => r.Properties.RoleName === `brewline-${envName}-replenish-scheduler`);
     expect(role![1].Properties.AssumeRolePolicyDocument.Statement[0]).toMatchObject({
       Principal: { Service: 'scheduler.amazonaws.com' },
-      Condition: { StringEquals: { 'aws:SourceAccount': cfg.account }, ArnLike: { 'aws:SourceArn': schedArn } },
+      // SourceArn 必須是排程群組 ARN（Scheduler 文件；寫成 schedule/* 會 ValidationException）
+      Condition: { StringEquals: { 'aws:SourceAccount': cfg.account, 'aws:SourceArn': `arn:aws:scheduler:ap-east-2:${cfg.account}:schedule-group/${group}` } },
     });
     template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', { MaximumRetryAttempts: 2 });
     template.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: `brewline-${envName}-replenish-dlq-not-empty`, AlarmActions: Match.anyValue() });
