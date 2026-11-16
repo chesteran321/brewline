@@ -76,6 +76,15 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 事件 | `source=brewline.ordering`：`OrderCreated`、`OrderStatusChanged`、`StockLow`；detail 白名單、`event_id`＝stream eventID（下游去重） |
 | 留存 | 規則寫入 `/aws/events/brewline-<env>`（取代 Archive）；DLQ SSE-SQS |
 
+### 維運通知 / Ops notifications（ADR-029）
+
+| 項目 Item | 值 Value |
+|---|---|
+| Stack | `brewline-<env>-ops`（module `ops`；Prod 終止保護）；部署順序 data → auth → **ops** → events → api |
+| 主題 | `brewline-<env>-ops-alerts`（CMK 加密、僅 TLS、只有本帳號 CloudWatch／EventBridge 可發布）；SSM `/brewline/<env>/ops/alerts-topic-arn` |
+| 告警 | 每個 stack 結尾呼叫 `notifyAlarms(this, envName)` → 所有告警的 ALARM／OK 都通知主題（新告警自動涵蓋） |
+| 訂閱 | **手動** CLI 訂閱並確認（Email 不進 repo、不印在 CI summary） |
+
 ### Lambda 標準 / Lambda standard（ADR-023）
 
 - 一律用 `lib/constructs/brewline-function.ts`：Node 24、arm64、X-Ray、保留併發、自建 log group（Dev 7 天／Prod 30 天）、esbuild 打包（含 AWS SDK）。

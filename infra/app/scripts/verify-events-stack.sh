@@ -70,6 +70,7 @@ done
 # --- 告警 / Alarms ---
 alarms=$(aws cloudwatch describe-alarms --alarm-name-prefix "brewline-${env_name}-events-" --region "$region" --output json)
 check "Alarm count" "$(jq '.MetricAlarms | length' <<<"$alarms")" "3"
+check "Alarms with an action (A4b)" "$(jq '[.MetricAlarms[] | select((.AlarmActions | length) > 0)] | length' <<<"$alarms")" "3"
 check "Alarms in ALARM" "$(jq '[.MetricAlarms[] | select(.StateValue == "ALARM")] | length' <<<"$alarms")" "0"
 
 check "Stack termination protection" "$(aws cloudformation describe-stacks --stack-name "$stack" --region "$region" \
