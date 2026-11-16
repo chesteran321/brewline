@@ -62,6 +62,7 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 訂單（ADR-025） | `POST /orders`（`orders.write`、`Idempotency-Key`）、`GET /orders`、`GET /orders/{id}`（`orders.read`）；一個 `TransactWriteItems`＝冪等記錄＋訂單＋扣庫存；sk `ORDER#<ULID>`；每筆 ≤ 25 個商品、每個 1–500 kg；訂單函數角色**沒有** DynamoDB 權限，只能扮演租戶角色 |
 | staff 訂單（ADR-027） | `GET /admin/orders?status=`、`GET`／`PATCH /admin/tenants/{tenantId}/orders/{orderId}`（`brewline/admin`）；狀態機在 `order-lifecycle.ts`；一個交易＝訂單（條件：原狀態）＋庫存（SHIPPED 消耗、CANCELLED 釋放）；staff 函數**不扮演**租戶角色 |
 | 逾時取消（ADR-028） | `OrderCreated` → Standard `brewline-<env>-order-lifecycle`：Wait（Dev 10 分／Prod 48 小時）→ 仍是 CREATED 就取消並釋放庫存（`system:timeout`）；冪等靠條件寫入，不靠執行名稱 |
+| 聯絡人（A4c） | `GET`／`PUT /tenant/contact`（`profile.read`／`profile.write`，**只有 cafe**）；`TENANT#<t>`／`CONTACT#primary`；`name`、`email`、`phone`、`address` 逐欄 KMS 加密，context `{tenant_id, field}`；租戶角色只能用自己的 `tenant_id` context（ADR-029 D2）；**日誌不得記錄聯絡人內容** |
 | 測試商品 | Dev 專用 `p-9001`（併發）、`p-9002`（smoke），不設 `gsi1pk` → 不在目錄 |
 | 訂單測試 | Dev 手動：`infra/app/scripts/run-order-tests.sh`（冪等風暴、搶庫存、IAM 探測；函數 `brewline-dev-ordering-order-tests`） |
 | 合約 | `api/openapi.yaml` |

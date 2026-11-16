@@ -3,7 +3,8 @@ import { decide, handler } from '../src/pre-token-generation';
 import { SCOPES, TENANT_ID_PATTERN } from '../src/scopes';
 
 const TENANT = 't_01JD8Z3K5M7N9P0Q2R4S6T8V0W';
-const CAFE_SCOPES = [SCOPES.catalogRead, SCOPES.ordersRead, SCOPES.ordersWrite].sort();
+const SIM_SCOPES = [SCOPES.catalogRead, SCOPES.ordersRead, SCOPES.ordersWrite].sort();
+const CAFE_SCOPES = [...SIM_SCOPES, SCOPES.profileRead, SCOPES.profileWrite].sort();
 
 function event(groups: string[], attrs: Record<string, string> = {}): PreTokenGenerationV2TriggerEvent {
   return {
@@ -24,8 +25,16 @@ describe('decide()', () => {
     expect(decide(['cafe'], TENANT)).toEqual({ scopes: CAFE_SCOPES, tenantId: TENANT });
   });
 
-  test('simulator is treated like a café (ADR-011)', () => {
-    expect(decide(['simulator'], TENANT)).toEqual({ scopes: CAFE_SCOPES, tenantId: TENANT });
+  test('simulator is treated like a café for orders (ADR-011) but gets no profile scopes (ADR-029 D4)', () => {
+    expect(decide(['simulator'], TENANT)).toEqual({ scopes: SIM_SCOPES, tenantId: TENANT });
+  });
+
+  test('only cafe gets profile.read / profile.write', () => {
+    for (const [groups, tenant] of [[['simulator'], TENANT], [['staff'], undefined]] as const) {
+      const { scopes } = decide(groups, tenant);
+      expect(scopes).not.toContain(SCOPES.profileRead);
+      expect(scopes).not.toContain(SCOPES.profileWrite);
+    }
   });
 
   // staff 沒有租戶，不可拿到下單 scope / Staff have no tenant and must never get order scopes.

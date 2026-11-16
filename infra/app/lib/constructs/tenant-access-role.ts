@@ -126,7 +126,31 @@ export class TenantAccessRole extends Construct {
         conditions: { StringEquals: { 'kms:ViaService': `dynamodb.${region}.amazonaws.com` } },
       }),
     );
+    // 聯絡人欄位層級加密（A4c，ADR-029 D2）：直接呼叫 KMS，但 encryption context 的 tenant_id 必須等於
+    // 自己的 session tag，而且 context 只能有 tenant_id、field 兩個鍵 → 租戶隔離延伸到 KMS 層。
+    // Contact field encryption: direct KMS calls, but only with a context whose tenant_id equals the caller's own
+    // session tag and whose keys are exactly tenant_id and field → tenant isolation extends to KMS.
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ContactFieldsOwnTenant',
+        actions: ['kms:Encrypt', 'kms:Decrypt'],
+        resources: [props.keyArn],
+        conditions: {
+          StringEquals: {
+            'kms:EncryptionContext:tenant_id': ownTenant,
+            'kms:EncryptionContext:field': [...TenantAccessRole.CONTACT_FIELDS],
+            'kms:EncryptionAlgorithm': 'SYMMETRIC_DEFAULT',
+          },
+          // ForAllValues 對「沒有 context」也是 true，但上面的 StringEquals 已要求 tenant_id、field 必須存在。
+          // ForAllValues is true for an empty set, but the StringEquals above already requires both keys.
+          'ForAllValues:StringEquals': { 'kms:EncryptionContextKeys': ['tenant_id', 'field'] },
+        },
+      }),
+    );
   }
+
+  /** 可加密的聯絡人欄位（與 services/ordering/src/lib/contact-model.ts 一致）/ Encryptable contact fields. */
+  public static readonly CONTACT_FIELDS = ['name', 'email', 'phone', 'address'] as const;
 
   /** 讓函數可以扮演此角色（函數角色名稱必須符合前綴）/ Let a function assume this role. */
   public grantAssume(grantee: iam.IRole): void {

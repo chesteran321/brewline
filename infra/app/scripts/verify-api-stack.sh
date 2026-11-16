@@ -46,7 +46,7 @@ aws sts get-caller-identity --query Arn --output text
 # --- 路由與授權 / Routes and authorization ---
 routes=$(aws apigatewayv2 get-routes --api-id "$api_id" --region "$region" --output json)
 check "Routes" "$(jq -c '[.Items[].RouteKey] | sort' <<<"$routes")" \
-  '["GET /admin/orders","GET /admin/products/{id}/stock","GET /admin/tenants/{tenantId}/orders/{orderId}","GET /orders","GET /orders/{id}","GET /products","GET /products/{id}","PATCH /admin/tenants/{tenantId}/orders/{orderId}","POST /orders"]'
+  '["GET /admin/orders","GET /admin/products/{id}/stock","GET /admin/tenants/{tenantId}/orders/{orderId}","GET /orders","GET /orders/{id}","GET /products","GET /products/{id}","GET /tenant/contact","PATCH /admin/tenants/{tenantId}/orders/{orderId}","POST /orders","PUT /tenant/contact"]'
 check "Routes without JWT" "$(jq -r '[.Items[] | select(.AuthorizationType != "JWT")] | length' <<<"$routes")" "0"
 check "Routes without a scope" "$(jq -r '[.Items[] | select((.AuthorizationScopes // []) | length == 0)] | length' <<<"$routes")" "0"
 scope_of() { jq -c --arg k "$1" '.Items[] | select(.RouteKey == $k) | .AuthorizationScopes' <<<"$routes"; }
@@ -57,6 +57,8 @@ check "GET /orders/{id} scope" "$(scope_of 'GET /orders/{id}')" '["brewline/orde
 check "GET /admin/orders scope" "$(scope_of 'GET /admin/orders')" '["brewline/admin"]'
 check "GET admin order scope"   "$(scope_of 'GET /admin/tenants/{tenantId}/orders/{orderId}')" '["brewline/admin"]'
 check "PATCH admin order scope" "$(scope_of 'PATCH /admin/tenants/{tenantId}/orders/{orderId}')" '["brewline/admin"]'
+check "GET /tenant/contact scope" "$(scope_of 'GET /tenant/contact')" '["brewline/profile.read"]'
+check "PUT /tenant/contact scope" "$(scope_of 'PUT /tenant/contact')" '["brewline/profile.write"]'
 
 authz=$(aws apigatewayv2 get-authorizers --api-id "$api_id" --region "$region" --output json)
 issuer=$(aws ssm get-parameter --name "/brewline/${env_name}/auth/issuer" --region "$region" --query Parameter.Value --output text)
@@ -75,7 +77,7 @@ check "No CORS configured"   "$(aws apigatewayv2 get-api --api-id "$api_id" --re
 
 # --- Lambda ---
 IFS=',' read -r -a fns <<<"$(out FunctionNames)"
-check "API function count" "${#fns[@]}" "9"
+check "API function count" "${#fns[@]}" "11"
 for fn in "${fns[@]}"; do
   cfg=$(aws lambda get-function-configuration --function-name "$fn" --region "$region" --output json)
   short=${fn#brewline-${env_name}-ordering-}

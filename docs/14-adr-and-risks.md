@@ -281,6 +281,7 @@
 - **決策 Decision**：
   - **D1 寄件身分**：以 Route 53 註冊網域；Prod 放主網域 hosted zone，`dev.<網域>` 委派給 Dev。SES 驗證網域身分＋Easy DKIM＋自訂 MAIL FROM＋DMARC。不用 Gmail 地址當寄件人：單一地址身分的 DKIM／SPF 與 From 網域不一致，DMARC 必定失敗。
   - **D2 聯絡人欄位層級加密**：`email`、`phone`、`address` 各自 `kms:Encrypt`，encryption context `{tenant_id, field}`；租戶角色只能在 `kms:EncryptionContext:tenant_id = ${aws:PrincipalTag/tenant_id}` 時解密 → 租戶隔離延伸到 KMS 層。
+    - **A4c 實作補充（2026-11-16）**：`name` 也是個資，一併加密（共 4 欄：`name`、`email`、`phone`、`address`），DynamoDB 項目只有密文（`enc.<field>`，base64）。直接 `kms:Encrypt`／`Decrypt`（每欄 ≤ 4 KB，不需信封加密）。租戶角色 Sid `ContactFieldsOwnTenant`：`kms:EncryptionContext:tenant_id = ${aws:PrincipalTag/tenant_id}`、`field` 限 4 個值、`ForAllValues kms:EncryptionContextKeys ⊆ {tenant_id, field}`；**沒有**直接的 `GenerateDataKey`。函數角色 `brewline-<env>-orders-contact-{get,put}`（沿用 `orders-*` 信任前綴）本身沒有 KMS／DynamoDB 權限。
   - **D3 SNS 加密**：用每帳號的 CMK；**key policy** 授權 `cloudwatch`、`events`、`ses` 服務主體 `kms:Decrypt`／`kms:GenerateDataKey*`（條件：`aws:SourceAccount` 存在時必須是本帳號）。AWS 管理的 `alias/aws/sns` 無法讓 CloudWatch 告警發布（key policy 不能改）。訂閱 Email 不進 repo，以 CLI 手動訂閱。
   - **D4 聯絡人**：每租戶一位 `TENANT#<t>/CONTACT#primary`；`GET`／`PUT /tenant/contact`；新 scope `brewline/profile.read`／`profile.write`，**只給 cafe**。
   - **D5 寄信時機**：`OrderCreated`、`→ CONFIRMED`、`→ SHIPPED`、`→ CANCELLED`；以 `NOTIFY#<event_id>`（條件寫入、TTL 7 天）保證不重複寄送。

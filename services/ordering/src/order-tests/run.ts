@@ -1,4 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DecryptCommand, EncryptCommand, GenerateDataKeyCommand, KMSClient } from '@aws-sdk/client-kms';
 import { STSClient } from '@aws-sdk/client-sts';
 import {
   DeleteCommand,
@@ -22,6 +23,7 @@ import { TenantCredentials } from '../lib/tenant-credentials';
  * 1. 冪等風暴：同一個 Idempotency-Key 同時送 10 次 → 只產生 1 筆訂單（03 §11）。
  * 2. 搶庫存：100 個不同的 key 同時各訂 1 kg，庫存 10 kg → 不超賣（03 §11）。
  * 3. IAM 探測：用租戶 A 的**真實憑證**直接呼叫 DynamoDB，越權動作必須 AccessDeniedException（A2 決策 D4）。
+ *    A4c 加上 KMS：encryption context 的 tenant_id 不是自己、多了鍵、或沒有 context → 拒絕。
  * 4. 逾時取消（A3d，兩段）：`timeout-setup` 建立兩筆訂單並確認其中一筆；等逾時後 `timeout-check`
  *    確認未確認的那筆被 `system:timeout` 取消、庫存釋放，已確認的那筆不受影響。
  *
@@ -111,6 +113,42 @@ interface Deps {
   /** 租戶範圍的 client（扮演租戶角色）/ Tenant-scoped client (assumed tenant role). */
   readonly forTenant: (tenantId: string) => DynamoDBDocumentClient;
   readonly tableName: string;
+  /** 租戶範圍的 KMS client（A4c）/ Tenant-scoped KMS client. */
+  readonly kmsFor?: (tenantId: string) => Pick<KMSClient, 'send'>;
+  readonly keyArn?: string;
+}
+
+/**
+ * KMS 探測（A4c，ADR-029 D2）：租戶 A 的真實憑證只能用 `{tenant_id: A, field}` 加解密。
+ * KMS probe: tenant A's real credentials may only encrypt/decrypt with `{tenant_id: A, field}`.
+ */
+export async function kmsProbes(kms: Pick<KMSClient, 'send'>, keyArn: string): Promise<Check[]> {
+  const pt = Buffer.from('probe@example.com');
+  const own = { tenant_id: TENANT_A, field: 'email' };
+  const enc = (EncryptionContext?: Record<string, string>) => kms.send(new EncryptCommand({ KeyId: keyArn, Plaintext: pt, EncryptionContext }));
+  const checks: Check[] = [];
+  let ciphertext: Uint8Array | undefined;
+  checks.push(
+    await probe('kms: A encrypts with own context (control)', false, async () => {
+      ciphertext = (await enc(own)).CiphertextBlob;
+    }),
+  );
+  checks.push(
+    await probe('kms: A decrypts with own context (control)', false, () =>
+      kms.send(new DecryptCommand({ KeyId: keyArn, CiphertextBlob: ciphertext ?? new Uint8Array([0]), EncryptionContext: own })),
+    ),
+    await probe("kms: A decrypts presenting B's context → AccessDenied", true, () =>
+      kms.send(new DecryptCommand({ KeyId: keyArn, CiphertextBlob: ciphertext ?? new Uint8Array([0]), EncryptionContext: { ...own, tenant_id: TENANT_B } })),
+    ),
+    await probe("kms: A encrypts with B's context → AccessDenied", true, () => enc({ ...own, tenant_id: TENANT_B })),
+    await probe('kms: A encrypts with an extra context key → AccessDenied', true, () => enc({ ...own, extra: 'x' })),
+    await probe('kms: A encrypts with an unknown field → AccessDenied', true, () => enc({ ...own, field: 'notes' })),
+    await probe('kms: A encrypts without context → AccessDenied', true, () => enc(undefined)),
+    await probe('kms: A generates a data key directly → AccessDenied', true, () =>
+      kms.send(new GenerateDataKeyCommand({ KeyId: keyArn, KeySpec: 'AES_256', EncryptionContext: own })),
+    ),
+  );
+  return checks;
 }
 
 async function resetStock(d: Deps, availableKg: number): Promise<void> {
@@ -262,6 +300,8 @@ export async function runAll(d: Deps): Promise<{ passed: boolean; checks: Check[
         a.send(new DeleteCommand({ TableName: t, Key: { pk: `TENANT#${TENANT_A}`, sk: ownOrderSk } })),
       ),
     );
+    if (d.kmsFor && d.keyArn) checks.push(...(await kmsProbes(d.kmsFor(TENANT_A), d.keyArn)));
+    else checks.push({ name: 'kms probes need KMS_KEY_ARN', ok: false, detail: 'missing' });
   } finally {
     stats.cleaned = await cleanTenants(d).catch((e: Error) => `failed: ${e.name}`);
     await resetStock(d, RACE_STOCK_KG).catch(() => undefined);
@@ -378,7 +418,17 @@ export const handler = async (event: { mode?: string; cancel_order_id?: string; 
     return c;
   };
   const fixture = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
-  const deps: Deps = { fixture, forTenant, tableName };
+  const keyArn = process.env.KMS_KEY_ARN;
+  const kmsClients = new Map<string, KMSClient>();
+  const kmsFor = (tenantId: string) => {
+    let c = kmsClients.get(tenantId);
+    if (!c) {
+      c = new KMSClient({ credentials: () => creds.get(tenantId) });
+      kmsClients.set(tenantId, c);
+    }
+    return c;
+  };
+  const deps: Deps = { fixture, forTenant, tableName, kmsFor, keyArn };
   // 夾具角色只允許測試租戶與 p-9001（IAM 完全比對）/ The fixture role is limited to the test tenants and p-9001.
   const admin = new AdminOrderRepo(fixture, tableName, 'gsi1');
   const mode = event.mode ?? 'all';

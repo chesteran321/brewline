@@ -2,9 +2,11 @@ import { Logger } from '@aws-lambda-powertools/logger';
 import { Tracer } from '@aws-lambda-powertools/tracer';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { KMSClient } from '@aws-sdk/client-kms';
 import { STSClient } from '@aws-sdk/client-sts';
 import { CatalogRepo } from './catalog-repo';
 import { AdminOrderRepo } from './admin-order-repo';
+import { ContactRepo } from './contact-repo';
 import { OrderRepo } from './order-repo';
 import { TenantCredentials } from './tenant-credentials';
 
@@ -34,6 +36,42 @@ export function setCatalogRepoForTesting(r: CatalogRepo | undefined): void {
   repo = r;
 }
 
+let tenantCreds: TenantCredentials | undefined;
+const tenantDocs = new Map<string, DynamoDBDocumentClient>();
+
+/** 租戶範圍的憑證（每個冷啟動一份快取）/ Tenant-scoped credentials, one cache per cold start. */
+function credentials(): TenantCredentials {
+  const fnName = process.env.AWS_LAMBDA_FUNCTION_NAME ?? 'orders';
+  tenantCreds ??= new TenantCredentials(
+    tracer.captureAWSv3Client(new STSClient({})),
+    requiredEnv('TENANT_ROLE_ARN'),
+    fnName.replace(/^brewline-[a-z]+-ordering-/, ''),
+  );
+  return tenantCreds;
+}
+
+/** 有上限的 Map 快取（最多 200 個租戶）/ Bounded per-tenant cache (200 tenants). */
+function cached<T>(map: Map<string, T>, tenantId: string, make: () => T): T {
+  let v = map.get(tenantId);
+  if (!v) {
+    if (map.size >= 200) map.delete(map.keys().next().value as string);
+    v = make();
+    map.set(tenantId, v);
+  }
+  return v;
+}
+
+/** 租戶專用的 DynamoDB client / DynamoDB client bound to the tenant's credentials. */
+function tenantDoc(tenantId: string): DynamoDBDocumentClient {
+  const creds = credentials();
+  return cached(tenantDocs, tenantId, () =>
+    DynamoDBDocumentClient.from(
+      tracer.captureAWSv3Client(new DynamoDBClient({ credentials: () => creds.get(tenantId) })),
+      { marshallOptions: { removeUndefinedValues: true } },
+    ),
+  );
+}
+
 let orders: OrderRepo | undefined;
 
 /**
@@ -43,29 +81,36 @@ let orders: OrderRepo | undefined;
  * DynamoDB permissions at all.
  */
 export function orderRepo(): OrderRepo {
-  if (!orders) {
-    const fnName = process.env.AWS_LAMBDA_FUNCTION_NAME ?? 'orders';
-    const creds = new TenantCredentials(
-      tracer.captureAWSv3Client(new STSClient({})),
-      requiredEnv('TENANT_ROLE_ARN'),
-      fnName.replace(/^brewline-[a-z]+-ordering-/, ''),
-    );
-    const clients = new Map<string, DynamoDBDocumentClient>();
-    const tableName = requiredEnv('TABLE_NAME');
-    orders = new OrderRepo((tenantId) => {
-      let c = clients.get(tenantId);
-      if (!c) {
-        if (clients.size >= 200) clients.delete(clients.keys().next().value as string);
-        c = DynamoDBDocumentClient.from(
-          tracer.captureAWSv3Client(new DynamoDBClient({ credentials: () => creds.get(tenantId) })),
-          { marshallOptions: { removeUndefinedValues: true } },
-        );
-        clients.set(tenantId, c);
-      }
-      return c;
-    }, tableName);
-  }
+  orders ??= new OrderRepo(tenantDoc, requiredEnv('TABLE_NAME'));
   return orders;
+}
+
+let contacts: ContactRepo | undefined;
+const tenantKms = new Map<string, KMSClient>();
+
+/**
+ * 聯絡人 repo（A4c）：DynamoDB 與 KMS 都用租戶範圍憑證；函數角色本身沒有 KMS 權限。
+ * Contact repo: DynamoDB and KMS both use tenant-scoped credentials; the function role has no KMS access.
+ */
+export function contactRepo(): ContactRepo {
+  if (!contacts) {
+    const creds = credentials();
+    contacts = new ContactRepo(
+      tenantDoc,
+      (tenantId) =>
+        cached(tenantKms, tenantId, () =>
+          tracer.captureAWSv3Client(new KMSClient({ credentials: () => creds.get(tenantId) })),
+        ),
+      requiredEnv('TABLE_NAME'),
+      requiredEnv('KMS_KEY_ARN'),
+    );
+  }
+  return contacts;
+}
+
+/** 測試用 / For tests. */
+export function setContactRepoForTesting(r: ContactRepo | undefined): void {
+  contacts = r;
 }
 
 /** 測試用 / For tests. */

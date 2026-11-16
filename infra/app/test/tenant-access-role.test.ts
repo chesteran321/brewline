@@ -74,6 +74,23 @@ describe('TenantAccessRole', () => {
     expect(kms.Condition).toEqual({ StringEquals: { 'kms:ViaService': 'dynamodb.ap-east-2.amazonaws.com' } });
   });
 
+  test('contact fields: direct KMS only with own tenant_id context and exactly {tenant_id, field} keys (A4c)', () => {
+    const st = policyStatements(t).find((s) => s.Sid === 'ContactFieldsOwnTenant');
+    expect([].concat(st.Action).sort()).toEqual(['kms:Decrypt', 'kms:Encrypt']);
+    expect(st.Resource).toBe('arn:aws:kms:ap-east-2:111111111111:key/abc');
+    expect(st.Condition.StringEquals).toEqual({
+      'kms:EncryptionContext:tenant_id': '${aws:PrincipalTag/tenant_id}',
+      'kms:EncryptionContext:field': ['name', 'email', 'phone', 'address'],
+      'kms:EncryptionAlgorithm': 'SYMMETRIC_DEFAULT',
+    });
+    expect(st.Condition['ForAllValues:StringEquals']).toEqual({ 'kms:EncryptionContextKeys': ['tenant_id', 'field'] });
+    // 反向：不能產生資料金鑰、不能 ReEncrypt（只有經 DynamoDB 的 GenerateDataKey）
+    // Negative: no direct GenerateDataKey / ReEncrypt.
+    const direct = policyStatements(t).filter((s) => s.Effect === 'Allow' && !s.Condition?.StringEquals?.['kms:ViaService']);
+    const kmsActions = direct.flatMap((s) => [].concat(s.Action)).filter((a: string) => a.startsWith('kms:'));
+    expect(kmsActions.sort()).toEqual(['kms:Decrypt', 'kms:Encrypt']);
+  });
+
   test('grantAssume gives sts:AssumeRole + sts:TagSession on this role only', () => {
     const { stack: s2, ta } = build();
     const caller = new iam.Role(s2, 'Caller', { assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com') });
