@@ -61,7 +61,33 @@ export interface LambdaSettings {
     readonly customResource: number;
     /** DynamoDB Streams 事件發布（每個 shard 一個並行）/ Stream publisher (one concurrent batch per shard). */
     readonly streamPublisher: number;
+    /** 訂單通知信（A4d；SES 沙盒每秒 1 封）/ Order e-mail notifier (SES sandbox: 1 message/s). */
+    readonly notifier: number;
   };
+}
+
+/**
+ * 寄信（A4d，ADR-029 D1／D5）。網域在 Prod 帳號以 Route 53 註冊；`dev.` 子網域委派給 Dev 帳號。
+ * Outbound mail. The domain is registered in Prod with Route 53; the `dev.` subdomain is delegated to Dev.
+ */
+export interface MailSettings {
+  /** SES 網域身分＝寄件網域 / SES domain identity and From domain. */
+  readonly domain: string;
+  /**
+   * 已存在的 hosted zone（Prod：註冊網域時 Route 53 自動建立）。省略 → 由 CDK 建立（Dev 子網域）。
+   * Existing hosted zone (Prod: created by domain registration). Omitted → CDK creates it (Dev subdomain).
+   */
+  readonly hostedZoneId?: string;
+  /** 寄件地址的 local part / Local part of the From address. */
+  readonly fromLocalPart: string;
+  readonly fromName: string;
+  /**
+   * 子網域委派（ADR-029 E2：NS 值手動從 Dev 部署輸出複製，不需要跨帳號角色）。
+   * 名稱伺服器還沒填（空陣列）時不建立記錄。
+   * Subdomain delegations; NS values are copied from the Dev deploy output (no cross-account role).
+   * No record is created while the list is empty.
+   */
+  readonly delegations: ReadonlyArray<{ readonly subdomain: string; readonly nameServers: readonly string[] }>;
 }
 
 /**
@@ -102,6 +128,7 @@ export interface BrewlineEnv {
   readonly auth: AuthSettings;
   readonly lambda: LambdaSettings;
   readonly api: ApiSettings;
+  readonly mail: MailSettings;
 }
 
 /** Lambda 標準 runtime（ADR-023）/ Standard Lambda runtime. */
@@ -130,7 +157,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 7, // COST-007
-      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1, streamPublisher: 2 },
+      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1, streamPublisher: 2, notifier: 1 },
     },
     api: {
       throttleRateLimit: 10,
@@ -141,6 +168,12 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       testProducts: true,
       orderTests: true,
       orderTimeoutSeconds: 10 * 60,
+    },
+    mail: {
+      domain: 'dev.brewline-demo.click',
+      fromLocalPart: 'orders',
+      fromName: 'BrewLine (Demo)',
+      delegations: [],
     },
   },
   prod: {
@@ -162,7 +195,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 30, // COST-007
-      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1, streamPublisher: 2 },
+      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1, streamPublisher: 2, notifier: 1 },
     },
     api: {
       throttleRateLimit: 50,
@@ -173,6 +206,15 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       testProducts: false,
       orderTests: false,
       orderTimeoutSeconds: 48 * 60 * 60,
+    },
+    mail: {
+      domain: 'brewline-demo.click',
+      // Route 53 註冊網域時建立的 hosted zone（2026-11-16）/ Created by the Route 53 registration.
+      hostedZoneId: 'Z039360620HRFCTYO5R5J',
+      fromLocalPart: 'orders',
+      fromName: 'BrewLine (Demo)',
+      // Dev 第一次部署後，把輸出 MailZoneNameServers 的 4 個值貼到這裡 / Paste Dev's MailZoneNameServers here.
+      delegations: [{ subdomain: 'dev', nameServers: [] }],
     },
   },
 };

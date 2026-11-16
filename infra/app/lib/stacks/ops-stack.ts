@@ -50,6 +50,21 @@ export class OpsStack extends Stack {
       }),
     );
 
+    // SES configuration set 的退信／投訴事件（A4d，ADR-029 E5）：只限本帳號、brewline-<env>-* 的 configuration set。
+    // SES bounce/complaint events from this account's brewline-<env>-* configuration sets only.
+    this.topic.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowSesEventsToPublish',
+        principals: [new iam.ServicePrincipal('ses.amazonaws.com')],
+        actions: ['sns:Publish'],
+        resources: [this.topic.topicArn],
+        conditions: {
+          StringEquals: { 'aws:SourceAccount': this.account },
+          ArnLike: { 'aws:SourceArn': `arn:aws:ses:${this.region}:${this.account}:configuration-set/brewline-${envName}-*` },
+        },
+      }),
+    );
+
     new ssm.StringParameter(this, 'AlertsTopicArnParam', {
       parameterName: `${OpsStack.parameterPrefix(envName)}/alerts-topic-arn`,
       stringValue: this.topic.topicArn,

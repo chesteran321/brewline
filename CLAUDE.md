@@ -86,6 +86,16 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 告警 | 每個 stack 結尾呼叫 `notifyAlarms(this, envName)` → 所有告警的 ALARM／OK 都通知主題（新告警自動涵蓋） |
 | 訂閱 | **手動** CLI 訂閱並確認（Email 不進 repo、不印在 CI summary） |
 
+### 訂單通知信 / Order e-mail（ADR-029 D1／D5，A4d）
+
+| 項目 Item | 值 Value |
+|---|---|
+| Stack | `brewline-<env>-notify`（module `notifications`；Prod 終止保護）；部署順序最後（需要租戶角色與 bus） |
+| 網域 | `brewline-demo.click`（Prod 帳號 Route 53 註冊，zone `Z039360620HRFCTYO5R5J`）；Dev 用 `dev.brewline-demo.click`（Dev 帳號 zone，Prod 以 config `mail.delegations` 委派） |
+| SES | 網域身分＋Easy DKIM 2048＋MAIL FROM `mail.<網域>`＋DMARC `p=quarantine; adkim=s; aspf=r`；configuration set `brewline-<env>-mail` → `ops-alerts`；**沙盒**（收件信箱手動驗證，不進 repo） |
+| 通知函數 | `brewline-<env>-notifications-order-notifier`，角色 `brewline-<env>-orders-notify`（扮演租戶角色讀聯絡人／解密）；只寄 建立／確認／出貨／取消；`NOTIFY#<event_id>` 條件寫入防重複；`example.com` 等保留網域不寄；**日誌不記錄收件地址** |
+| 區域注意 | CDK 內建資料誤判台北沒有 `AWS::SES::*`；新增資源類型前用 `aws cloudformation describe-type --region ap-east-2` 實測 |
+
 ### Lambda 標準 / Lambda standard（ADR-023）
 
 - 一律用 `lib/constructs/brewline-function.ts`：Node 24、arm64、X-Ray、保留併發、自建 log group（Dev 7 天／Prod 30 天）、esbuild 打包（含 AWS SDK）。
