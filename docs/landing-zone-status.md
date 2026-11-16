@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）、A3d（逾時取消）完成，**訂貨 A3 完成** / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）、A3d（逾時取消）完成，**訂貨 A3 完成**；A4a／A4b（CMK key policy＋維運告警 SNS）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -454,6 +454,7 @@ OIDC provider：`token.actions.githubusercontent.com`，audience `sts.amazonaws.
 - Key policy 為 CDK 預設（`kms:*` 給帳號 root → 交由 IAM 決定）；RCP `EnforceOrgIdentities` 另限制只有組織內身分可用 `kms:*`。
 - 其他 stack 一律由 SSM 參數取得名稱／ARN，不使用 CloudFormation Export。
 - 加密為**表層級**；聯絡人欄位層級加密於訂貨模組（A2）決定。
+- **Key policy（A4a，2026-11-16，PR #36，ADR-029）**：新增 `AllowAwsServicesToPublishToEncryptedTopics`：`cloudwatch`、`events`、`ses` 服務主體只有 `kms:Decrypt`、`kms:GenerateDataKey*`，條件 `StringEqualsIfExists aws:SourceAccount = <本帳號>`。RCP `EnforceOrgIdentities` 對 AWS 服務主體不生效（`aws:PrincipalIsAWSService`）。Dev／Prod `verify-data-stack.sh` 新增 4 項 ✅（含反向：沒有服務主體有 `kms:*`）。
 - 費用：約 USD 1／月／帳號（KMS key）；DynamoDB 與 PITR 目前約 0。一年後第一次輪替每把 +USD 1／月（上限 USD 3／月）。
 
 已驗證（2026-11-11，Deploy run #5，`scripts/verify-data-stack.sh`，身分 `cdk-hnb659fds-lookup-role-*`）：
@@ -643,6 +644,26 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 教訓 / Lessons：
 - （2026-11-16）第一次端到端測試時，`timeout-check` 在 setup 後 1 分鐘就被執行，失敗後在 `finally` **刪除了測試資料** → 真正的檢查讀不到資料。修正（PR #34）：逾時前執行回報 `too_early`、資料不存在回報 `data_missing`，兩種情況都不寫入；**只有全部通過才清理**，失敗時保留資料。原則：測試的清理不要放在 `finally`。
 
+### 10.12 維運通知 / Ops Notifications（P1，2026-11-16，ADR-029，PR #37）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| Stack | `brewline-dev-ops`（module `ops`） | `brewline-prod-ops`（**終止保護**） |
+| 主題 | `brewline-dev-ops-alerts`：CMK 加密（A4a key policy）、僅 TLS、只有本帳號 `cloudwatch`／`events` 可 `sns:Publish`；SSM `/brewline/dev/ops/alerts-topic-arn` | `brewline-prod-ops-alerts` |
+| 告警 | 5 個（events 3、workflow 2）的 ALARM 與 OK 都通知主題（`notifyAlarms()`） | 同左 |
+| StockLow | 規則 `brewline-dev-stock-low` → 主題（input transformer 產生可讀訊息；DLQ 為 events-rule-dlq） | 同左 |
+| 訂閱 | Email 1 筆，**手動** CLI 訂閱並確認（2026-11-16）；Email 不在 repo／CI summary | 同左 |
+| 部署順序 | data → auth → **ops** → events → api | 同左 |
+
+已驗證（2026-11-16）：
+- CI `verify-ops-stack.sh`（Dev、Prod）：主題 KMS = 帳號 CMK、TLS deny、發布者與 SourceAccount、**5 個告警都接上（ALARM＋OK）**、StockLow 規則目標、終止保護；反向：沒有公開 Allow。
+- **端到端（Dev）**：`set-alarm-state ALARM` → 告警歷程 `Successfully executed action …ops-alerts`（ALARM 與 OK 各一次）→ 收到 ALARM 與 OK 兩封信；`put-events` 測試的 `StockLow` → 收到 `Stock low: p-9002 …` 信；規則 DLQ = 0。
+
+教訓 / Lessons：
+- （2026-11-16）SNS「發布成功」≠「送達」：訂閱在 `PendingConfirmation` 時發布照樣成功，但不會寄信、也不會補寄。排查順序：告警歷程（有沒有發布）→ 訂閱狀態（有沒有人收）。
+- （2026-11-16）多帳號 CLI：在 Prod 帳號設了 `ENV=dev` → 改由帳號 ID 推算環境；`--notification-endpoint "$EMAIL"文字` 會黏成一個參數 → 固定值直接用單引號。
+- 已知風險：任何有 `events:PutEvents` 的同帳號身分都能偽造 `brewline.ordering` 事件（測試 B 即是）。之後以 bus 資源政策限定發布者（RSK-017）。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -662,6 +683,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22 |
 | ADR-024 | 租戶隔離：STS session tag ＋ `LeadingKeys` 完全比對 | Accepted（2026-11-13） | 訂單函數（`brewline-<env>-orders-*`）帶 `tenant_id` 扮演 `brewline-<env>-tenant-access`；商品只能改庫存欄位；Scan 明確 Deny（§10.8） |
 | ADR-025 | 下單交易與冪等 | Accepted（2026-11-13） | 冪等記錄＋訂單＋扣庫存在同一個交易；sk `ORDER#<ULID>`；伺服器端定價；≤ 25 個商品、1–500 kg；路由限流（§10.9） |
+| ADR-029 | 通知、聯絡人與定期補貨（A4 決策） | Accepted（2026-11-16） | Route 53 網域＋SES DKIM／MAIL FROM／DMARC；聯絡人欄位以 KMS＋encryption context 加密；SNS 用 CMK（key policy 授權服務）；每租戶一位聯絡人；只在建立／確認／出貨／取消寄信；Scheduler 定期補貨（§10.12） |
 | ADR-028 | 未確認訂單的逾時取消（Step Functions） | Accepted（2026-11-13） | OrderCreated → Standard 工作流等待（Dev 10 分／Prod 48 小時）→ 仍是 CREATED 就取消並釋放；冪等靠條件寫入（§10.11） |
 | ADR-027 | 訂單狀態機與 staff 端點 | Accepted（2026-11-13） | 狀態以 DynamoDB 為準；一個交易＝訂單（樂觀鎖：原狀態）＋庫存；staff 函數不扮演租戶角色、無 Put／Delete（§10.9） |
 | ADR-026 | 事件層：Streams → Lambda → EventBridge | Accepted（2026-11-13） | 台北沒有 Pipes／Archive；自訂 bus、白名單 detail、`event_id` 去重、Logs 規則留存、DLQ SSE-SQS（§10.10） |
@@ -671,6 +693,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | RSK-014 | 無 WAF，惡意流量只能靠限流與預算控制；execute-api 網址可被直接呼叫 | M | L | ADR-020 的分層控制；前端上線時加 CloudFront＋WAF，評估關閉 execute-api 預設端點 |
 | RSK-015 | 撤銷的帳號在 access token 到期前（≤ 15 分）仍可呼叫 API；staff MFA 無法由 Cognito 強制 | M | M | Token **15 分鐘**（A2a，原 60 分）；部署後驗證偵測 staff 未設 TOTP；A2 起高風險操作在 Lambda 再查使用者狀態 |
 | RSK-016 | A3 之前已預留的庫存不會自動釋放；單筆最多預留 500 kg，可能佔滿某商品 | M | M | 不開放註冊；路由限流；**A3c staff 可取消、A3d 未確認訂單自動取消並釋放（Dev 10 分／Prod 48 小時）**；剩餘：48 小時內仍可佔住庫存 |
+| RSK-017 | 自訂 bus 沒有資源政策：同帳號內有 `events:PutEvents` 的身分可偽造 `brewline.ordering` 事件（例如假的 `OrderCreated` 會啟動逾時工作流，但取消前會讀 DynamoDB，影響有限） | L | M | Developer 權限集沒有 `events:*`；CI／Admin 才有；之後加 bus 資源政策只允許發布函數角色 |
 | RSK-013 | 主要區域無 Macie，無法自動偵測 S3 中的個資 | L | L | 個資只存 DynamoDB；DATA-011/012 設計層預防；資料湖 DQ 檢查加入 Email／電話格式偵測 |
 
 ---
@@ -697,6 +720,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 09 §3.1 | 加註：使用 `TableV2`；Streams `NEW_AND_OLD_IMAGES`（A3a）；GSI 依模組逐一新增 |
 | 09 §2.4 | 台北沒有 **Archive and replay** → 以 Logs 規則留存；DLQ 用 SSE-SQS（ADR-026） |
 | 01 §5 | Streams → EventBridge 改為 **Lambda 發布**（台北沒有 Pipes，ADR-026） |
+| 09 §4.2 | SNS 主題改為每環境 `brewline-<env>-ops-alerts`（CMK 加密）；Email 訂閱手動建立、不進 IaC（A4b） |
 | 09 §2.3 | Step Functions「Catch 後發布 `WorkflowFailed`」→ `Fail` 狀態＋失敗告警＋規則 DLQ（A3d，ADR-028） |
 | 03 §3 | ORD-F-005 狀態流轉由 staff API 推進（ADR-027），Step Functions 只負責逾時取消（ADR-028），不是整個流程都在 Step Functions |
 | 03 §6 | GSI1 改為**多用途**（`gsi1pk`／`gsi1sk`）：商品 `CATALOG`／`PRODUCT#<id>`、訂單 `STATUS#<status>`／`<created_at>#<order_id>`（ADR-018 修訂）；訂單 sk `ORDER#<ts>#<id>` → **`ORDER#<ULID>`**；新增冪等項目 `IDEMP#<key>`（ADR-025） |
@@ -749,7 +773,9 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 有空時 | Developer 權限集加上 EventBridge、Step Functions、SQS 唯讀（目前 `events:ListEventBuses` 被拒） |
 | ✅ 2026-11-13 | 訂貨 A3c：staff 端點＋狀態機部署 Dev、Prod 並驗證（§10.9，PR #31） |
 | ✅ 2026-11-16 | 訂貨 A3d：逾時取消工作流部署 Dev、Prod；Dev 端到端通過（§10.11，PR #33、#34）；**A3 完成** |
-| P1 | 下一步：訂貨模組 A4（SES 通知、Scheduler 定期補貨、告警接上 SNS）→ 模擬器 → 溯源 |
+| ✅ 2026-11-16 | A4 決策 D1–D7（ADR-029）；A4a key policy（PR #36）、A4b 維運通知（§10.12，PR #37）部署 Dev、Prod；Dev 端到端通過；Dev／Prod Email 訂閱已確認 |
+| A4d 前 | 決定網域名稱與副檔名，於 Prod 註冊（Route 53，隱私保護開啟） |
+| P1 | 下一步：A4c（聯絡人＋欄位加密）→ A4d（SES 通知，需網域）→ A4e（定期補貨）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
