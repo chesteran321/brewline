@@ -147,8 +147,8 @@ fi
 group="brewline-${env_name}-replenish"
 check "Schedule group state" "$(aws scheduler get-schedule-group --name "$group" --region "$region" --query State --output text)" "ACTIVE"
 srole=$(aws iam get-role --role-name "brewline-${env_name}-replenish-scheduler" --query Role.AssumeRolePolicyDocument --output json)
-check "Scheduler role trust" "$(jq -c '[.Statement[0].Principal.Service, (.Statement[0].Condition.ArnLike["aws:SourceArn"] | split(":") | last)]' <<<"$srole")" \
-  "[\"scheduler.amazonaws.com\",\"schedule/${group}/*\"]"
+check "Scheduler role trust" "$(jq -c '[.Statement[0].Principal.Service, (.Statement[0].Condition.StringEquals["aws:SourceArn"] | split(":") | last)]' <<<"$srole")" \
+  "[\"scheduler.amazonaws.com\",\"schedule-group/${group}\"]"
 rfn=$(out ReplenishFunctionName)
 check "Replenish role" "$(aws lambda get-function-configuration --function-name "$rfn" --region "$region" --query Role --output text | awk -F/ '{print $NF}')" "brewline-${env_name}-orders-replenish"
 check "Replenish async on-failure → DLQ" "$(aws lambda get-function-event-invoke-config --function-name "$rfn" --region "$region" \
