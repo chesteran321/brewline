@@ -120,6 +120,11 @@ describe('hosted zones and delegation', () => {
     template.hasOutput('MailZoneNameServers', Match.anyValue());
   });
 
+  test('Prod config delegates dev. to the Dev zone (4 name servers)', () => {
+    expect(ENVIRONMENTS.prod.mail.delegations).toEqual([{ subdomain: 'dev', nameServers: expect.any(Array) }]);
+    expect(ENVIRONMENTS.prod.mail.delegations[0]!.nameServers).toHaveLength(4);
+  });
+
   test('Prod imports the registered zone and creates no zone', () => {
     const { template } = build('prod');
     template.resourceCountIs('AWS::Route53::HostedZone', 0);
@@ -128,7 +133,7 @@ describe('hosted zones and delegation', () => {
   });
 
   test('Prod delegation: no NS record while name servers are empty; one when filled', () => {
-    expect(resources(build('prod').template, 'AWS::Route53::RecordSet').filter((r) => r.Properties.Type === 'NS')).toHaveLength(0);
+    expect(resources(build('prod', { delegations: [{ subdomain: 'dev', nameServers: [] }] }).template, 'AWS::Route53::RecordSet').filter((r) => r.Properties.Type === 'NS')).toHaveLength(0);
     const ns = ['ns-1.awsdns-01.com', 'ns-2.awsdns-02.net', 'ns-3.awsdns-03.org', 'ns-4.awsdns-04.co.uk'];
     const { template } = build('prod', { delegations: [{ subdomain: 'dev', nameServers: ns }] });
     const [rec] = resources(template, 'AWS::Route53::RecordSet').filter((r) => r.Properties.Type === 'NS');

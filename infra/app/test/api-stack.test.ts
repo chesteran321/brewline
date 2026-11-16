@@ -202,6 +202,9 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
     const def = JSON.stringify(sm.Properties.DefinitionString);
     expect(def).toContain(`\\"Seconds\\":${cfg.api.orderTimeoutSeconds}`);
     expect(def).toContain('RetryableError');
+    // Lambda 節流也要重試（保留併發 2，同時到期的訂單會被節流）/ Throttles are retried with jitter.
+    expect(def).toContain('Lambda.TooManyRequestsException');
+    expect(def).toContain('\\"JitterStrategy\\":\\"FULL\\"');
     expect(def).toContain('States.ALL');
     expect(cfg.api.orderTimeoutSeconds).toBe(envName === 'dev' ? 600 : 172800);
   });

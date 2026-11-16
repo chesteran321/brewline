@@ -118,10 +118,20 @@ check "OrderCreated rule state"   "$(jq -r .State <<<"$rule")" "ENABLED"
 check "OrderCreated rule pattern" "$(jq -r .EventPattern <<<"$rule" | jq -c '{s: .source, d: ."detail-type"}')" '{"s":["brewline.ordering"],"d":["OrderCreated"]}'
 check "Timeout DLQ messages" "$(aws sqs get-queue-attributes --queue-url "$(out OrderTimeoutDlqUrl)" --region "$region" \
   --attribute-names ApproximateNumberOfMessages --query Attributes.ApproximateNumberOfMessages --output text)" "0"
+# 判定範圍：這次部署（stack 最後更新）之後才結束的失敗；24 小時內的總數只顯示。部署之間的失敗由告警
+# brewline-<env>-order-lifecycle-failed 通知（ops-alerts）。
+# Fail on executions that failed after this deploy; the 24h total is informational. Failures between deploys are
+# covered by the order-lifecycle-failed alarm.
+since=$(aws cloudformation describe-stacks --stack-name "$stack" --region "$region" \
+  --query 'Stacks[0].[LastUpdatedTime, CreationTime] | [?@] | [0]' --output text)
+since_utc=$(date -u -d "$since" +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "$since")
 day_ago=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%S)
-failed=$(aws stepfunctions list-executions --state-machine-arn "$sm_arn" --status-filter FAILED --max-items 100 --region "$region" --output json \
-  | jq --arg t "$day_ago" '[.executions[] | select(.startDate[0:19] >= $t)] | length')
-check "Workflow executions FAILED (24h)" "$failed" "0"
+executions=$(aws stepfunctions list-executions --state-machine-arn "$sm_arn" --status-filter FAILED --max-items 100 --region "$region" --output json)
+to_utc() { jq -r '.executions[] | .stopDate' <<<"$executions" | while read -r d; do date -u -d "$d" +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "$d"; done; }
+failed_since=$(to_utc | awk -v t="$since_utc" '$0 >= t' | wc -l | tr -d ' ')
+failed_day=$(to_utc | awk -v t="$day_ago" '$0 >= t' | wc -l | tr -d ' ')
+check "Workflow executions FAILED since this deploy" "$failed_since" "0"
+if [[ "$failed_day" != "0" ]]; then echo "⚠️  Workflow executions FAILED (24h, informational) = $failed_day"; fi
 if [[ "$want_smoke" == true ]]; then
   # smoke test 剛下的單應該已啟動等待中的執行 / Smoke-test orders should have started executions.
   hour_ago=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%S)
