@@ -243,3 +243,26 @@ describe('RequiredTagsChecker on data resources', () => {
     expect(dataErrors(stack, 'Missing required tags.*project, env, module, owner')).toHaveLength(1);
   });
 });
+
+describe.each(['dev', 'prod'] as const)('DataStack key policy for encrypted SNS topics (A4a, %s)', (envName) => {
+  const app = new App();
+  const env = ENVIRONMENTS[envName];
+  const stack = new DataStack(app, `brewline-${envName}-data`, { envName, data: env.data, env: { account: env.account, region: env.region } });
+  const template = Template.fromStack(stack);
+  const [key] = Object.values(template.findResources('AWS::KMS::Key')) as Array<{ Properties: { KeyPolicy: { Statement: any[] } } }>;
+  const statements = key!.Properties.KeyPolicy.Statement;
+
+  test('CloudWatch, EventBridge and SES may only Decrypt/GenerateDataKey*, scoped to this account', () => {
+    const st = statements.find((s) => s.Sid === 'AllowAwsServicesToPublishToEncryptedTopics');
+    expect(st.Principal.Service.sort()).toEqual(['cloudwatch.amazonaws.com', 'events.amazonaws.com', 'ses.amazonaws.com']);
+    expect(st.Action).toEqual(['kms:Decrypt', 'kms:GenerateDataKey*']);
+    expect(st.Condition).toEqual({ StringEqualsIfExists: { 'aws:SourceAccount': env.account } });
+  });
+  test('negative: no service gets kms:* or key administration', () => {
+    const services = statements.filter((s) => s.Principal?.Service);
+    for (const s of services) {
+      const actions = [].concat(s.Action) as string[];
+      expect(actions.some((a) => a === 'kms:*' || /Put|Delete|Disable|Schedule|Create|Encrypt$/.test(a))).toBe(false);
+    }
+  });
+});

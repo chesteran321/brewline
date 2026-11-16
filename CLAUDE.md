@@ -28,7 +28,7 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 項目 Item | 值 Value |
 |---|---|
 | Stack | `brewline-<env>-data`（Prod 終止保護） |
-| KMS CMK | `alias/brewline-<env>-data`，年度輪替；每帳號 1 把，之後 S3／SQS／SNS 共用 |
+| KMS CMK | `alias/brewline-<env>-data`，年度輪替；每帳號 1 把，S3／SQS／SNS 共用；key policy 允許 `cloudwatch`／`events`／`ses` 只做 `Decrypt`／`GenerateDataKey*`（ADR-029，加密 SNS 主題用） |
 | DynamoDB | `brewline-<env>-core`，CDK `TableV2`（= `AWS::DynamoDB::GlobalTable`），鍵 `pk`／`sk`，TTL `expires_at` |
 | Streams | `NEW_AND_OLD_IMAGES`（A3a，事件來源）；**不要改 view type** |
 | 取得名稱／ARN | SSM `/brewline/<env>/data/{table-name,table-arn,kms-key-arn,table-stream-arn}`（不要用 CloudFormation Export） |

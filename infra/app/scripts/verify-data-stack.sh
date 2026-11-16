@@ -71,6 +71,16 @@ check "TTL" "$(aws dynamodb describe-time-to-live --table-name "$table" --region
 
 check "KMS rotation" "$(aws kms get-key-rotation-status --key-id "$key_arn" --region "$region" \
   --query KeyRotationEnabled --output text)" "True"
+# A4a（ADR-029）：服務可用金鑰寫入加密 SNS 主題，但只有 Decrypt／GenerateDataKey*
+# Services may use the key for encrypted SNS topics, with Decrypt/GenerateDataKey* only.
+key_policy=$(aws kms get-key-policy --key-id "$key_arn" --policy-name default --region "$region" --query Policy --output text)
+svc=$(jq -c '.Statement[] | select(.Sid == "AllowAwsServicesToPublishToEncryptedTopics")' <<<"$key_policy")
+check "Key policy: service principals" "$(jq -c '[.Principal.Service] | flatten | sort' <<<"$svc")" \
+  '["cloudwatch.amazonaws.com","events.amazonaws.com","ses.amazonaws.com"]'
+check "Key policy: service actions" "$(jq -c '[.Action] | flatten | sort' <<<"$svc")" '["kms:Decrypt","kms:GenerateDataKey*"]'
+check "Key policy: source account condition" "$(jq -r '.Condition.StringEqualsIfExists["aws:SourceAccount"] // "none"' <<<"$svc")" \
+  "$(cut -d: -f5 <<<"$key_arn")"
+check "Key policy: no service has kms:*" "$(jq '[.Statement[] | select(.Principal.Service != null) | [.Action] | flatten | .[] | select(. == "kms:*")] | length' <<<"$key_policy")" "0"
 
 check "SSM table-name" "$(aws ssm get-parameter --name "/brewline/${env_name}/data/table-name" --region "$region" \
   --query Parameter.Value --output text)" "$table"
