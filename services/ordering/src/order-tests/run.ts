@@ -523,7 +523,8 @@ export const handler = async (event: { mode?: string; cancel_order_id?: string; 
     // A4d end to end: write tenant B's contact (the address lives only in the invoke payload; never logged), then
     // run timeout-setup → expect 2 "received", 1 "confirmed", and 1 "cancelled" after the timeout.
     const contact = ContactSchema.safeParse({ name: 'BrewLine Tester', email: event.email });
-    if (!contact.success || !keyArn) throw new Error('notify-setup needs {"email": "<SES-verified address>"} and KMS_KEY_ARN');
+    if (!keyArn) throw new Error('notify-setup: KMS_KEY_ARN is not set on this function');
+    if (!contact.success) throw new Error('notify-setup: "email" is not a valid address (check the payload for stray text)');
     const contacts = new ContactRepo(forTenant, kmsFor, tableName, keyArn);
     const r = await timeoutSetup(deps, admin, Number(process.env.ORDER_TIMEOUT_SECONDS ?? '600'), async () => {
       await contacts.put(TENANT_B, contact.data, 'order-tests', new Date());
@@ -546,7 +547,9 @@ export const handler = async (event: { mode?: string; cancel_order_id?: string; 
     let beforeRun: (() => Promise<void>) | undefined;
     if (event.email !== undefined) {
       const contact = ContactSchema.safeParse({ name: 'BrewLine Tester', email: event.email });
-      if (!contact.success || !keyArn) throw new Error('replenish-check email must be a valid, SES-verified address');
+      // 兩種原因分開報，避免誤判（2026-11-16 一次排查花在猜原因）/ Report the two causes separately.
+      if (!keyArn) throw new Error('replenish-check: KMS_KEY_ARN is not set on this function');
+      if (!contact.success) throw new Error('replenish-check: "email" is not a valid address (check the payload for stray text)');
       const contacts = new ContactRepo(forTenant, kmsFor, tableName, keyArn);
       beforeRun = () => contacts.put(TENANT_B, contact.data, 'order-tests', new Date()).then(() => undefined);
     }
