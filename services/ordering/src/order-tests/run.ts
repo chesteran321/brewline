@@ -14,6 +14,8 @@ import { Logger } from '@aws-lambda-powertools/logger';
 import { ulid } from '../lib/ulid';
 import { AdminOrderRepo } from '../lib/admin-order-repo';
 import { CreateOrderResult, OrderRepo } from '../lib/order-repo';
+import { ContactRepo } from '../lib/contact-repo';
+import { ContactSchema } from '../lib/contact-model';
 import { TenantCredentials } from '../lib/tenant-credentials';
 
 /**
@@ -313,9 +315,10 @@ export async function runAll(d: Deps): Promise<{ passed: boolean; checks: Check[
  * 逾時取消測試，第一段：租戶 B 下兩筆 1 kg 訂單（X、Y），以 staff 邏輯確認 Y；X 保持 CREATED。
  * Timeout test, part 1: two 1 kg orders for tenant B; Y is confirmed, X stays CREATED.
  */
-export async function timeoutSetup(d: Deps, admin: AdminOrderRepo, timeoutSeconds: number) {
+export async function timeoutSetup(d: Deps, admin: AdminOrderRepo, timeoutSeconds: number, beforeOrders?: () => Promise<void>) {
   await cleanTenants(d);
   await resetStock(d, RACE_STOCK_KG);
+  if (beforeOrders) await beforeOrders();
   const repo = new OrderRepo(d.forTenant, d.tableName);
   const place = async () => {
     const r = await repo.createOrder({
@@ -403,7 +406,7 @@ export async function timeoutCheck(
 }
 
 /** Lambda 進入點（只由 scripts/run-order-tests.sh 手動呼叫）/ Entry point, invoked manually. */
-export const handler = async (event: { mode?: string; cancel_order_id?: string; keep_order_id?: string } = {}) => {
+export const handler = async (event: { mode?: string; cancel_order_id?: string; keep_order_id?: string; email?: string } = {}) => {
   const tableName = process.env.TABLE_NAME;
   const roleArn = process.env.TENANT_ROLE_ARN;
   if (!tableName || !roleArn) throw new Error('TABLE_NAME and TENANT_ROLE_ARN are required');
@@ -433,6 +436,19 @@ export const handler = async (event: { mode?: string; cancel_order_id?: string; 
   const admin = new AdminOrderRepo(fixture, tableName, 'gsi1');
   const mode = event.mode ?? 'all';
   if (mode === 'timeout-setup') return timeoutSetup(deps, admin, Number(process.env.ORDER_TIMEOUT_SECONDS ?? '600'));
+  if (mode === 'notify-setup') {
+    // A4d 端到端：先替租戶 B 寫入聯絡人（Email 只在呼叫的 payload 裡，不進 repo、不寫日誌），
+    // 再跑逾時測試的第一段 → 預期收到 2 封「已建立」、1 封「已確認」，逾時後 1 封「已取消」。
+    // A4d end to end: write tenant B's contact (the address lives only in the invoke payload; never logged), then
+    // run timeout-setup → expect 2 "received", 1 "confirmed", and 1 "cancelled" after the timeout.
+    const contact = ContactSchema.safeParse({ name: 'BrewLine Tester', email: event.email });
+    if (!contact.success || !keyArn) throw new Error('notify-setup needs {"email": "<SES-verified address>"} and KMS_KEY_ARN');
+    const contacts = new ContactRepo(forTenant, kmsFor, tableName, keyArn);
+    const r = await timeoutSetup(deps, admin, Number(process.env.ORDER_TIMEOUT_SECONDS ?? '600'), async () => {
+      await contacts.put(TENANT_B, contact.data, 'order-tests', new Date());
+    });
+    return { ...r, expected_emails: { now: ['received ×2', 'confirmed ×1'], after_timeout: ['cancelled ×1'] } };
+  }
   if (mode === 'timeout-check') {
     if (!event.cancel_order_id || !event.keep_order_id) throw new Error('cancel_order_id and keep_order_id are required');
     const r = await timeoutCheck(deps, admin, event.cancel_order_id, event.keep_order_id, Number(process.env.ORDER_TIMEOUT_SECONDS ?? '600'));

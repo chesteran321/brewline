@@ -33,6 +33,8 @@ check "Topic publishers" "$(jq -c '[.Statement[] | select(.Sid == "AllowAlarmsAn
 check "Topic publisher condition = this account" \
   "$(jq -r '.Statement[] | select(.Sid == "AllowAlarmsAndRulesToPublish") | .Condition.StringEquals["aws:SourceAccount"]' <<<"$policy")" \
   "$(cut -d: -f5 <<<"$topic")"
+check "SES publisher (A4d)" "$(jq -c '.Statement[] | select(.Sid == "AllowSesEventsToPublish") | [.Principal.Service, .Condition.StringEquals["aws:SourceAccount"], .Condition.ArnLike["aws:SourceArn"]]' <<<"$policy")" \
+  "$(jq -cn --arg a "$(cut -d: -f5 <<<"$topic")" --arg e "$env_name" --arg r "$region" '["ses.amazonaws.com", $a, "arn:aws:ses:\($r):\($a):configuration-set/brewline-\($e)-*"]')"
 # 反向：沒有對任何人開放的 Allow / Negative: no Allow for Principal "*".
 check "Public allow statements" "$(jq '[.Statement[] | select(.Effect == "Allow" and (.Principal == "*" or .Principal.AWS == "*"))] | length' <<<"$policy")" "0"
 
@@ -40,7 +42,7 @@ check "Public allow statements" "$(jq '[.Statement[] | select(.Effect == "Allow"
 alarms=$(aws cloudwatch describe-alarms --alarm-name-prefix "brewline-${env_name}-" --region "$region" --output json)
 total=$(jq '.MetricAlarms | length' <<<"$alarms")
 wired=$(jq --arg t "$topic" '[.MetricAlarms[] | select((.AlarmActions | index($t)) and (.OKActions | index($t)))] | length' <<<"$alarms")
-check "Alarms (brewline-${env_name}-*)" "$total" "5"
+check "Alarms (brewline-${env_name}-*)" "$total" "6"
 check "Alarms notifying the topic (ALARM + OK)" "$wired" "$total"
 
 rule=$(aws events describe-rule --name "brewline-${env_name}-stock-low" --event-bus-name "brewline-${env_name}" --region "$region" --output json)

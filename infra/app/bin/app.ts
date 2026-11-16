@@ -10,6 +10,7 @@ import { ApiStack } from '../lib/stacks/api-stack';
 import { AuthStack } from '../lib/stacks/auth-stack';
 import { DataStack } from '../lib/stacks/data-stack';
 import { EventsStack } from '../lib/stacks/events-stack';
+import { NotifyStack } from '../lib/stacks/notify-stack';
 import { OpsStack } from '../lib/stacks/ops-stack';
 import { PipelineCheckStack } from '../lib/stacks/pipeline-check-stack';
 
@@ -90,6 +91,22 @@ apiStack.addStackDependency(authStack, 'reads /brewline/<env>/auth/* from SSM');
 apiStack.addStackDependency(opsStack, 'workflow alarms publish to the ops topic (SSM)');
 apiStack.addStackDependency(eventsStack, 'smoke-test orders must flow through the stream publisher');
 Tags.of(apiStack).add('module', 'ordering', { priority: 200 });
+
+// 訂單通知信（A4d，ADR-029）：SES 網域身分（DKIM、MAIL FROM、DMARC）＋ 通知函數 / Order e-mail.
+// 需要租戶角色（api stack）與 bus（events stack）→ 最後部署 / Needs the tenant role and the bus, so it goes last.
+const notifyStack = new NotifyStack(app, `brewline-${env.name}-notify`, {
+  envName: env.name,
+  lambda: env.lambda,
+  mail: env.mail,
+  env: { account: env.account, region: env.region },
+  description: 'BrewLine order e-mail: SES domain identity (DKIM, MAIL FROM, DMARC) and the notifier',
+  terminationProtection: env.name === 'prod',
+});
+notifyStack.addStackDependency(dataStack, 'reads /brewline/<env>/data/* from SSM');
+notifyStack.addStackDependency(opsStack, 'SES events and alarms publish to the ops topic');
+notifyStack.addStackDependency(eventsStack, 'rules on the brewline-<env> bus');
+notifyStack.addStackDependency(apiStack, 'the notifier assumes the tenant access role created by the api stack');
+Tags.of(notifyStack).add('module', 'notifications', { priority: 200 });
 
 // 全 app 共用標籤；module 之後由各 stack 覆寫。
 // App-wide tags; individual stacks override "module" later.

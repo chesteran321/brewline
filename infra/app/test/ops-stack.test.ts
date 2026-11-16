@@ -39,6 +39,17 @@ describe.each(['dev', 'prod'] as const)('OpsStack (%s)', (envName) => {
     template.resourceCountIs('AWS::SNS::Subscription', 0);
   });
 
+  test('topic policy: SES events only from this account and brewline-<env>-* configuration sets (A4d)', () => {
+    const [policy] = Object.values(template.findResources('AWS::SNS::TopicPolicy')) as Array<{ Properties: { PolicyDocument: { Statement: any[] } } }>;
+    const ses = policy!.Properties.PolicyDocument.Statement.find((s: any) => s.Sid === 'AllowSesEventsToPublish');
+    expect(ses.Principal).toEqual({ Service: 'ses.amazonaws.com' });
+    expect(ses.Action).toBe('sns:Publish');
+    expect(ses.Condition).toEqual({
+      StringEquals: { 'aws:SourceAccount': env.account },
+      ArnLike: { 'aws:SourceArn': `arn:aws:ses:ap-east-2:${env.account}:configuration-set/brewline-${envName}-*` },
+    });
+  });
+
   test('passes cdk-nag and required tags', () => {
     app.synth();
     expect(Annotations.fromStack(stack).findError('*', Match.anyValue())).toHaveLength(0);

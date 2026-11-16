@@ -62,7 +62,7 @@ function cached<T>(map: Map<string, T>, tenantId: string, make: () => T): T {
 }
 
 /** 租戶專用的 DynamoDB client / DynamoDB client bound to the tenant's credentials. */
-function tenantDoc(tenantId: string): DynamoDBDocumentClient {
+export function tenantDocClient(tenantId: string): DynamoDBDocumentClient {
   const creds = credentials();
   return cached(tenantDocs, tenantId, () =>
     DynamoDBDocumentClient.from(
@@ -81,7 +81,7 @@ let orders: OrderRepo | undefined;
  * DynamoDB permissions at all.
  */
 export function orderRepo(): OrderRepo {
-  orders ??= new OrderRepo(tenantDoc, requiredEnv('TABLE_NAME'));
+  orders ??= new OrderRepo(tenantDocClient, requiredEnv('TABLE_NAME'));
   return orders;
 }
 
@@ -96,7 +96,7 @@ export function contactRepo(): ContactRepo {
   if (!contacts) {
     const creds = credentials();
     contacts = new ContactRepo(
-      tenantDoc,
+      tenantDocClient,
       (tenantId) =>
         cached(tenantKms, tenantId, () =>
           tracer.captureAWSv3Client(new KMSClient({ credentials: () => creds.get(tenantId) })),
