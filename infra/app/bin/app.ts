@@ -10,6 +10,7 @@ import { ApiStack } from '../lib/stacks/api-stack';
 import { AuthStack } from '../lib/stacks/auth-stack';
 import { DataStack } from '../lib/stacks/data-stack';
 import { EventsStack } from '../lib/stacks/events-stack';
+import { OpsStack } from '../lib/stacks/ops-stack';
 import { PipelineCheckStack } from '../lib/stacks/pipeline-check-stack';
 
 const app = new App();
@@ -49,6 +50,16 @@ const authStack = new AuthStack(app, `brewline-${env.name}-auth`, {
 });
 Tags.of(authStack).add('module', 'identity', { priority: 200 });
 
+// 維運通知（A4b，ADR-029）：CMK 加密的 SNS 主題；告警與 StockLow 由其他 stack 接上 / Ops alerts topic.
+const opsStack = new OpsStack(app, `brewline-${env.name}-ops`, {
+  envName: env.name,
+  env: { account: env.account, region: env.region },
+  description: 'BrewLine ops notifications: KMS-encrypted SNS topic for alarms and StockLow',
+  terminationProtection: env.name === 'prod',
+});
+opsStack.addStackDependency(dataStack, 'reads /brewline/<env>/data/kms-key-arn from SSM');
+Tags.of(opsStack).add('module', 'ops', { priority: 200 });
+
 // 事件層（A3b，ADR-026）：bus、Streams → EventBridge、稽核 log、DLQ、告警 / Event layer.
 const eventsStack = new EventsStack(app, `brewline-${env.name}-events`, {
   envName: env.name,
@@ -58,6 +69,7 @@ const eventsStack = new EventsStack(app, `brewline-${env.name}-events`, {
   terminationProtection: env.name === 'prod',
 });
 eventsStack.addStackDependency(dataStack, 'reads /brewline/<env>/data/* (stream ARN, key ARN) from SSM');
+eventsStack.addStackDependency(opsStack, 'alarms and the StockLow rule publish to the ops topic (SSM)');
 Tags.of(eventsStack).add('module', 'events', { priority: 200 });
 
 // 訂貨 API（A1：商品唯讀）：HTTP API + JWT scope 授權（ADR-020、ADR-021）/ Ordering API.
@@ -75,6 +87,7 @@ const apiStack = new ApiStack(app, `brewline-${env.name}-api`, {
 apiStack.addStackDependency(dataStack, 'reads /brewline/<env>/data/* from SSM');
 apiStack.addStackDependency(authStack, 'reads /brewline/<env>/auth/* from SSM');
 // 先有事件層，Dev smoke test 下的單才會產生事件（驗證 OrderCreated 用）/ So smoke-test orders produce events.
+apiStack.addStackDependency(opsStack, 'workflow alarms publish to the ops topic (SSM)');
 apiStack.addStackDependency(eventsStack, 'smoke-test orders must flow through the stream publisher');
 Tags.of(apiStack).add('module', 'ordering', { priority: 200 });
 

@@ -18,6 +18,7 @@ import { BrewlineFunction, SERVICES_ROOT } from '../constructs/brewline-function
 import { OrderTimeoutWorkflow } from '../constructs/order-timeout-workflow';
 import { TenantAccessRole } from '../constructs/tenant-access-role';
 import { EventsStack } from './events-stack';
+import { notifyAlarms } from './ops-stack';
 import { AuthStack } from './auth-stack';
 import { DataStack } from './data-stack';
 
@@ -389,6 +390,7 @@ export class ApiStack extends Stack {
     });
     // smoke test 下的單要能啟動工作流 → 先建好規則與狀態機 / Smoke-test orders must reach the workflow.
     this.node.tryFindChild('SmokeTestRun')?.node.addDependency(this.orderTimeout);
+    notifyAlarms(this, envName); // A4b：工作流告警接上維運主題 / workflow alarms → ops topic
     new CfnOutput(this, 'OrderLifecycleStateMachineArn', { value: this.orderTimeout.stateMachine.stateMachineArn });
     new CfnOutput(this, 'OrderTimeoutDlqUrl', { value: this.orderTimeout.dlq.queueUrl });
 

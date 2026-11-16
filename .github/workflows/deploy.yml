@@ -73,7 +73,7 @@ jobs:
 
       - name: cdk deploy (Dev)
         run: >
-          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data brewline-dev-auth brewline-dev-events brewline-dev-api
+          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data brewline-dev-auth brewline-dev-ops brewline-dev-events brewline-dev-api
           -c env=dev -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -142,6 +142,14 @@ jobs:
           { echo "### Events stack (Dev)"; echo '```'; cat verify-events.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
 
+      - name: Verify ops stack (alerts topic, alarm wiring, StockLow rule)
+        run: |
+          set +e
+          scripts/verify-ops-stack.sh dev outputs.json | tee verify-ops.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### Ops stack (Dev)"; echo '```'; cat verify-ops.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
   deploy-prod:
     name: Deploy Prod
     needs: deploy-dev
@@ -191,7 +199,7 @@ jobs:
 
       - name: cdk deploy (Prod)
         run: >
-          npx cdk deploy brewline-prod-pipeline-check brewline-prod-data brewline-prod-auth brewline-prod-events brewline-prod-api
+          npx cdk deploy brewline-prod-pipeline-check brewline-prod-data brewline-prod-auth brewline-prod-ops brewline-prod-events brewline-prod-api
           -c env=prod -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -256,4 +264,12 @@ jobs:
           scripts/verify-events-stack.sh prod outputs.json | tee verify-events.txt
           rc=${PIPESTATUS[0]}
           { echo "### Events stack (Prod)"; echo '```'; cat verify-events.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Verify ops stack (alerts topic, alarm wiring, StockLow rule)
+        run: |
+          set +e
+          scripts/verify-ops-stack.sh prod outputs.json | tee verify-ops.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### Ops stack (Prod)"; echo '```'; cat verify-ops.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc

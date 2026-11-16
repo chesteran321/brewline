@@ -101,14 +101,14 @@ describe.each(['dev', 'prod'] as const)('EventsStack (%s)', (envName) => {
     expect(policies).toContain('AllowAuditRuleDlq');
   });
 
-  test('three alarms without actions yet (A3 decision D7)', () => {
+  test('three alarms, all notifying the ops topic (A4b)', () => {
     const alarms = resources(template, 'AWS::CloudWatch::Alarm').map(([, a]) => a.Properties);
     expect(alarms.map((a) => a.AlarmName).sort()).toEqual([
       `brewline-${envName}-events-rule-dlq-not-empty`,
       `brewline-${envName}-events-stream-dlq-not-empty`,
       `brewline-${envName}-events-stream-iterator-age`,
     ]);
-    expect(alarms.every((a) => a.AlarmActions === undefined && a.TreatMissingData === 'notBreaching')).toBe(true);
+    expect(alarms.every((a) => a.AlarmActions?.length === 1 && a.OKActions?.length === 1 && a.TreatMissingData === 'notBreaching')).toBe(true);
     expect(alarms.find((a) => a.MetricName === 'IteratorAge')).toMatchObject({ Statistic: 'Maximum', Threshold: 300000 });
   });
 

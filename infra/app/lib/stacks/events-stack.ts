@@ -1,16 +1,19 @@
 import { ArnFormat, CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Validations } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { EnvName, LambdaSettings } from '../config';
 import { BrewlineFunction } from '../constructs/brewline-function';
 import { DataStack } from './data-stack';
+import { OpsStack, notifyAlarms } from './ops-stack';
 
 export interface EventsStackProps extends StackProps {
   readonly envName: EnvName;
@@ -207,6 +210,31 @@ export class EventsStack extends Stack {
       });
     }
 
+    // --- 5b) StockLow → 維運主題（03 §8：內部 SNS 告警；A4b）/ StockLow → ops topic ---
+    const opsTopic = sns.Topic.fromTopicArn(
+      this,
+      'OpsTopic',
+      param(`${OpsStack.parameterPrefix(envName)}/alerts-topic-arn`),
+    );
+    new events.Rule(this, 'StockLowRule', {
+      eventBus: this.bus,
+      ruleName: `brewline-${envName}-stock-low`,
+      description: 'StockLow → ops alerts topic',
+      eventPattern: { source: ['brewline.ordering'], detailType: ['StockLow'] },
+      targets: [
+        new targets.SnsTopic(opsTopic, {
+          message: events.RuleTargetInput.fromText(
+            `[BrewLine ${envName}] Stock low: ${events.EventField.fromPath('$.detail.product_id')} has ` +
+              `${events.EventField.fromPath('$.detail.available_kg')} kg available ` +
+              `(threshold ${events.EventField.fromPath('$.detail.low_threshold_kg')} kg) at ${events.EventField.fromPath('$.detail.occurred_at')}`,
+          ),
+          deadLetterQueue: ruleDlq,
+          retryAttempts: 3,
+          maxEventAge: Duration.hours(2),
+        }),
+      ],
+    });
+
     // --- 6) 給其他 stack 的 SSM 參數 / SSM parameters for other stacks ---
     const prefix = EventsStack.parameterPrefix(envName);
     for (const [pid, name, value] of [
@@ -220,6 +248,9 @@ export class EventsStack extends Stack {
         description: `BrewLine ${envName} event layer: ${name}`,
       });
     }
+
+    // 所有告警接上維運主題（A4b）/ Every alarm notifies the ops topic.
+    notifyAlarms(this, envName);
 
     new CfnOutput(this, 'BusName', { value: this.bus.eventBusName });
     new CfnOutput(this, 'PublisherFunctionName', { value: publisher.function.functionName });
