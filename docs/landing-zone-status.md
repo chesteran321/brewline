@@ -727,7 +727,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - **Dev smoke test 78/78**（新增 10 項：建立 201、排程存在且 `Asia/Taipei`／`cron(0 9 ? * MON *)`、列出、31 日 → 400、未知商品 → 400、staff → 403、B 看不到也刪不掉 A 的、第 6 筆 → 409、刪除後排程與項目都消失）。
 - CI（Dev、Prod）：14 條路由／14 個函數、排程群組 ACTIVE、Scheduler 角色信任、執行函數 DLQ、排程名稱格式、4 個新呼叫端角色只能經租戶角色、`mail-replenish-failed` 規則。
 - CloudTrail：修正前 6 次 `CreateSchedule` 全為 `ValidationException`，修正後全為成功。
-- **Dev `order-tests replenish-check` 10/10**（模擬觸發，租戶 B 真實憑證）：觸發下單、重送回同一張訂單（冪等）、庫存只預留一次（8/2）、已刪除與雙週休息週不下單、庫存不足 → `ReplenishmentFailed` 一次且不預留；`cleanup` 清除 9 個項目（含 3 筆 `NOTIFY#` 寄送記錄）。
+- **Dev `order-tests replenish-check` 10/10**（模擬觸發，租戶 B 真實憑證）：觸發下單、重送回同一張訂單（冪等）、庫存只預留一次（8/2）、已刪除與雙週休息週不下單、庫存不足 → `ReplenishmentFailed` 一次且不預留；`cleanup` 清除 9 個項目（含 3 筆 `NOTIFY#` 寄送記錄）。收到 3 封信：訂單已建立、**定期補貨未下單**（庫存不足）、訂單已取消（逾時）。
 
 教訓 / Lessons：
 - （2026-11-16）**Scheduler 執行角色的 `aws:SourceArn` 必須是排程群組 ARN**（`schedule-group/<group>`），寫成 `schedule/<group>/*` 時 `CreateSchedule` 一律 `ValidationException: The execution role you provide must allow AWS EventBridge Scheduler to assume the role`。單元測試只比對自己寫的值，抓不到；Dev smoke test 失敗即 rollback 擋下，CloudTrail 提供確切錯誤（rollback 後函數日誌已隨 log group 刪除，CloudTrail 仍在）。
@@ -849,7 +849,6 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-16 | 網域 `brewline-demo.click` 註冊完成（ACTIVE、隱私保護、自動續約）；A4d 訂單通知信（§10.14，PR #41–#43）部署 Dev、Prod；Dev 端到端 4 封信＋逾時 4/4 |
 | 2026-12-01 前 | 確認網域聯絡人驗證信已點擊（ICANN 15 天期限，否則網域停用） |
 | ✅ 2026-11-16 | A4e 定期補貨（§10.15，PR #46、#47）部署 Dev、Prod；Dev smoke 78/78、`replenish-check` 10/10；**訂貨模組 A1–A4 完成** |
-| 待確認 | `replenish-check` 寄出的 3 封信（訂單已建立、定期補貨未下單、訂單已取消）是否都收到 |
 | P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
