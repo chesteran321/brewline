@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）、A3d（逾時取消）完成，**訂貨 A3 完成**；A4a／A4b（CMK key policy＋維運告警 SNS）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）、A3d（逾時取消）完成，**訂貨 A3 完成**；A4a／A4b（CMK key policy＋維運告警 SNS）、A4c（聯絡人＋欄位層級加密）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -664,6 +664,25 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - （2026-11-16）多帳號 CLI：在 Prod 帳號設了 `ENV=dev` → 改由帳號 ID 推算環境；`--notification-endpoint "$EMAIL"文字` 會黏成一個參數 → 固定值直接用單引號。
 - 已知風險：任何有 `events:PutEvents` 的同帳號身分都能偽造 `brewline.ordering` 事件（測試 B 即是）。之後以 bus 資源政策限定發布者（RSK-017）。
 
+### 10.13 租戶聯絡人與欄位層級加密 / Tenant Contact & Field-Level Encryption（P1，2026-11-16，ADR-029 D2／D4，PR #39）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| 路由 | `GET`／`PUT /tenant/contact`（`brewline/profile.read`／`profile.write`，**只有 cafe**） | 同左 |
+| 函數 | `brewline-dev-ordering-{get,put}-contact`；角色 `brewline-dev-orders-contact-{get,put}`（沒有 DynamoDB／KMS 權限，只能扮演租戶角色） | 同左（prod） |
+| 資料 | `TENANT#<t>`／`CONTACT#primary`：`enc.{name,email,phone,address}` 為 KMS 密文（base64），沒有明文欄位；Streams 事件過濾不處理此項目 | 同左 |
+| KMS | 資料層 CMK，直接 `Encrypt`／`Decrypt`（每欄 ≤ 4 KB）；encryption context `{tenant_id, field}` | 同左 |
+| 租戶角色 | Sid `ContactFieldsOwnTenant`：context `tenant_id` = `${aws:PrincipalTag/tenant_id}`、`field` ∈ 4 欄、context 鍵只能是 `tenant_id`／`field`、`SYMMETRIC_DEFAULT`；沒有直接 `GenerateDataKey` | 同左 |
+
+已驗證（2026-11-16）：
+- **Dev smoke test 68/68**（新增：PUT→GET 往返；B 讀 A → 404；simulator → 403；staff PUT → 403；email 無效 → 400；body 帶 `tenant_id` → 400；**DynamoDB 項目找不到 email／姓名／電話明文**；token scope）。
+- CI `verify-tenant-access.sh`（Dev、Prod）：9 個 KMS 政策模擬（2 allowed、7 implicitDeny），5 個訂單／聯絡人函數角色 `→ key directly = implicitDeny`；`verify-api-stack.sh`：11 條路由、11 個函數。
+- **Dev `run-order-tests.sh` 25/25**：新增 8 個 KMS 探測，以租戶 A 的**真實憑證**呼叫 KMS（經 key policy、SCP、RCP 實際評估）：自己的 context 加解密成功；B 的 context、多餘的鍵、未知欄位、沒有 context、直接 `GenerateDataKey` → `AccessDeniedException`。
+
+教訓 / Lessons：
+- （2026-11-16）CloudShell 的 `AWS_REGION` 跟著主控台右上角的區域；在東京區域開 CloudShell 時，腳本的 `${AWS_REGION:-ap-east-2}` 會用東京 → 先 `export AWS_REGION=ap-east-2` 或切換主控台區域。
+- 政策模擬（`simulate-principal-policy`）只算身分政策；真實憑證探測才涵蓋 key policy／SCP／RCP，兩者互補。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -774,8 +793,9 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-13 | 訂貨 A3c：staff 端點＋狀態機部署 Dev、Prod 並驗證（§10.9，PR #31） |
 | ✅ 2026-11-16 | 訂貨 A3d：逾時取消工作流部署 Dev、Prod；Dev 端到端通過（§10.11，PR #33、#34）；**A3 完成** |
 | ✅ 2026-11-16 | A4 決策 D1–D7（ADR-029）；A4a key policy（PR #36）、A4b 維運通知（§10.12，PR #37）部署 Dev、Prod；Dev 端到端通過；Dev／Prod Email 訂閱已確認 |
-| A4d 前 | 決定網域名稱與副檔名，於 Prod 註冊（Route 53，隱私保護開啟） |
-| P1 | 下一步：A4c（聯絡人＋欄位加密）→ A4d（SES 通知，需網域）→ A4e（定期補貨）→ 模擬器 → 溯源 |
+| ✅ 2026-11-16 | A4c 聯絡人＋欄位層級加密（§10.13，PR #39）部署 Dev、Prod；Dev smoke 68/68、訂單測試 25/25 |
+| 進行中 | 網域 `brewline-demo.click`（Prod，Route 53，1 年、自動續約、隱私保護）2026-11-16 送出註冊；待完成註冊並點擊聯絡人驗證信（15 天內） |
+| P1 | 下一步：A4d（SES 通知，需網域）→ A4e（定期補貨）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
