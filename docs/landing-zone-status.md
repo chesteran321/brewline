@@ -702,6 +702,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - CI `verify-notify-stack.sh`：Prod DKIM／MAIL FROM `SUCCESS`、Verified for sending、公開 DNS 查得到 DMARC、`dev.` 委派記錄存在；Dev 在委派後 MAIL FROM 先 `SUCCESS`、DKIM 約 25 分鐘後 `SUCCESS`。
 - 手動：`dig` NS／DKIM CNAME（`…dkim.ap-east-2.amazonses.com`）查得到；收件信箱驗證前 `VerifiedForSendingStatus = false`、點連結後 `true`；格式錯誤的地址 → `BadRequestException`。
 - **端到端（Dev，`order-tests` 模式 `notify-setup`＋`timeout-check`）**：測試租戶 B 寫入聯絡人並下 2 筆單 → 收到 **4 封信**（已建立 ×2、已確認 ×1、10 分鐘後已取消 ×1，寄件人 `BrewLine (Demo) <orders@dev.brewline-demo.click>`）；逾時檢查 4/4（`system:timeout` 取消、已確認訂單不變、庫存 9/1），測試資料自動清除。
+- **Gmail「顯示原始郵件」（已確認通知信）**：SPF `PASS`、DKIM `'PASS'`（網域 `dev.brewline-demo.click`）、DMARC `'PASS'`；傳輸 2 秒；Message-ID 網域 `ap-east-2.amazonses.com`。
 
 教訓 / Lessons：
 - （2026-11-16）**Lambda 節流變成工作流失敗**：訂單測試一次建立 11 筆訂單，10 分鐘後逾時工作流同時到期；取消函數保留併發 2 → 7 筆 `Lambda.TooManyRequestsException`，CDK `retryOnServiceExceptions` 不含此錯誤 → 被 `Catch States.ALL` 變成 FAILED（訂單已刪除，無資料影響）。修正：對它重試 6 次＋full jitter（PR #42）。查證據用 `get-execution-history`；這種整合的事件是 `LambdaFunctionFailed`，不是 `TaskFailed`。
@@ -823,7 +824,6 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-16 | A4 決策 D1–D7（ADR-029）；A4a key policy（PR #36）、A4b 維運通知（§10.12，PR #37）部署 Dev、Prod；Dev 端到端通過；Dev／Prod Email 訂閱已確認 |
 | ✅ 2026-11-16 | A4c 聯絡人＋欄位層級加密（§10.13，PR #39）部署 Dev、Prod；Dev smoke 68/68、訂單測試 25/25 |
 | ✅ 2026-11-16 | 網域 `brewline-demo.click` 註冊完成（ACTIVE、隱私保護、自動續約）；A4d 訂單通知信（§10.14，PR #41–#43）部署 Dev、Prod；Dev 端到端 4 封信＋逾時 4/4 |
-| 待確認 | 通知信的 Gmail「顯示原始郵件」SPF／DKIM／DMARC = PASS（預期：SPF `mail.dev.<網域>`、DKIM `dev.<網域>`） |
 | 2026-12-01 前 | 確認網域聯絡人驗證信已點擊（ICANN 15 天期限，否則網域停用） |
 | P1 | 下一步：A4e（定期補貨，Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
