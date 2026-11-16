@@ -1,5 +1,6 @@
 import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Tags } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
@@ -49,12 +50,26 @@ export class DataStack extends Stack {
     // the org RCP additionally limits kms:* to principals inside the organization.
     this.key = new kms.Key(this, 'DataKey', {
       alias: `alias/brewline-${envName}-data`,
-      description: `BrewLine ${envName} data key (DynamoDB core table; later S3, SQS, SNS).`,
+      description: `BrewLine ${envName} data key (DynamoDB core table, contact fields, SNS topics; later S3).`,
       enableKeyRotation: true,
       rotationPeriod: Duration.days(365),
       pendingWindow: Duration.days(data.keyPendingWindowDays),
       removalPolicy,
     });
+    // A4a（ADR-029）：讓 AWS 服務能寫入以這把 CMK 加密的 SNS 主題（A4 決策 D3）。
+    // CloudWatch 告警、EventBridge 規則、SES 事件發布到加密主題時，是**服務本身**呼叫 KMS → 需要 key policy 授權
+    // （IAM 政策管不到服務主體）。只給 Decrypt／GenerateDataKey*；aws:SourceAccount 存在時必須是本帳號（防 confused deputy）。
+    // Let AWS services publish to SNS topics encrypted with this CMK. Services call KMS themselves, so only the key
+    // policy can grant them; Decrypt/GenerateDataKey* only, and the source account must be ours when present.
+    this.key.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'AllowAwsServicesToPublishToEncryptedTopics',
+        principals: ['cloudwatch.amazonaws.com', 'events.amazonaws.com', 'ses.amazonaws.com'].map((p) => new iam.ServicePrincipal(p)),
+        actions: ['kms:Decrypt', 'kms:GenerateDataKey*'],
+        resources: ['*'],
+        conditions: { StringEqualsIfExists: { 'aws:SourceAccount': this.account } },
+      }),
+    );
 
     // 2) DynamoDB 單表。TableV2 → AWS::DynamoDB::GlobalTable（ADR-018）。
     //    鍵名用通用的 pk / sk，實體型別寫在值裡（TENANT#、PRODUCT#…），日後新增實體不必改 schema。

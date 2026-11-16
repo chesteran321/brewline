@@ -274,6 +274,24 @@
   - 逾時取消的端到端測試是手動兩段式（`order-tests` 的 `timeout-setup`／`timeout-check`），因為要等 10 分鐘。
 - **替代方案 Alternatives considered**：每筆訂單一個 EventBridge Scheduler 一次性排程（更便宜，但作品集少了 Step Functions；A3 D2 選項 C）；EventBridge → Lambda → `StartExecution(name=order_id)`（多一個函數，只為了換到執行名稱冪等，而條件寫入已經足夠）。
 
+### ADR-029 通知、聯絡人與定期補貨（A4 決策）/ Notifications, Contacts and Replenishment
+
+- **狀態 Status**：Accepted（2026-11-16）；分 5 個 PR 實作（A4a–A4e）；修正 09 §4、03 §6
+- **背景 Context**：ORD-F-006（狀態變更寄信）、ORD-F-007（定期補貨）、A2 延後的 D5（聯絡人欄位加密），以及 A3 的告警還沒有通知目標。台北 SES 在**沙盒**（每 24 小時 200 封、每秒 1 封，只能寄給已驗證的地址）；Scheduler 可用（2026-11-16 Dev、Prod 實測）。
+- **決策 Decision**：
+  - **D1 寄件身分**：以 Route 53 註冊網域；Prod 放主網域 hosted zone，`dev.<網域>` 委派給 Dev。SES 驗證網域身分＋Easy DKIM＋自訂 MAIL FROM＋DMARC。不用 Gmail 地址當寄件人：單一地址身分的 DKIM／SPF 與 From 網域不一致，DMARC 必定失敗。
+  - **D2 聯絡人欄位層級加密**：`email`、`phone`、`address` 各自 `kms:Encrypt`，encryption context `{tenant_id, field}`；租戶角色只能在 `kms:EncryptionContext:tenant_id = ${aws:PrincipalTag/tenant_id}` 時解密 → 租戶隔離延伸到 KMS 層。
+  - **D3 SNS 加密**：用每帳號的 CMK；**key policy** 授權 `cloudwatch`、`events`、`ses` 服務主體 `kms:Decrypt`／`kms:GenerateDataKey*`（條件：`aws:SourceAccount` 存在時必須是本帳號）。AWS 管理的 `alias/aws/sns` 無法讓 CloudWatch 告警發布（key policy 不能改）。訂閱 Email 不進 repo，以 CLI 手動訂閱。
+  - **D4 聯絡人**：每租戶一位 `TENANT#<t>/CONTACT#primary`；`GET`／`PUT /tenant/contact`；新 scope `brewline/profile.read`／`profile.write`，**只給 cafe**。
+  - **D5 寄信時機**：`OrderCreated`、`→ CONFIRMED`、`→ SHIPPED`、`→ CANCELLED`；以 `NOTIFY#<event_id>`（條件寫入、TTL 7 天）保證不重複寄送。
+  - **D6 定期補貨**：每週／雙週／每月、`Asia/Taipei` 09:00、每租戶最多 5 筆；每筆一個 Scheduler 排程（group `brewline-<env>-replenish`）→ `orders-replenish`（扮演租戶角色，重用下單程式），冪等鍵 = 排程 ID ＋ `<aws.scheduler.scheduled-time>`；庫存不足寄通知、不重試。
+  - **D7 PR**：A4a key policy → A4b 維運告警 SNS → A4c 聯絡人＋欄位加密 → A4d SES 通知（需網域）→ A4e 定期補貨。
+- **後果 Consequences**：
+  - 費用：網域年費（依副檔名）＋2 個 hosted zone USD 1／月；SES、SNS、Scheduler、KMS 請求在作品集規模約 0。
+  - A4a 修改 CMK 的 key policy：Prod 的 key 是 Retain、刪除保護；key policy 更新不會取代金鑰。
+  - 沙盒期間收件人必須先驗證；Dev 與 Prod 各自驗證。
+- **替代方案 Alternatives considered**：見 A4 規劃（D1 B／C、D2 A／C、D3 B／C）。
+
 ### ADR 範本 / ADR Template
 
 ```markdown
