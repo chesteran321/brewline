@@ -46,7 +46,7 @@ aws sts get-caller-identity --query Arn --output text
 # --- 路由與授權 / Routes and authorization ---
 routes=$(aws apigatewayv2 get-routes --api-id "$api_id" --region "$region" --output json)
 check "Routes" "$(jq -c '[.Items[].RouteKey] | sort' <<<"$routes")" \
-  '["GET /admin/orders","GET /admin/products/{id}/stock","GET /admin/tenants/{tenantId}/orders/{orderId}","GET /orders","GET /orders/{id}","GET /products","GET /products/{id}","GET /tenant/contact","PATCH /admin/tenants/{tenantId}/orders/{orderId}","POST /orders","PUT /tenant/contact"]'
+  '["DELETE /replenishments/{id}","GET /admin/orders","GET /admin/products/{id}/stock","GET /admin/tenants/{tenantId}/orders/{orderId}","GET /orders","GET /orders/{id}","GET /products","GET /products/{id}","GET /replenishments","GET /tenant/contact","PATCH /admin/tenants/{tenantId}/orders/{orderId}","POST /orders","POST /replenishments","PUT /tenant/contact"]'
 check "Routes without JWT" "$(jq -r '[.Items[] | select(.AuthorizationType != "JWT")] | length' <<<"$routes")" "0"
 check "Routes without a scope" "$(jq -r '[.Items[] | select((.AuthorizationScopes // []) | length == 0)] | length' <<<"$routes")" "0"
 scope_of() { jq -c --arg k "$1" '.Items[] | select(.RouteKey == $k) | .AuthorizationScopes' <<<"$routes"; }
@@ -59,6 +59,9 @@ check "GET admin order scope"   "$(scope_of 'GET /admin/tenants/{tenantId}/order
 check "PATCH admin order scope" "$(scope_of 'PATCH /admin/tenants/{tenantId}/orders/{orderId}')" '["brewline/admin"]'
 check "GET /tenant/contact scope" "$(scope_of 'GET /tenant/contact')" '["brewline/profile.read"]'
 check "PUT /tenant/contact scope" "$(scope_of 'PUT /tenant/contact')" '["brewline/profile.write"]'
+check "POST /replenishments scope" "$(scope_of 'POST /replenishments')" '["brewline/orders.write"]'
+check "GET /replenishments scope" "$(scope_of 'GET /replenishments')" '["brewline/orders.read"]'
+check "DELETE /replenishments/{id} scope" "$(scope_of 'DELETE /replenishments/{id}')" '["brewline/orders.write"]'
 
 authz=$(aws apigatewayv2 get-authorizers --api-id "$api_id" --region "$region" --output json)
 issuer=$(aws ssm get-parameter --name "/brewline/${env_name}/auth/issuer" --region "$region" --query Parameter.Value --output text)
@@ -77,7 +80,7 @@ check "No CORS configured"   "$(aws apigatewayv2 get-api --api-id "$api_id" --re
 
 # --- Lambda ---
 IFS=',' read -r -a fns <<<"$(out FunctionNames)"
-check "API function count" "${#fns[@]}" "11"
+check "API function count" "${#fns[@]}" "14"
 for fn in "${fns[@]}"; do
   cfg=$(aws lambda get-function-configuration --function-name "$fn" --region "$region" --output json)
   short=${fn#brewline-${env_name}-ordering-}
@@ -139,6 +142,23 @@ if [[ "$want_smoke" == true ]]; then
     | jq --arg t "$hour_ago" '[.executions[] | select(.startDate[0:19] >= $t)] | length')
   check "Workflow executions started by smoke orders (1h) ≥ 1" "$([[ "$started" -ge 1 ]] && echo true || echo "false ($started)")" "true"
 fi
+
+# --- 定期補貨（A4e）/ Replenishment ---
+group="brewline-${env_name}-replenish"
+check "Schedule group state" "$(aws scheduler get-schedule-group --name "$group" --region "$region" --query State --output text)" "ACTIVE"
+srole=$(aws iam get-role --role-name "brewline-${env_name}-replenish-scheduler" --query Role.AssumeRolePolicyDocument --output json)
+check "Scheduler role trust" "$(jq -c '[.Statement[0].Principal.Service, (.Statement[0].Condition.ArnLike["aws:SourceArn"] | split(":") | last)]' <<<"$srole")" \
+  "[\"scheduler.amazonaws.com\",\"schedule/${group}/*\"]"
+rfn=$(out ReplenishFunctionName)
+check "Replenish role" "$(aws lambda get-function-configuration --function-name "$rfn" --region "$region" --query Role --output text | awk -F/ '{print $NF}')" "brewline-${env_name}-orders-replenish"
+check "Replenish async on-failure → DLQ" "$(aws lambda get-function-event-invoke-config --function-name "$rfn" --region "$region" \
+  --query 'DestinationConfig.OnFailure.Destination' --output text | awk -F: '{print $NF}')" "brewline-${env_name}-replenish-dlq"
+check "Replenish DLQ messages" "$(aws sqs get-queue-attributes --queue-url "$(out ReplenishDlqUrl)" --region "$region" \
+  --attribute-names ApproximateNumberOfMessages --query Attributes.ApproximateNumberOfMessages --output text)" "0"
+# 正式排程只會是 <tenant_id>-r_<ULID>（smoke 會清掉自己的）/ Only tenant schedules may exist.
+bad=$(aws scheduler list-schedules --group-name "$group" --region "$region" --query 'Schedules[].Name' --output json \
+  | jq '[.[] | select(test("^t_[0-9A-HJKMNP-TV-Z]{26}-r_[0-9A-HJKMNP-TV-Z]{26}$") | not)] | length')
+check "Schedules with unexpected names" "$bad" "0"
 
 check "Stack termination protection" "$(aws cloudformation describe-stacks --stack-name "$stack" --region "$region" \
   --query 'Stacks[0].EnableTerminationProtection' --output text | tr '[:upper:]' '[:lower:]')" "$want_termination_protection"

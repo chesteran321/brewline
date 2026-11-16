@@ -236,6 +236,12 @@ export class OrderRepo {
     return { kind: 'replayed', order };
   }
 
+  /** 不存在或未上架的商品（A4e 建立定期補貨時檢查）/ Products that do not exist or are not active. */
+  async unknownProducts(tenantId: string, ids: readonly string[]): Promise<string[]> {
+    const metas = await this.getActiveMetas(this.forTenant(tenantId), ids);
+    return ids.filter((id) => !metas.has(id));
+  }
+
   private async getActiveMetas(doc: DynamoDBDocumentClient, ids: readonly string[]): Promise<Map<string, ProductMetaItem>> {
     const result = new Map<string, ProductMetaItem>();
     let keys: Array<Record<string, unknown>> = ids.map((id) => ({ pk: productPk(id), sk: META_SK }));

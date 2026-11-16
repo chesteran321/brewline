@@ -115,7 +115,7 @@ ksim "KMS: GenerateDataKey directly"           implicitDeny kms:GenerateDataKey 
 
 # --- 呼叫端：訂單函數角色（A2b）/ Callers: order function roles ---
 # 函數角色只能扮演租戶角色，本身沒有任何 DynamoDB／KMS 權限 / They may only assume the tenant role.
-for suffix in create list get contact-get contact-put; do
+for suffix in create list get contact-get contact-put repl-create repl-list repl-delete replenish; do
   caller="brewline-${env_name}-orders-${suffix}"
   if ! caller_arn=$(aws iam get-role --role-name "$caller" --query Role.Arn --output text 2>/dev/null); then
     check "Caller role $caller exists" "missing" "present"; continue

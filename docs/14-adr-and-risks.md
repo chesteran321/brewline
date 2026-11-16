@@ -287,6 +287,7 @@
   - **D4 聯絡人**：每租戶一位 `TENANT#<t>/CONTACT#primary`；`GET`／`PUT /tenant/contact`；新 scope `brewline/profile.read`／`profile.write`，**只給 cafe**。
   - **D5 寄信時機**：`OrderCreated`、`→ CONFIRMED`、`→ SHIPPED`、`→ CANCELLED`；以 `NOTIFY#<event_id>`（條件寫入、TTL 7 天）保證不重複寄送。
   - **D6 定期補貨**：每週／雙週／每月、`Asia/Taipei` 09:00、每租戶最多 5 筆；每筆一個 Scheduler 排程（group `brewline-<env>-replenish`）→ `orders-replenish`（扮演租戶角色，重用下單程式），冪等鍵 = 排程 ID ＋ `<aws.scheduler.scheduled-time>`；庫存不足寄通知、不重試。
+    - **A4e 實作補充（2026-11-16，F1–F6 全部 A）**：`POST`／`GET /replenishments`、`DELETE /replenishments/{id}` 沿用 `orders.write`／`orders.read`；`TENANT#<t>/REPL#<ULID>` 為正本，API 同步 `CreateSchedule`（群組 `brewline-<env>-replenish`，名稱 `<tenant_id>-<replenishment_id>`，`Asia/Taipei`），失敗時軟刪除補償；租戶角色沒有 DeleteItem → 刪除一律軟刪除（TTL 30 天）；雙週以每週 cron 觸發、函數依起算週判斷單雙週；每月限 1–28 日；冪等鍵 `rp-<ULID>-<台北日期>`；庫存不足／商品下架發布 `ReplenishmentFailed`（`event_id` 固定）由通知函數寄信；上限 5 筆以查詢計數，同時建立可能多 1 筆（接受）。函數角色 `orders-repl-{create,list,delete}`、`orders-replenish`；Scheduler 執行角色只信任本帳號此群組的排程。
   - **D7 PR**：A4a key policy → A4b 維運告警 SNS → A4c 聯絡人＋欄位加密 → A4d SES 通知（需網域）→ A4e 定期補貨。
 - **後果 Consequences**：
   - 費用：網域年費（依副檔名）＋2 個 hosted zone USD 1／月；SES、SNS、Scheduler、KMS 請求在作品集規模約 0。

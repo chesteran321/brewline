@@ -63,6 +63,8 @@ export interface LambdaSettings {
     readonly streamPublisher: number;
     /** 訂單通知信（A4d；SES 沙盒每秒 1 封）/ Order e-mail notifier (SES sandbox: 1 message/s). */
     readonly notifier: number;
+    /** 定期補貨執行（A4e；09:00 同時觸發，節流由非同步重試處理）/ Replenishment runs (throttles retried async). */
+    readonly replenish: number;
   };
 }
 
@@ -157,7 +159,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 7, // COST-007
-      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1, streamPublisher: 2, notifier: 1 },
+      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2 },
     },
     api: {
       throttleRateLimit: 10,
@@ -195,7 +197,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 30, // COST-007
-      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1, streamPublisher: 2, notifier: 1 },
+      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2 },
     },
     api: {
       throttleRateLimit: 50,

@@ -9,6 +9,7 @@ import {
   ListUsersCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DeleteScheduleCommand, GetScheduleCommand, SchedulerClient } from '@aws-sdk/client-scheduler';
 import { DeleteCommand, DynamoDBDocumentClient, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { Logger } from '@aws-lambda-powertools/logger';
 import type { CloudFormationCustomResourceEvent } from 'aws-lambda';
@@ -26,6 +27,7 @@ const logger = new Logger({ serviceName: 'ordering-smoke-a1' });
 const cognito = new CognitoIdentityProviderClient({});
 
 const doc = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const scheduler = new SchedulerClient({});
 
 const USER_PREFIX = 'smoke-a1-';
 /** 固定的測試租戶：smoke 角色只能刪這兩個分割區 / Fixed test tenants; the smoke role may delete only these partitions. */
@@ -50,6 +52,8 @@ interface Config {
   /** 下單用的 Dev 測試商品（p-9002，不在目錄）/ Dev test product for orders (hidden from the catalog). */
   readonly orderProductId: string;
   readonly tableName: string;
+  /** 定期補貨的 Scheduler 群組（A4e）/ Replenishment schedule group. */
+  readonly scheduleGroup: string;
 }
 
 interface Tokens {
@@ -102,7 +106,7 @@ async function call(
   cfg: Config,
   path: string,
   token?: string,
-  post?: { body: unknown; key?: string; method?: 'POST' | 'PATCH' | 'PUT' },
+  post?: { body: unknown; key?: string; method?: 'POST' | 'PATCH' | 'PUT' | 'DELETE' },
 ): Promise<{ status: number; body: any }> {
   const headers: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
   if (post) {
@@ -193,6 +197,7 @@ export async function runChecks(cfg: Config, tokens: Record<Role, Tokens>): Prom
   expect('staff access token has no tenant_id', staff.tenant_id === undefined, String(staff.tenant_id));
 
   checks.push(...(await contactChecks(cfg, tokens)));
+  checks.push(...(await replenishmentChecks(cfg, tokens)));
   const orders = await orderChecks(cfg, tokens);
   checks.push(...orders.checks);
   if (orders.orderId && orders.simOrderId) checks.push(...(await adminChecks(cfg, tokens, orders.orderId, orders.simOrderId)));
@@ -252,6 +257,66 @@ export async function contactChecks(cfg: Config, tokens: Record<Role, Tokens>): 
   const sim = decodeClaims(tokens.simulator.access);
   expect('cafe token has profile scopes', String(cafe.scope).includes('brewline/profile.write'), String(cafe.scope));
   expect('simulator token has no profile scope', !String(sim.scope).includes('brewline/profile.'), String(sim.scope));
+  return checks;
+}
+
+/** 排程是否存在；回傳時區與運算式 / Whether the schedule exists, with its timezone and expression. */
+async function getSchedule(group: string, name: string): Promise<{ tz?: string; expr?: string } | undefined> {
+  try {
+    const s = await scheduler.send(new GetScheduleCommand({ GroupName: group, Name: name }));
+    return { tz: s.ScheduleExpressionTimezone, expr: s.ScheduleExpression };
+  } catch (err) {
+    if ((err as Error).name === 'ResourceNotFoundException') return undefined;
+    throw err;
+  }
+}
+
+/**
+ * A4e 定期補貨（ADR-029 D6）：建立 → 排程存在（台北 09:00）→ 列出 → 上限 5 → 隔離 → 刪除後排程消失。
+ * Replenishment: create → schedule exists (09:00 Asia/Taipei) → list → limit 5 → isolation → delete removes the schedule.
+ */
+export async function replenishmentChecks(cfg: Config, tokens: Record<Role, Tokens>): Promise<Check[]> {
+  const checks: Check[] = [];
+  const expect = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
+  const body = { frequency: 'weekly', day_of_week: 'MON', items: [{ product_id: cfg.orderProductId, qty_kg: 1 }] };
+  const create = (b: unknown = body, token = tokens.cafe.access) => call(cfg, '/replenishments', token, { body: b });
+  const del = (id: string, token = tokens.cafe.access) => call(cfg, `/replenishments/${id}`, token, { body: undefined, method: 'DELETE' });
+
+  let r = await create();
+  const id: string | undefined = r.body?.replenishment_id;
+  expect('repl: cafe POST → 201', r.status === 201 && !!id && r.body?.run_at === '09:00 Asia/Taipei', `got ${r.status}`);
+  const sched = id ? await getSchedule(cfg.scheduleGroup, `${TENANT_ID}-${id}`) : undefined;
+  expect('repl: schedule exists (Asia/Taipei, MON 09:00)', sched?.tz === 'Asia/Taipei' && sched?.expr === 'cron(0 9 ? * MON *)', JSON.stringify(sched ?? null));
+  r = await call(cfg, '/replenishments', tokens.cafe.access);
+  expect('repl: GET lists it', r.status === 200 && (r.body?.items ?? []).some((i: any) => i.replenishment_id === id), `got ${r.status}`);
+
+  // 反向 / Negative
+  r = await create({ frequency: 'monthly', day_of_month: 31, items: body.items });
+  expect('repl: day_of_month 31 → 400', r.status === 400, `got ${r.status}`);
+  r = await create({ ...body, items: [{ product_id: 'p-9999', qty_kg: 1 }] });
+  expect('repl: unknown product → 400', r.status === 400 && r.body?.error?.code === 'unknown_products', `got ${r.status}`);
+  r = await create(body, tokens.staff.access);
+  expect('repl: staff POST → 403', r.status === 403, `got ${r.status}`);
+  r = await call(cfg, '/replenishments', tokens.cafeB.access);
+  expect("repl: tenant B GET → empty (cannot see A's)", r.status === 200 && (r.body?.items ?? []).length === 0, `got ${r.status}`);
+  if (id) {
+    r = await del(id, tokens.cafeB.access);
+    const still = await getSchedule(cfg.scheduleGroup, `${TENANT_ID}-${id}`);
+    expect("repl: tenant B DELETE A's → 204 but nothing removed", r.status === 204 && !!still, `got ${r.status}`);
+  }
+  const extra: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    const x = await create();
+    if (x.body?.replenishment_id) extra.push(x.body.replenishment_id);
+  }
+  r = await create();
+  expect('repl: 6th → 409 limit_reached', r.status === 409 && r.body?.error?.code === 'limit_reached', `got ${r.status} (created ${extra.length + 1})`);
+
+  // 刪除 → 排程消失、清單變空 / Delete → schedules gone, list empty.
+  for (const x of [id, ...extra].filter((v): v is string => !!v)) await del(x);
+  const left = await Promise.all([id, ...extra].filter((v): v is string => !!v).map((x) => getSchedule(cfg.scheduleGroup, `${TENANT_ID}-${x}`)));
+  r = await call(cfg, '/replenishments', tokens.cafe.access);
+  expect('repl: DELETE removes schedules and items', left.every((v) => !v) && (r.body?.items ?? []).length === 0, `left ${left.filter(Boolean).length}`);
   return checks;
 }
 
@@ -433,8 +498,8 @@ async function resetStock(tableName: string, productId: string): Promise<void> {
   );
 }
 
-/** 刪除測試租戶的所有項目（訂單、冪等記錄）/ Delete every item of the fixed test tenants. */
-async function cleanTenants(tableName: string): Promise<number> {
+/** 刪除測試租戶的所有項目（訂單、冪等記錄、補貨＋其排程）/ Delete every item of the test tenants (and replenishment schedules). */
+async function cleanTenants(tableName: string, scheduleGroup?: string): Promise<number> {
   let deleted = 0;
   for (const t of [TENANT_ID, TENANT_B_ID]) {
     let startKey: Record<string, unknown> | undefined;
@@ -449,6 +514,10 @@ async function cleanTenants(tableName: string): Promise<number> {
         }),
       );
       for (const item of out.Items ?? []) {
+        if (scheduleGroup && typeof item.sk === 'string' && item.sk.startsWith('REPL#')) {
+          const name = `${t}-r_${item.sk.slice('REPL#'.length)}`;
+          await scheduler.send(new DeleteScheduleCommand({ GroupName: scheduleGroup, Name: name })).catch(() => undefined);
+        }
         await doc.send(new DeleteCommand({ TableName: tableName, Key: { pk: item.pk, sk: item.sk } }));
         deleted++;
       }
@@ -486,6 +555,7 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
     productId: String(props.ProductId),
     orderProductId: String(props.OrderProductId),
     tableName: String(props.TableName),
+    scheduleGroup: String(props.ScheduleGroup),
   };
   if (event.RequestType === 'Delete') {
     await deleteLeftovers(cfg.userPoolId).catch(() => undefined);
@@ -493,7 +563,7 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
   }
 
   await deleteLeftovers(cfg.userPoolId);
-  await cleanTenants(cfg.tableName);
+  await cleanTenants(cfg.tableName, cfg.scheduleGroup);
   await resetStock(cfg.tableName, cfg.orderProductId);
   const runId = randomBytes(4).toString('hex');
   const created: string[] = [];
@@ -508,7 +578,7 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
     checks = await runChecks(cfg, tokens);
   } finally {
     await deleteUsers(cfg.userPoolId, created);
-    const deleted = await cleanTenants(cfg.tableName).catch((err: Error) => {
+    const deleted = await cleanTenants(cfg.tableName, cfg.scheduleGroup).catch((err: Error) => {
       logger.warn('Could not clean test tenants', { error: err.name });
       return -1;
     });

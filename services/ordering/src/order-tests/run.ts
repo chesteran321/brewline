@@ -16,6 +16,11 @@ import { AdminOrderRepo } from '../lib/admin-order-repo';
 import { CreateOrderResult, OrderRepo } from '../lib/order-repo';
 import { ContactRepo } from '../lib/contact-repo';
 import { ContactSchema } from '../lib/contact-model';
+import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import { CreateReplenishment, newReplenishmentItem } from '../lib/replenishment-model';
+import { ReplenishmentRepo } from '../lib/replenishment-repo';
+import { EVENT_SOURCE } from '../events/order-events';
+import { runReplenishment } from '../replenish/run-replenishment';
 import { TenantCredentials } from '../lib/tenant-credentials';
 
 /**
@@ -312,6 +317,82 @@ export async function runAll(d: Deps): Promise<{ passed: boolean; checks: Check[
 }
 
 /**
+ * A4e 定期補貨（F6 A：手動模擬觸發，不等真正的排程）。用租戶 B 的真實憑證，跑和 Scheduler 觸發時同一個 runReplenishment()。
+ * Replenishment, simulated firing with tenant B's real credentials, through the same runReplenishment() Scheduler uses.
+ *
+ * 給 email（已在 SES 驗證）時會先寫入聯絡人，並**保留資料**讓通知函數寄出「已建立」與「補貨未下單」兩封信；
+ * 之後用 {"mode":"cleanup"} 清除。
+ * With an e-mail, the contact is written and the data is kept so the notifier can send both e-mails; clean up later.
+ */
+export async function replenishCheck(
+  d: Deps,
+  publish: (detailType: 'ReplenishmentFailed', detail: Record<string, unknown>) => Promise<void>,
+  beforeRun?: () => Promise<void>,
+): Promise<{ passed: boolean; checks: Check[]; kept_data: boolean }> {
+  const checks: Check[] = [];
+  const expect = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
+  const repo = new ReplenishmentRepo(d.forTenant, d.tableName);
+  const orders = new OrderRepo(d.forTenant, d.tableName);
+  const published: Array<Record<string, unknown>> = [];
+  const deps = {
+    repo,
+    orders,
+    publish: async (t: 'ReplenishmentFailed', detail: Record<string, unknown>) => {
+      published.push(detail);
+      await publish(t, detail);
+    },
+  };
+  const now = new Date();
+  const make = async (req: CreateReplenishment, anchor = now) => {
+    const item = newReplenishmentItem(TENANT_B, `r_${ulid()}`, req, 'order-tests', anchor);
+    await repo.put(item);
+    return item;
+  };
+  const fire = (id: string, at = now) => runReplenishment({ tenant_id: TENANT_B, replenishment_id: id, scheduled_time: at.toISOString() }, deps);
+  const line = [{ product_id: TEST_PRODUCT_ID, qty_kg: 2 }];
+
+  await cleanTenants(d);
+  await resetStock(d, RACE_STOCK_KG);
+  if (beforeRun) await beforeRun();
+
+  // 1) 正向：觸發 → 下單；同一次觸發重送 → 同一張訂單（冪等）/ Fire → order; a retried firing → same order.
+  const weekly = await make({ frequency: 'weekly', day_of_week: 'MON', items: line });
+  const first = await fire(weekly.replenishment_id);
+  const again = await fire(weekly.replenishment_id);
+  const stock1 = await readStock(d);
+  expect('repl: firing places an order', first.outcome === 'ordered' && !!first.order_id, JSON.stringify(first));
+  expect('repl: retried firing → same order (idempotent)', again.outcome === 'replayed' && again.order_id === first.order_id, JSON.stringify(again));
+  expect('repl: stock reserved once (8/2)', stock1.available_kg === RACE_STOCK_KG - 2 && stock1.reserved_kg === 2, JSON.stringify(stock1));
+  expect('repl: one order in the table', (await countOrders(d, TENANT_B)) === 1, 'counted');
+
+  // 2) 反向：已刪除 → 不下單；雙週休息週 → 不下單 / Deleted → nothing; biweekly off week → nothing.
+  await repo.markDeleted(weekly, now);
+  const deleted = await fire(weekly.replenishment_id, new Date(now.getTime() + 7 * 86_400_000));
+  expect('repl: deleted subscription → skipped', deleted.outcome === 'skipped_inactive', deleted.outcome);
+  const biweekly = await make({ frequency: 'biweekly', day_of_week: 'MON', items: line }, new Date(now.getTime() - 7 * 86_400_000));
+  const off = await fire(biweekly.replenishment_id);
+  expect('repl: biweekly off week → skipped', off.outcome === 'skipped_off_week', off.outcome);
+  await repo.markDeleted(biweekly, now);
+
+  // 3) 庫存不足 → ReplenishmentFailed，不預留任何庫存 / Insufficient stock → event, nothing reserved.
+  const big = await make({ frequency: 'monthly', day_of_month: 1, items: [{ product_id: TEST_PRODUCT_ID, qty_kg: 50 }] });
+  const fail = await fire(big.replenishment_id);
+  const stock2 = await readStock(d);
+  expect('repl: insufficient stock → failed_stock', fail.outcome === 'failed_stock', fail.outcome);
+  expect('repl: ReplenishmentFailed published once', published.length === 1 && published[0]?.reason === 'insufficient_stock', JSON.stringify(published));
+  expect('repl: nothing reserved by the failed run', stock2.available_kg === stock1.available_kg && stock2.reserved_kg === stock1.reserved_kg, JSON.stringify(stock2));
+  expect('repl: still one order', (await countOrders(d, TENANT_B)) === 1, 'counted');
+
+  const passed = checks.every((c) => c.ok);
+  const keep = !!beforeRun;
+  if (passed && !keep) {
+    await cleanTenants(d);
+    await resetStock(d, RACE_STOCK_KG);
+  }
+  return { passed, checks, kept_data: keep || !passed };
+}
+
+/**
  * 逾時取消測試，第一段：租戶 B 下兩筆 1 kg 訂單（X、Y），以 staff 邏輯確認 Y；X 保持 CREATED。
  * Timeout test, part 1: two 1 kg orders for tenant B; Y is confirmed, X stays CREATED.
  */
@@ -454,6 +535,29 @@ export const handler = async (event: { mode?: string; cancel_order_id?: string; 
     const r = await timeoutCheck(deps, admin, event.cancel_order_id, event.keep_order_id, Number(process.env.ORDER_TIMEOUT_SECONDS ?? '600'));
     logger.info('timeout check finished', { passed: r.passed, state: r.state, failed: r.checks.filter((c) => !c.ok) });
     return r;
+  }
+  if (mode === 'replenish-check') {
+    const busName = process.env.BUS_NAME;
+    const eb = new EventBridgeClient({});
+    const publish = async (t: 'ReplenishmentFailed', detail: Record<string, unknown>) => {
+      if (!busName) return;
+      await eb.send(new PutEventsCommand({ Entries: [{ EventBusName: busName, Source: EVENT_SOURCE, DetailType: t, Detail: JSON.stringify(detail) }] }));
+    };
+    let beforeRun: (() => Promise<void>) | undefined;
+    if (event.email !== undefined) {
+      const contact = ContactSchema.safeParse({ name: 'BrewLine Tester', email: event.email });
+      if (!contact.success || !keyArn) throw new Error('replenish-check email must be a valid, SES-verified address');
+      const contacts = new ContactRepo(forTenant, kmsFor, tableName, keyArn);
+      beforeRun = () => contacts.put(TENANT_B, contact.data, 'order-tests', new Date()).then(() => undefined);
+    }
+    const r = await replenishCheck(deps, publish, beforeRun);
+    logger.info('replenish check finished', { passed: r.passed, failed: r.checks.filter((c) => !c.ok) });
+    return r;
+  }
+  if (mode === 'cleanup') {
+    const cleaned = await cleanTenants(deps);
+    await resetStock(deps, RACE_STOCK_KG);
+    return { cleaned };
   }
   if (mode !== 'all') throw new Error(`unknown mode ${mode}`);
   const result = await runAll(deps);

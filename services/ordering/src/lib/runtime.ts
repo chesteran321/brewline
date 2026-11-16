@@ -3,10 +3,13 @@ import { Tracer } from '@aws-lambda-powertools/tracer';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { KMSClient } from '@aws-sdk/client-kms';
+import { SchedulerClient } from '@aws-sdk/client-scheduler';
 import { STSClient } from '@aws-sdk/client-sts';
 import { CatalogRepo } from './catalog-repo';
 import { AdminOrderRepo } from './admin-order-repo';
 import { ContactRepo } from './contact-repo';
+import { ReplenishmentRepo } from './replenishment-repo';
+import { ReplenishmentScheduler } from './replenishment-scheduler';
 import { OrderRepo } from './order-repo';
 import { TenantCredentials } from './tenant-credentials';
 
@@ -134,4 +137,31 @@ export function adminOrderRepo(): AdminOrderRepo {
 
 export function setAdminOrderRepoForTesting(r: AdminOrderRepo | undefined): void {
   admin = r;
+}
+
+let replenishments: ReplenishmentRepo | undefined;
+
+/** 定期補貨 repo（A4e，租戶憑證）/ Replenishment repo (tenant credentials). */
+export function replenishmentRepo(): ReplenishmentRepo {
+  replenishments ??= new ReplenishmentRepo(tenantDocClient, requiredEnv('TABLE_NAME'));
+  return replenishments;
+}
+
+let scheduler: ReplenishmentScheduler | undefined;
+
+/** Scheduler 用函數自己的角色（只能管 brewline-<env>-replenish 群組）/ Uses the function's own role. */
+export function replenishmentScheduler(): ReplenishmentScheduler {
+  scheduler ??= new ReplenishmentScheduler(tracer.captureAWSv3Client(new SchedulerClient({})), {
+    groupName: requiredEnv('SCHEDULE_GROUP'),
+    functionArn: requiredEnv('REPLENISH_FUNCTION_ARN'),
+    roleArn: requiredEnv('SCHEDULER_ROLE_ARN'),
+    dlqArn: requiredEnv('REPLENISH_DLQ_ARN'),
+  });
+  return scheduler;
+}
+
+/** 測試用 / For tests. */
+export function setReplenishmentDepsForTesting(r?: ReplenishmentRepo, s?: ReplenishmentScheduler): void {
+  replenishments = r;
+  scheduler = s;
 }

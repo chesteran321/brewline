@@ -16,6 +16,7 @@ import { LambdaGuardrailsChecker } from '../aspects/lambda-guardrails';
 import { ApiSettings, EnvName, LambdaSettings } from '../config';
 import { BrewlineFunction, SERVICES_ROOT } from '../constructs/brewline-function';
 import { OrderTimeoutWorkflow } from '../constructs/order-timeout-workflow';
+import { Replenishment } from '../constructs/replenishment';
 import { TenantAccessRole } from '../constructs/tenant-access-role';
 import { EventsStack } from './events-stack';
 import { notifyAlarms } from './ops-stack';
@@ -164,6 +165,17 @@ export class ApiStack extends Stack {
     const putContact = orderFn('PutContact', 'put-contact', 'contact-put', "PUT /tenant/contact: replace own tenant's contact (field-level KMS)");
     for (const f of [getContact, putContact]) f.function.addEnvironment('KMS_KEY_ARN', keyArn);
 
+    // --- 3b-3) 定期補貨（A4e，ADR-029 D6）/ Recurring replenishment ---
+    const replenishment = new Replenishment(this, 'Replenishment', {
+      envName,
+      lambda: props.lambda,
+      tableName,
+      busName: param(`${EventsStack.parameterPrefix(envName)}/bus-name`),
+      busArn: param(`${EventsStack.parameterPrefix(envName)}/bus-arn`),
+      tenantAccess: this.tenantAccess,
+      apiConcurrency: props.lambda.reservedConcurrency.api,
+    });
+
     // --- 3c) staff 訂單函數（A3c，ADR-027）/ Staff order functions ---
     // 跨租戶，但**不扮演租戶角色**（角色名稱由 CloudFormation 產生，不符合 orders-*，信任政策不接受）。
     // Cross-tenant, but they never assume the tenant role (generated role names do not match orders-*).
@@ -256,6 +268,9 @@ export class ApiStack extends Stack {
       [apigwv2.HttpMethod.GET, '/orders/{id}', getOrder, SCOPES.ordersRead],
       [apigwv2.HttpMethod.GET, '/tenant/contact', getContact, SCOPES.profileRead],
       [apigwv2.HttpMethod.PUT, '/tenant/contact', putContact, SCOPES.profileWrite],
+      [apigwv2.HttpMethod.POST, '/replenishments', replenishment.createFn, SCOPES.ordersWrite],
+      [apigwv2.HttpMethod.GET, '/replenishments', replenishment.listFn, SCOPES.ordersRead],
+      [apigwv2.HttpMethod.DELETE, '/replenishments/{id}', replenishment.deleteFn, SCOPES.ordersWrite],
       [apigwv2.HttpMethod.GET, '/admin/orders', adminList, SCOPES.admin],
       [apigwv2.HttpMethod.GET, '/admin/tenants/{tenantId}/orders/{orderId}', adminGet, SCOPES.admin],
       [apigwv2.HttpMethod.PATCH, '/admin/tenants/{tenantId}/orders/{orderId}', adminUpdate, SCOPES.admin],
@@ -366,6 +381,16 @@ export class ApiStack extends Stack {
           conditions: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': SMOKE_TENANTS.map((t) => `TENANT#${t}`) } },
         }),
       );
+      // A4e：確認排程建立／刪除，並清掉中斷留下的測試排程（只限補貨群組）
+      // Check replenishment schedules and clean up leftovers (replenish group only).
+      const smokeSchedules = `arn:aws:scheduler:${this.region}:${this.account}:schedule/${Replenishment.groupName(envName)}/*`;
+      smokeFn.role.addToPolicy(
+        new iam.PolicyStatement({ sid: 'CheckReplenishSchedules', actions: ['scheduler:GetSchedule', 'scheduler:DeleteSchedule'], resources: [smokeSchedules] }),
+      );
+      Validations.of(smokeFn.role).acknowledge({
+        id: `AwsSolutions-IAM5[Resource::arn:aws:scheduler:${this.region}:${this.account}:schedule/${Replenishment.groupName(envName)}/*]`,
+        reason: 'Smoke test checks and cleans up throwaway replenishment schedules in the replenish group only.',
+      });
       smokeFn.role.addToPolicy(denyScan);
       smokeFn.role.addToPolicy(kmsViaDynamo(['kms:Decrypt', 'kms:Encrypt', 'kms:GenerateDataKey']));
       const smoke = new CustomResource(this, 'SmokeTestRun', {
@@ -377,12 +402,13 @@ export class ApiStack extends Stack {
           ClientId: smokeClientId,
           ProductId: SMOKE_PRODUCT_ID,
           OrderProductId: SMOKE_ORDER_PRODUCT_ID,
+          ScheduleGroup: Replenishment.groupName(envName),
           TableName: tableName,
           Commit: props.commitSha, // 每次部署都不同 → 每次都執行 / changes every deploy → always runs
         },
       });
       // 路由、stage、種子都就緒後才測 / Run only after routes, stage and seed exist.
-      smoke.node.addDependency(stage, seed, ...routeConstructs);
+      smoke.node.addDependency(stage, seed, ...routeConstructs, replenishment);
       new CfnOutput(this, 'SmokeTestSummary', { value: smoke.getAttString('Summary') });
     }
 
@@ -402,6 +428,8 @@ export class ApiStack extends Stack {
     notifyAlarms(this, envName); // A4b：工作流告警接上維運主題 / workflow alarms → ops topic
     new CfnOutput(this, 'OrderLifecycleStateMachineArn', { value: this.orderTimeout.stateMachine.stateMachineArn });
     new CfnOutput(this, 'OrderTimeoutDlqUrl', { value: this.orderTimeout.dlq.queueUrl });
+    new CfnOutput(this, 'ReplenishDlqUrl', { value: replenishment.dlq.queueUrl });
+    new CfnOutput(this, 'ReplenishFunctionName', { value: replenishment.runFunction.function.functionName });
 
     // --- 7) Dev 訂單測試（手動觸發，A2b-2）/ Dev order tests (manual) ---
     if (props.api.orderTests) {
@@ -426,8 +454,18 @@ export class ApiStack extends Stack {
           ORDER_TIMEOUT_SECONDS: String(props.api.orderTimeoutSeconds),
           // KMS 探測（A4c）只用租戶憑證；函數角色本身不能直接用金鑰 / KMS probes use tenant credentials only.
           KMS_KEY_ARN: keyArn,
+          // A4e replenish-check：發布 ReplenishmentFailed 讓通知函數寄信 / Publishes ReplenishmentFailed for the e-mail test.
+          BUS_NAME: param(`${EventsStack.parameterPrefix(envName)}/bus-name`),
         },
       });
+      testFn.role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'PublishReplenishmentFailed',
+          actions: ['events:PutEvents'],
+          resources: [param(`${EventsStack.parameterPrefix(envName)}/bus-arn`)],
+          conditions: { StringEquals: { 'events:source': 'brewline.ordering', 'events:detail-type': 'ReplenishmentFailed' } },
+        }),
+      );
       this.tenantAccess.grantAssume(testFn.role);
       // 夾具權限：只限測試商品 p-9001 與兩個固定測試租戶（完全比對）
       // Fixture permissions: the p-9001 test product and two fixed test tenants only (exact keys).
@@ -457,7 +495,8 @@ export class ApiStack extends Stack {
     new CfnOutput(this, 'TenantAccessRoleArn', { value: this.tenantAccess.role.roleArn });
     new CfnOutput(this, 'ApiId', { value: this.httpApi.apiId });
     new CfnOutput(this, 'FunctionNames', {
-      value: [listProducts, getProduct, getStock, createOrder, listOrders, getOrder, getContact, putContact, adminList, adminGet, adminUpdate]
+      value: [listProducts, getProduct, getStock, createOrder, listOrders, getOrder, getContact, putContact,
+        replenishment.createFn, replenishment.listFn, replenishment.deleteFn, adminList, adminGet, adminUpdate]
         .map((f) => f.function.functionName)
         .join(','),
     });

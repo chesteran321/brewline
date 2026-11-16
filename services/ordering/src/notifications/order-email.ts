@@ -9,10 +9,10 @@ import { TENANT_ID_PATTERN } from '../../../identity/src/scopes';
  * Only four kinds: created, confirmed, shipped, cancelled. The body carries order facts and the recipient's name only.
  */
 
-export const NOTIFY_KINDS = ['created', 'confirmed', 'shipped', 'cancelled'] as const;
+export const NOTIFY_KINDS = ['created', 'confirmed', 'shipped', 'cancelled', 'replenish_failed'] as const;
 export type NotifyKind = (typeof NOTIFY_KINDS)[number];
 
-const STATUS_KIND: Record<string, NotifyKind> = { CONFIRMED: 'confirmed', SHIPPED: 'shipped', CANCELLED: 'cancelled' };
+const STATUS_KIND: Record<string, Exclude<NotifyKind, 'replenish_failed'>> = { CONFIRMED: 'confirmed', SHIPPED: 'shipped', CANCELLED: 'cancelled' };
 
 /** EventBridge detail（A3b 的白名單欄位）/ The allow-listed detail published by the stream publisher. */
 export const OrderEventDetailSchema = z.object({
@@ -29,13 +29,50 @@ export const OrderEventDetailSchema = z.object({
 export type OrderEventDetail = z.infer<typeof OrderEventDetailSchema>;
 
 /** 依事件決定要寄哪一種信；不需要寄 → undefined / Which e-mail (if any) an event triggers. */
-export function kindOf(detailType: string, detail: Pick<OrderEventDetail, 'status'>): NotifyKind | undefined {
+export function kindOf(detailType: string, detail: Pick<OrderEventDetail, 'status'>): Exclude<NotifyKind, 'replenish_failed'> | undefined {
   if (detailType === 'OrderCreated') return 'created';
   if (detailType === 'OrderStatusChanged') return STATUS_KIND[detail.status];
   return undefined;
 }
 
-const LABEL: Record<NotifyKind, { zh: string; en: string }> = {
+/** 定期補貨失敗（A4e，ADR-029 D6）/ A replenishment that could not be placed. */
+export const ReplenishmentFailedDetailSchema = z.object({
+  event_id: z.string().min(1).max(128),
+  occurred_at: z.string(),
+  tenant_id: z.string().regex(TENANT_ID_PATTERN),
+  replenishment_id: z.string().regex(/^r_[0-9A-HJKMNP-TV-Z]{26}$/),
+  scheduled_date: z.string(),
+  reason: z.enum(['insufficient_stock', 'unknown_products']),
+  product_ids: z.array(z.string()).max(25).default([]),
+});
+export type ReplenishmentFailedDetail = z.infer<typeof ReplenishmentFailedDetailSchema>;
+
+export function buildReplenishFailedEmail(detail: ReplenishmentFailedDetail, recipientName: string, envName: string): EmailContent {
+  const tag = envName === 'prod' ? '[BrewLine Demo]' : `[BrewLine Demo ${envName}]`;
+  const why =
+    detail.reason === 'insufficient_stock'
+      ? ['庫存不足，這次沒有建立訂單，也沒有預留任何庫存。', 'Not enough stock: no order was placed and nothing was reserved.']
+      : ['部分商品已下架，這次沒有建立訂單。', 'Some products are no longer available: no order was placed.'];
+  const text = [
+    `${recipientName} 您好 / Hello ${recipientName},`,
+    '',
+    `您的定期補貨 ${detail.replenishment_id}（${detail.scheduled_date}）未能下單。`,
+    `Your recurring replenishment ${detail.replenishment_id} (${detail.scheduled_date}) could not be placed.`,
+    '',
+    ...why,
+    ...(detail.product_ids.length ? ['', '商品 Products:', ...detail.product_ids.map((p) => `  - ${p}`)] : []),
+    '',
+    '系統不會自動重試；下一次排定時間會照常執行，您也可以手動下單。',
+    'It will not be retried; the next scheduled run proceeds as usual, or you can order manually.',
+    '',
+    '—',
+    'BrewLine 是 AWS Solutions Architect 作品集的示範系統，非真實交易。',
+    'BrewLine is a demo system for an AWS Solutions Architect portfolio; no real transaction took place.',
+  ].join('\n');
+  return { subject: `${tag} 定期補貨未下單 / Replenishment not placed: ${detail.replenishment_id}`, text };
+}
+
+const LABEL: Record<Exclude<NotifyKind, 'replenish_failed'>, { zh: string; en: string }> = {
   created: { zh: '已建立', en: 'received' },
   confirmed: { zh: '已確認', en: 'confirmed' },
   shipped: { zh: '已出貨', en: 'shipped' },
@@ -53,7 +90,7 @@ export interface EmailContent {
   readonly text: string;
 }
 
-export function buildEmail(kind: NotifyKind, detail: OrderEventDetail, recipientName: string, envName: string): EmailContent {
+export function buildEmail(kind: Exclude<NotifyKind, 'replenish_failed'>, detail: OrderEventDetail, recipientName: string, envName: string): EmailContent {
   const label = LABEL[kind];
   const tag = envName === 'prod' ? '[BrewLine Demo]' : `[BrewLine Demo ${envName}]`;
   const lines = detail.items.map((i) => `  - ${i.product_id} × ${i.qty_kg} kg`);

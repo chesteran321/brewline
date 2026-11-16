@@ -63,8 +63,9 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | staff 訂單（ADR-027） | `GET /admin/orders?status=`、`GET`／`PATCH /admin/tenants/{tenantId}/orders/{orderId}`（`brewline/admin`）；狀態機在 `order-lifecycle.ts`；一個交易＝訂單（條件：原狀態）＋庫存（SHIPPED 消耗、CANCELLED 釋放）；staff 函數**不扮演**租戶角色 |
 | 逾時取消（ADR-028） | `OrderCreated` → Standard `brewline-<env>-order-lifecycle`：Wait（Dev 10 分／Prod 48 小時）→ 仍是 CREATED 就取消並釋放庫存（`system:timeout`）；冪等靠條件寫入，不靠執行名稱 |
 | 聯絡人（A4c） | `GET`／`PUT /tenant/contact`（`profile.read`／`profile.write`，**只有 cafe**）；`TENANT#<t>`／`CONTACT#primary`；`name`、`email`、`phone`、`address` 逐欄 KMS 加密，context `{tenant_id, field}`；租戶角色只能用自己的 `tenant_id` context（ADR-029 D2）；**日誌不得記錄聯絡人內容** |
+| 定期補貨（A4e） | `POST`／`GET /replenishments`、`DELETE /replenishments/{id}`（沿用 `orders.write`／`orders.read`）；`TENANT#<t>`／`REPL#<ULID>` 是正本，Scheduler 群組 `brewline-<env>-replenish`、排程 `<tenant_id>-<replenishment_id>`、台北 09:00；每租戶 ≤ 5；刪除＝軟刪除（租戶角色沒有 DeleteItem）；執行函數 `brewline-<env>-ordering-replenish`（角色 `orders-replenish`）重用下單程式，冪等鍵＝補貨 ID＋台北日期；庫存不足 → `ReplenishmentFailed` → 寄信、不重試 |
 | 測試商品 | Dev 專用 `p-9001`（併發）、`p-9002`（smoke），不設 `gsi1pk` → 不在目錄 |
-| 訂單測試 | Dev 手動：`infra/app/scripts/run-order-tests.sh`（冪等風暴、搶庫存、IAM 探測；函數 `brewline-dev-ordering-order-tests`） |
+| 訂單測試 | Dev 手動：`infra/app/scripts/run-order-tests.sh`（冪等風暴、搶庫存、IAM 探測；函數 `brewline-dev-ordering-order-tests`）；其他模式 `timeout-setup`／`timeout-check`、`notify-setup`、`replenish-check`、`cleanup`（Email 只放 invoke payload） |
 | 合約 | `api/openapi.yaml` |
 
 ### 事件層 / Event layer（ADR-026）
