@@ -42,7 +42,7 @@ check "Public allow statements" "$(jq '[.Statement[] | select(.Effect == "Allow"
 alarms=$(aws cloudwatch describe-alarms --alarm-name-prefix "brewline-${env_name}-" --region "$region" --output json)
 total=$(jq '.MetricAlarms | length' <<<"$alarms")
 wired=$(jq --arg t "$topic" '[.MetricAlarms[] | select((.AlarmActions | index($t)) and (.OKActions | index($t)))] | length' <<<"$alarms")
-check "Alarms (brewline-${env_name}-*)" "$total" "6"
+check "Alarms (brewline-${env_name}-*)" "$total" "7"
 check "Alarms notifying the topic (ALARM + OK)" "$wired" "$total"
 
 rule=$(aws events describe-rule --name "brewline-${env_name}-stock-low" --event-bus-name "brewline-${env_name}" --region "$region" --output json)

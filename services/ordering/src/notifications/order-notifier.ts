@@ -2,7 +2,16 @@ import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
 import type { EventBridgeEvent } from 'aws-lambda';
 import { ContactRepo } from '../lib/contact-repo';
 import { contactRepo, logger, tenantDocClient, tracer } from '../lib/runtime';
-import { OrderEventDetailSchema, buildEmail, isReservedRecipient, kindOf } from './order-email';
+import {
+  EmailContent,
+  NotifyKind,
+  OrderEventDetailSchema,
+  ReplenishmentFailedDetailSchema,
+  buildEmail,
+  buildReplenishFailedEmail,
+  isReservedRecipient,
+  kindOf,
+} from './order-email';
 import { NotifyMarkerRepo } from './notify-marker-repo';
 
 /**
@@ -46,15 +55,37 @@ export type NotifyOutcome =
 
 export async function notify(event: Pick<EventBridgeEvent<string, unknown>, 'detail-type' | 'detail'>, d: NotifierDeps): Promise<NotifyOutcome> {
   const now = d.now ?? (() => new Date());
-  const parsed = OrderEventDetailSchema.safeParse(event.detail);
-  if (!parsed.success) {
-    logger.warn('invalid order event', { detail_type: event['detail-type'] });
-    return 'invalid_event';
+  // 兩種事件：訂單（A4d）與定期補貨失敗（A4e）。統一成「租戶、事件、參照 ID、怎麼產生信件」。
+  // Two event families, normalized to tenant, event id, reference id and an e-mail builder.
+  let target: { tenant_id: string; event_id: string; ref_id: string; kind: NotifyKind; build: (name: string) => EmailContent };
+  if (event['detail-type'] === 'ReplenishmentFailed') {
+    const p = ReplenishmentFailedDetailSchema.safeParse(event.detail);
+    if (!p.success) {
+      logger.warn('invalid replenishment event', { detail_type: event['detail-type'] });
+      return 'invalid_event';
+    }
+    const detail = p.data;
+    target = {
+      tenant_id: detail.tenant_id,
+      event_id: detail.event_id,
+      ref_id: detail.replenishment_id,
+      kind: 'replenish_failed',
+      build: (name) => buildReplenishFailedEmail(detail, name, d.envName),
+    };
+  } else {
+    const parsed = OrderEventDetailSchema.safeParse(event.detail);
+    if (!parsed.success) {
+      logger.warn('invalid order event', { detail_type: event['detail-type'] });
+      return 'invalid_event';
+    }
+    const detail = parsed.data;
+    const kind = kindOf(event['detail-type'], detail);
+    if (!kind) return 'not_notified';
+    target = { tenant_id: detail.tenant_id, event_id: detail.event_id, ref_id: detail.order_id, kind, build: (name) => buildEmail(kind, detail, name, d.envName) };
   }
-  const detail = parsed.data;
-  const kind = kindOf(event['detail-type'], detail);
-  if (!kind) return 'not_notified';
-  const log = { tenant_id: detail.tenant_id, order_id: detail.order_id, event_id: detail.event_id, kind };
+  const detail = { tenant_id: target.tenant_id, event_id: target.event_id, order_id: target.ref_id };
+  const kind = target.kind;
+  const log = { tenant_id: detail.tenant_id, ref_id: detail.order_id, event_id: detail.event_id, kind };
 
   const claim = await d.markers.claim(detail.tenant_id, detail.event_id, kind, detail.order_id, now());
   if (claim === 'done') {
@@ -84,7 +115,7 @@ export async function notify(event: Pick<EventBridgeEvent<string, unknown>, 'det
     return 'skipped_reserved';
   }
 
-  const mail = buildEmail(kind, detail, contact.name, d.envName);
+  const mail = target.build(contact.name);
   try {
     const out = await d.ses.send(
       new SendEmailCommand({

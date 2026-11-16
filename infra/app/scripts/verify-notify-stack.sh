@@ -100,7 +100,7 @@ send_from=$(for p in $(aws iam list-role-policies --role-name "$role" --query 'P
   done | jq -s -r '[.[][] | select(.Sid == "SendOrderMail") | .Condition.StringEquals["ses:FromAddress"]] | first')
 check "SES SendEmail pinned to From" "$send_from" "orders@${domain}"
 
-for rule in mail-order-created mail-order-status; do
+for rule in mail-order-created mail-order-status mail-replenish-failed; do
   name="brewline-${env_name}-${rule}"
   check "Rule $rule state" "$(aws events describe-rule --name "$name" --event-bus-name "brewline-${env_name}" --region "$region" \
     --query State --output text)" "ENABLED"

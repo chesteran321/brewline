@@ -46,14 +46,18 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   const { app, stack, template } = buildApp(envName);
   const cfg = ENVIRONMENTS[envName];
 
-  test('HTTP API with eleven routes, all JWT + scope', () => {
+  test('HTTP API with fourteen routes, all JWT + scope', () => {
     template.resourceCountIs('AWS::ApiGatewayV2::Api', 1);
     const routes = Object.fromEntries(resources(template, 'AWS::ApiGatewayV2::Route').map(([, r]) => [r.Properties.RouteKey, r.Properties]));
     expect(Object.keys(routes).sort()).toEqual([
       'GET /admin/orders', 'GET /admin/products/{id}/stock', 'GET /admin/tenants/{tenantId}/orders/{orderId}',
       'GET /orders', 'GET /orders/{id}', 'GET /products', 'GET /products/{id}',
-      'GET /tenant/contact', 'PATCH /admin/tenants/{tenantId}/orders/{orderId}', 'POST /orders', 'PUT /tenant/contact',
-    ]);
+      'DELETE /replenishments/{id}', 'GET /replenishments', 'GET /tenant/contact', 'PATCH /admin/tenants/{tenantId}/orders/{orderId}',
+      'POST /orders', 'POST /replenishments', 'PUT /tenant/contact',
+    ].sort());
+    expect(routes['POST /replenishments']).toMatchObject({ AuthorizationScopes: ['brewline/orders.write'] });
+    expect(routes['GET /replenishments']).toMatchObject({ AuthorizationScopes: ['brewline/orders.read'] });
+    expect(routes['DELETE /replenishments/{id}']).toMatchObject({ AuthorizationScopes: ['brewline/orders.write'] });
     expect(routes['GET /tenant/contact']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/profile.read'] });
     expect(routes['PUT /tenant/contact']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/profile.write'] });
     // staff 端點只接受 admin scope / Staff endpoints need the admin scope.
@@ -161,6 +165,37 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
       const [[, fn]] = resources(template, 'AWS::Lambda::Function').filter(([, r]) => r.Properties.FunctionName === `brewline-${envName}-ordering-${name}`) as [[string, Res]];
       expect(JSON.stringify(fn.Properties.Environment.Variables.KMS_KEY_ARN)).toContain('datakmskeyarn');
     }
+  });
+
+  test('replenishment (A4e): orders-* roles without data access; scheduler perms scoped to the group; run publishes one event type', () => {
+    const group = `brewline-${envName}-replenish`;
+    template.hasResourceProperties('AWS::Scheduler::ScheduleGroup', { Name: group });
+    const schedArn = `arn:aws:scheduler:ap-east-2:${cfg.account}:schedule/${group}/*`;
+    for (const [name, suffix] of [['create-replenishment', 'repl-create'], ['list-replenishments', 'repl-list'], ['delete-replenishment', 'repl-delete'], ['replenish', 'replenish']] as const) {
+      const fnName = `brewline-${envName}-ordering-${name}`;
+      const [[, fn]] = resources(template, 'AWS::Lambda::Function').filter(([, r]) => r.Properties.FunctionName === fnName) as [[string, Res]];
+      expect(template.toJSON().Resources[fn.Properties.Role['Fn::GetAtt'][0]].Properties.RoleName).toBe(`brewline-${envName}-orders-${suffix}`);
+      const actions = statementsFor(template, fnName).filter((x) => x.Effect === 'Allow').flatMap((x) => [].concat(x.Action));
+      expect(actions.filter((a: string) => a.startsWith('dynamodb:') || a.startsWith('kms:'))).toEqual([]);
+    }
+    const create = statementsFor(template, `brewline-${envName}-ordering-create-replenishment`);
+    expect(create.find((x) => x.Sid === 'CreateSchedule')).toMatchObject({ Action: 'scheduler:CreateSchedule', Resource: schedArn });
+    expect(create.find((x) => x.Sid === 'PassSchedulerRole').Condition).toEqual({ StringEquals: { 'iam:PassedToService': 'scheduler.amazonaws.com' } });
+    expect(statementsFor(template, `brewline-${envName}-ordering-delete-replenishment`).find((x) => x.Sid === 'DeleteSchedule'))
+      .toMatchObject({ Action: 'scheduler:DeleteSchedule', Resource: schedArn });
+    // 反向：list 不能動排程 / Negative: list cannot touch schedules.
+    expect(statementsFor(template, `brewline-${envName}-ordering-list-replenishments`).flatMap((x) => [].concat(x.Action))
+      .filter((a: string) => a.startsWith('scheduler:') || a === 'iam:PassRole')).toEqual([]);
+    const run = statementsFor(template, `brewline-${envName}-ordering-replenish`).find((x) => x.Sid === 'PublishReplenishmentFailed');
+    expect(run.Condition).toEqual({ StringEquals: { 'events:source': 'brewline.ordering', 'events:detail-type': 'ReplenishmentFailed' } });
+    // Scheduler 角色：只有這個帳號、這個群組的排程能扮演 / Only this account's group schedules may assume it.
+    const [role] = resources(template, 'AWS::IAM::Role').filter(([, r]) => r.Properties.RoleName === `brewline-${envName}-replenish-scheduler`);
+    expect(role![1].Properties.AssumeRolePolicyDocument.Statement[0]).toMatchObject({
+      Principal: { Service: 'scheduler.amazonaws.com' },
+      Condition: { StringEquals: { 'aws:SourceAccount': cfg.account }, ArnLike: { 'aws:SourceArn': schedArn } },
+    });
+    template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', { MaximumRetryAttempts: 2 });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: `brewline-${envName}-replenish-dlq-not-empty`, AlarmActions: Match.anyValue() });
   });
 
   test('staff order functions (A3c): never orders-* roles; tenant keys, status index, stock attributes only', () => {
@@ -289,7 +324,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
       expect(s.Properties).toMatchObject({ ProductId: 'p-0001', OrderProductId: 'p-9002', Commit: 'abc1234' });
       expect(s.DependsOn).toEqual(expect.arrayContaining(['CatalogSeed']));
       expect(s.DependsOn!.some((d) => d.startsWith('DefaultStage'))).toBe(true);
-      expect(s.DependsOn!.filter((d) => /^HttpApi(GET|POST|PUT|PATCH)/.test(d) && !d.includes('Integration'))).toHaveLength(11);
+      expect(s.DependsOn!.filter((d) => /^HttpApi(GET|POST|PUT|PATCH|DELETE)/.test(d) && !d.includes('Integration'))).toHaveLength(14);
       // 只能管理這個 pool 的使用者 / User management limited to this pool.
       const st = statementsFor(template, `brewline-${envName}-ordering-smoke-a1`);
       const cognito = st.find((x) => x.Sid === 'ManageThrowawayUsers');
@@ -314,7 +349,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   test('all first-party Lambdas follow the standard; provider framework functions are explicitly exempt', () => {
     const fns = resources(template, 'AWS::Lambda::Function');
     const ours = fns.filter(([, r]) => String(r.Properties.FunctionName ?? '').startsWith(`brewline-${envName}-`));
-    expect(ours).toHaveLength(13 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
+    expect(ours).toHaveLength(17 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
     for (const [, r] of ours) {
       expect(r.Properties).toMatchObject({ Runtime: 'nodejs24.x', Architectures: ['arm64'], TracingConfig: { Mode: 'Active' } });
     }

@@ -232,6 +232,14 @@ export class NotifyStack extends Stack {
       targets: [target],
     });
 
+    new events.Rule(this, 'ReplenishFailedRule', {
+      eventBus: bus,
+      ruleName: `brewline-${envName}-mail-replenish-failed`,
+      description: 'ReplenishmentFailed → e-mail to the tenant contact (ADR-029 D6)',
+      eventPattern: { source: ['brewline.ordering'], detailType: ['ReplenishmentFailed'] },
+      targets: [target],
+    });
+
     // --- 8) 告警 / Alarms ---
     new cloudwatch.Alarm(this, 'NotifyDlqAlarm', {
       alarmName: `brewline-${envName}-notify-dlq-not-empty`,

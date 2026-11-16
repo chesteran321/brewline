@@ -4,7 +4,7 @@
 openapi: 3.1.0
 info:
   title: BrewLine Ordering API
-  version: 0.4.0-a4c
+  version: 0.5.0-a4e
   description: |
     驗證：Cognito access token（`Authorization: Bearer <token>`）。授權以 OAuth scope 在 API Gateway 執行，
     越權請求回 403，不會叫起 Lambda（ADR-022）。ID token 沒有 scope，會被拒絕。
@@ -195,6 +195,62 @@ paths:
         '400':
           description: '`invalid_contact`，`fields` 列出有問題的欄位路徑（不回傳欄位值）/ Field paths only, never values'
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /replenishments:
+    post:
+      operationId: createReplenishment
+      summary: 建立定期補貨 / Create a recurring replenishment
+      description: |
+        每週、雙週或每月，台北時間 09:00 自動下單（ADR-029 D6）。每租戶最多 5 筆。品項規則與 POST /orders 相同。
+        Places the order automatically at 09:00 Asia/Taipei. At most 5 per tenant; same line rules as POST /orders.
+      security:
+        - cognito: [brewline/orders.write]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ReplenishmentInput' } } }
+      responses:
+        '201':
+          description: 已建立（排程也已建立）/ Created, schedule included
+          content: { application/json: { schema: { $ref: '#/components/schemas/Replenishment' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: 已達上限（`limit_reached`）/ Limit reached
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    get:
+      operationId: listReplenishments
+      summary: 自己租戶的定期補貨 / Own tenant's replenishments
+      security:
+        - cognito: [brewline/orders.read]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Replenishment' } }
+                  limit: { type: integer, example: 5 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /replenishments/{id}:
+    delete:
+      operationId: deleteReplenishment
+      summary: 刪除定期補貨（冪等）/ Delete a replenishment (idempotent)
+      description: 不存在或屬於別的租戶也回 204 / 204 even when missing or another tenant's.
+      security:
+        - cognito: [brewline/orders.write]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, pattern: '^r_[0-9A-HJKMNP-TV-Z]{26}$' }
+      responses:
+        '204': { description: 已刪除 / Deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /admin/orders:
@@ -420,6 +476,33 @@ components:
           required: [updated_at]
           properties:
             updated_at: { type: string, format: date-time }
+    ReplenishmentInput:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [frequency, day_of_week, items]
+          properties:
+            frequency: { type: string, enum: [weekly, biweekly] }
+            day_of_week: { type: string, enum: [MON, TUE, WED, THU, FRI, SAT, SUN] }
+            items: { $ref: '#/components/schemas/CreateOrderRequest/properties/items' }
+        - type: object
+          additionalProperties: false
+          required: [frequency, day_of_month, items]
+          properties:
+            frequency: { type: string, enum: [monthly] }
+            day_of_month: { type: integer, minimum: 1, maximum: 28 }
+            items: { $ref: '#/components/schemas/CreateOrderRequest/properties/items' }
+    Replenishment:
+      type: object
+      required: [replenishment_id, frequency, items, run_at, created_at]
+      properties:
+        replenishment_id: { type: string, pattern: '^r_[0-9A-HJKMNP-TV-Z]{26}$' }
+        frequency: { type: string, enum: [weekly, biweekly, monthly] }
+        day_of_week: { type: string }
+        day_of_month: { type: integer }
+        items: { $ref: '#/components/schemas/CreateOrderRequest/properties/items' }
+        run_at: { type: string, example: '09:00 Asia/Taipei' }
+        created_at: { type: string, format: date-time }
     Error:
       type: object
       properties:
