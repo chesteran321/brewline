@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）、A3d（逾時取消）完成，**訂貨 A3 完成**；A4a／A4b（CMK key policy＋維運告警 SNS）、A4c（聯絡人＋欄位層級加密）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）、A3d（逾時取消）完成，**訂貨 A3 完成**；A4a／A4b（CMK key policy＋維運告警 SNS）、A4c（聯絡人＋欄位層級加密）、A4d（SES 訂單通知信）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -53,6 +53,8 @@
   - ❌ AWS Config 實測**未記錄 `AWS::ApiGatewayV2::Api`／`Stage`**（自 11-09 列入記錄清單，API 已存在仍為 0 筆；CSPM `APIGateway.9` 為「無資料 0/0」）→ 推論台北不支援此類型
   - ⚠️ `put-configuration-recorder` 對不支援的類型**不會報錯**，只是不記錄 → 新增類型後一律用 `list-discovered-resources` 逐一確認
   - ✅ 已確認可用：Lambda、API Gateway、DynamoDB、Step Functions、EventBridge、Scheduler、SQS、SNS、SES、Cognito、S3、Firehose、Glue、Athena、SSM、KMS、X-Ray、CloudWatch、CodeDeploy、CloudFormation、Bedrock（模型清單需另查）、GuardDuty、Security Hub、Config、CloudTrail、Access Analyzer
+  - ⚠️ **服務可用 ≠ CloudFormation 支援**：CDK 內建區域資料（aws-cdk-lib 2.275.0）把 `AWS::SES::EmailIdentity`、`ConfigurationSet`、`ConfigurationSetEventDestination` 判為台北不支援（synth 錯誤 F3006）；2026-11-16 以 `aws cloudformation describe-type --region ap-east-2`（需 Admin，Developer 沒有 `cloudformation:DescribeType`）實測都存在 → 程式中 acknowledge。新增資源類型前都用 `describe-type` 實測。
+  - CloudShell **沒有**台北區域：在東京開 CloudShell，指令加 `--region ap-east-2`。
 
 ---
 
@@ -683,6 +685,32 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - （2026-11-16）CloudShell 的 `AWS_REGION` 跟著主控台右上角的區域；在東京區域開 CloudShell 時，腳本的 `${AWS_REGION:-ap-east-2}` 會用東京 → 先 `export AWS_REGION=ap-east-2` 或切換主控台區域。
 - 政策模擬（`simulate-principal-policy`）只算身分政策；真實憑證探測才涵蓋 key policy／SCP／RCP，兩者互補。
 
+### 10.14 訂單通知信 / Order E-mail（P1，2026-11-16，ADR-029 D1／D5，PR #41、#42、#43）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| 網域 | `dev.brewline-demo.click`（Dev 帳號 zone `Z00697733VLK1TK9WUYKL`，CDK 建立、Retain） | `brewline-demo.click`（Route 53 註冊：1 年、自動續約、隱私保護，到期 2027-11-16；zone `Z039360620HRFCTYO5R5J`） |
+| 委派 | — | NS `dev.brewline-demo.click` → Dev zone 4 個名稱伺服器（config `mail.delegations`，ADR-029 E2 兩階段） |
+| Stack | `brewline-dev-notify`（module `notifications`） | `brewline-prod-notify`（**終止保護**） |
+| SES 身分 | 網域、Easy DKIM 2048、MAIL FROM `mail.<網域>`（MX 失敗拒寄）；DMARC `p=quarantine; adkim=s; aspf=r` | 同左 |
+| Configuration set | `brewline-<env>-mail`：TLS REQUIRE、抑制 bounce／complaint；bounce／complaint／reject／rendering failure／delivery delay → `ops-alerts` | 同左 |
+| 通知函數 | `brewline-dev-notifications-order-notifier`，角色 `brewline-dev-orders-notify`（扮演租戶角色讀聯絡人＋KMS 解密；本身無 DynamoDB／KMS 權限）；`ses:SendEmail` 以 `ses:FromAddress` 鎖定；保留併發 1；非同步重試 2 次 → `notify-dlq`（告警） | 同左 |
+| 規則 | `mail-order-created`（`OrderCreated`）、`mail-order-status`（`status ∈ CONFIRMED/SHIPPED/CANCELLED`） | 同左 |
+| 沙盒 | 是；收件信箱手動驗證（Dev、Prod 各一次，不進 repo） | 是 |
+
+已驗證（2026-11-16）：
+- CI `verify-notify-stack.sh`：Prod DKIM／MAIL FROM `SUCCESS`、Verified for sending、公開 DNS 查得到 DMARC、`dev.` 委派記錄存在；Dev 在委派後 MAIL FROM 先 `SUCCESS`、DKIM 約 25 分鐘後 `SUCCESS`。
+- 手動：`dig` NS／DKIM CNAME（`…dkim.ap-east-2.amazonses.com`）查得到；收件信箱驗證前 `VerifiedForSendingStatus = false`、點連結後 `true`；格式錯誤的地址 → `BadRequestException`。
+- **端到端（Dev，`order-tests` 模式 `notify-setup`＋`timeout-check`）**：測試租戶 B 寫入聯絡人並下 2 筆單 → 收到 **4 封信**（已建立 ×2、已確認 ×1、10 分鐘後已取消 ×1，寄件人 `BrewLine (Demo) <orders@dev.brewline-demo.click>`）；逾時檢查 4/4（`system:timeout` 取消、已確認訂單不變、庫存 9/1），測試資料自動清除。
+
+教訓 / Lessons：
+- （2026-11-16）**Lambda 節流變成工作流失敗**：訂單測試一次建立 11 筆訂單，10 分鐘後逾時工作流同時到期；取消函數保留併發 2 → 7 筆 `Lambda.TooManyRequestsException`，CDK `retryOnServiceExceptions` 不含此錯誤 → 被 `Catch States.ALL` 變成 FAILED（訂單已刪除，無資料影響）。修正：對它重試 6 次＋full jitter（PR #42）。查證據用 `get-execution-history`；這種整合的事件是 `LambdaFunctionFailed`，不是 `TaskFailed`。
+- （2026-11-16）**CI 驗證範圍**：「24 小時內 FAILED = 0」會讓一次事件卡住之後 24 小時的每次部署 → 改為「這次部署之後」判定，24 小時只顯示；部署之間由告警負責。
+- （2026-11-16）**唯讀驗證角色讀不到 Lambda 環境變數值**（null）→ 驗證真正的控管（IAM `ses:FromAddress` 條件），環境變數交給單元測試（PR #43）。
+- （2026-11-16）DMARC：MAIL FROM 用子網域時要 `aspf=r`，`aspf=s` 會讓 SPF 永遠不一致。
+- （2026-11-16）SES DKIM：身分先建立、DNS 後補 → 首次檢查失敗後重試間隔拉長（Dev 約 25 分鐘）；建議先準備 DNS。
+- （2026-11-16）CloudShell：互動式 `read` 時剪貼簿的指令被貼進變數 → 用 `echo "[$VAR]"` 檢查；憑證服務偶爾回 500 → 重新整理或重新登入。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -702,7 +730,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22 |
 | ADR-024 | 租戶隔離：STS session tag ＋ `LeadingKeys` 完全比對 | Accepted（2026-11-13） | 訂單函數（`brewline-<env>-orders-*`）帶 `tenant_id` 扮演 `brewline-<env>-tenant-access`；商品只能改庫存欄位；Scan 明確 Deny（§10.8） |
 | ADR-025 | 下單交易與冪等 | Accepted（2026-11-13） | 冪等記錄＋訂單＋扣庫存在同一個交易；sk `ORDER#<ULID>`；伺服器端定價；≤ 25 個商品、1–500 kg；路由限流（§10.9） |
-| ADR-029 | 通知、聯絡人與定期補貨（A4 決策） | Accepted（2026-11-16） | Route 53 網域＋SES DKIM／MAIL FROM／DMARC；聯絡人欄位以 KMS＋encryption context 加密；SNS 用 CMK（key policy 授權服務）；每租戶一位聯絡人；只在建立／確認／出貨／取消寄信；Scheduler 定期補貨（§10.12） |
+| ADR-029 | 通知、聯絡人與定期補貨（A4 決策） | Accepted（2026-11-16） | Route 53 網域＋SES DKIM／MAIL FROM／DMARC；聯絡人欄位以 KMS＋encryption context 加密；SNS 用 CMK（key policy 授權服務）；每租戶一位聯絡人；只在建立／確認／出貨／取消寄信；Scheduler 定期補貨（§10.12、§10.13、§10.14） |
 | ADR-028 | 未確認訂單的逾時取消（Step Functions） | Accepted（2026-11-13） | OrderCreated → Standard 工作流等待（Dev 10 分／Prod 48 小時）→ 仍是 CREATED 就取消並釋放；冪等靠條件寫入（§10.11） |
 | ADR-027 | 訂單狀態機與 staff 端點 | Accepted（2026-11-13） | 狀態以 DynamoDB 為準；一個交易＝訂單（樂觀鎖：原狀態）＋庫存；staff 函數不扮演租戶角色、無 Put／Delete（§10.9） |
 | ADR-026 | 事件層：Streams → Lambda → EventBridge | Accepted（2026-11-13） | 台北沒有 Pipes／Archive；自訂 bus、白名單 detail、`event_id` 去重、Logs 規則留存、DLQ SSE-SQS（§10.10） |
@@ -789,13 +817,15 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-13 | 訂貨 A2b-2：Dev 訂單測試（冪等風暴、搶庫存、IAM 探測）17/17（§10.9，PR #25）；**A2 完成** |
 | ✅ 2026-11-13 | A3 決策：D1 Streams → Lambda → EventBridge；D2 狀態以 DynamoDB 為準、Step Functions 只做逾時取消；D5 逾時 Dev 10 分／Prod 48 小時；D6 咖啡廳自行取消延後；D7 先建告警、通知待 A4 |
 | ✅ 2026-11-13 | 訂貨 A3a Streams（§10.5，PR #27）、A3b 事件層（§10.10，PR #28、#29）部署 Dev、Prod 並驗證 |
-| 有空時 | Developer 權限集加上 EventBridge、Step Functions、SQS 唯讀（目前 `events:ListEventBuses` 被拒） |
+| 有空時 | Developer 權限集加上 EventBridge、Step Functions、SQS 唯讀（目前 `events:ListEventBuses` 被拒），以及 `cloudformation:DescribeType`（新區域資源類型檢查） |
 | ✅ 2026-11-13 | 訂貨 A3c：staff 端點＋狀態機部署 Dev、Prod 並驗證（§10.9，PR #31） |
 | ✅ 2026-11-16 | 訂貨 A3d：逾時取消工作流部署 Dev、Prod；Dev 端到端通過（§10.11，PR #33、#34）；**A3 完成** |
 | ✅ 2026-11-16 | A4 決策 D1–D7（ADR-029）；A4a key policy（PR #36）、A4b 維運通知（§10.12，PR #37）部署 Dev、Prod；Dev 端到端通過；Dev／Prod Email 訂閱已確認 |
 | ✅ 2026-11-16 | A4c 聯絡人＋欄位層級加密（§10.13，PR #39）部署 Dev、Prod；Dev smoke 68/68、訂單測試 25/25 |
-| 進行中 | 網域 `brewline-demo.click`（Prod，Route 53，1 年、自動續約、隱私保護）2026-11-16 送出註冊；待完成註冊並點擊聯絡人驗證信（15 天內） |
-| P1 | 下一步：A4d（SES 通知，需網域）→ A4e（定期補貨）→ 模擬器 → 溯源 |
+| ✅ 2026-11-16 | 網域 `brewline-demo.click` 註冊完成（ACTIVE、隱私保護、自動續約）；A4d 訂單通知信（§10.14，PR #41–#43）部署 Dev、Prod；Dev 端到端 4 封信＋逾時 4/4 |
+| 待確認 | 通知信的 Gmail「顯示原始郵件」SPF／DKIM／DMARC = PASS（預期：SPF `mail.dev.<網域>`、DKIM `dev.<網域>`） |
+| 2026-12-01 前 | 確認網域聯絡人驗證信已點擊（ICANN 15 天期限，否則網域停用） |
+| P1 | 下一步：A4e（定期補貨，Scheduler）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
