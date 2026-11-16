@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）、A3d（逾時取消）完成，**訂貨 A3 完成**；A4a／A4b（CMK key policy＋維運告警 SNS）、A4c（聯絡人＋欄位層級加密）、A4d（SES 訂單通知信）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）、A3d（逾時取消）完成，**訂貨 A3 完成**；A4a／A4b（CMK key policy＋維運告警 SNS）、A4c（聯絡人＋欄位層級加密）、A4d（SES 訂單通知信）、A4e（定期補貨）完成，**訂貨 A4 完成** / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -712,6 +712,29 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - （2026-11-16）SES DKIM：身分先建立、DNS 後補 → 首次檢查失敗後重試間隔拉長（Dev 約 25 分鐘）；建議先準備 DNS。
 - （2026-11-16）CloudShell：互動式 `read` 時剪貼簿的指令被貼進變數 → 用 `echo "[$VAR]"` 檢查；憑證服務偶爾回 500 → 重新整理或重新登入。
 
+### 10.15 定期補貨 / Recurring Replenishment（P1，2026-11-16，ADR-029 D6，PR #46、#47）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| 路由 | `POST`／`GET /replenishments`、`DELETE /replenishments/{id}`（`orders.write`／`orders.read`） | 同左 |
+| 資料 | `TENANT#<t>`／`REPL#<ULID>`（正本）；刪除＝軟刪除（`status=deleted`＋TTL 30 天） | 同左 |
+| 排程 | 群組 `brewline-dev-replenish`；排程 `<tenant_id>-<replenishment_id>`，`Asia/Taipei` 09:00，`FlexibleTimeWindow OFF`，重試 2 次＋DLQ | `brewline-prod-replenish` |
+| Scheduler 角色 | `brewline-dev-replenish-scheduler`：信任 `scheduler.amazonaws.com`，`aws:SourceAccount`＋`aws:SourceArn = schedule-group/brewline-dev-replenish`；只能 invoke 執行函數、寫 DLQ | 同左（prod） |
+| 函數 | API：角色 `orders-repl-{create,list,delete}`；執行：`brewline-dev-ordering-replenish`（角色 `orders-replenish`，`events:PutEvents` 只限 `ReplenishmentFailed`）；全部經租戶角色存取資料 | 同左 |
+| 告警 | `brewline-dev-replenish-dlq-not-empty` → `ops-alerts`（告警總數 7） | 同左 |
+
+已驗證（2026-11-16）：
+- **Dev smoke test 78/78**（新增 10 項：建立 201、排程存在且 `Asia/Taipei`／`cron(0 9 ? * MON *)`、列出、31 日 → 400、未知商品 → 400、staff → 403、B 看不到也刪不掉 A 的、第 6 筆 → 409、刪除後排程與項目都消失）。
+- CI（Dev、Prod）：14 條路由／14 個函數、排程群組 ACTIVE、Scheduler 角色信任、執行函數 DLQ、排程名稱格式、4 個新呼叫端角色只能經租戶角色、`mail-replenish-failed` 規則。
+- CloudTrail：修正前 6 次 `CreateSchedule` 全為 `ValidationException`，修正後全為成功。
+- **Dev `order-tests replenish-check` 10/10**（模擬觸發，租戶 B 真實憑證）：觸發下單、重送回同一張訂單（冪等）、庫存只預留一次（8/2）、已刪除與雙週休息週不下單、庫存不足 → `ReplenishmentFailed` 一次且不預留；`cleanup` 清除 9 個項目（含 3 筆 `NOTIFY#` 寄送記錄）。
+
+教訓 / Lessons：
+- （2026-11-16）**Scheduler 執行角色的 `aws:SourceArn` 必須是排程群組 ARN**（`schedule-group/<group>`），寫成 `schedule/<group>/*` 時 `CreateSchedule` 一律 `ValidationException: The execution role you provide must allow AWS EventBridge Scheduler to assume the role`。單元測試只比對自己寫的值，抓不到；Dev smoke test 失敗即 rollback 擋下，CloudTrail 提供確切錯誤（rollback 後函數日誌已隨 log group 刪除，CloudTrail 仍在）。
+- （2026-11-16）先查證據再修：第一個推測（IAM 傳播延遲）是錯的；若照推測加重試，只會讓每次失敗多等幾秒。
+- （2026-11-16）`aws lambda invoke` 只要呼叫成功就回 0；函數錯誤在輸出檔 → 加 `--query FunctionError`。
+- （2026-11-16）CloudShell `read` 與下一行一起貼上會把下一行讀進變數（今天 2 次）→ 個人環境直接賦值，並 `echo "[$VAR]"` 確認；測試函數的錯誤訊息拆成「缺 KMS_KEY_ARN」與「email 格式錯」。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -731,7 +754,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22 |
 | ADR-024 | 租戶隔離：STS session tag ＋ `LeadingKeys` 完全比對 | Accepted（2026-11-13） | 訂單函數（`brewline-<env>-orders-*`）帶 `tenant_id` 扮演 `brewline-<env>-tenant-access`；商品只能改庫存欄位；Scan 明確 Deny（§10.8） |
 | ADR-025 | 下單交易與冪等 | Accepted（2026-11-13） | 冪等記錄＋訂單＋扣庫存在同一個交易；sk `ORDER#<ULID>`；伺服器端定價；≤ 25 個商品、1–500 kg；路由限流（§10.9） |
-| ADR-029 | 通知、聯絡人與定期補貨（A4 決策） | Accepted（2026-11-16） | Route 53 網域＋SES DKIM／MAIL FROM／DMARC；聯絡人欄位以 KMS＋encryption context 加密；SNS 用 CMK（key policy 授權服務）；每租戶一位聯絡人；只在建立／確認／出貨／取消寄信；Scheduler 定期補貨（§10.12、§10.13、§10.14） |
+| ADR-029 | 通知、聯絡人與定期補貨（A4 決策） | Accepted（2026-11-16） | Route 53 網域＋SES DKIM／MAIL FROM／DMARC；聯絡人欄位以 KMS＋encryption context 加密；SNS 用 CMK（key policy 授權服務）；每租戶一位聯絡人；只在建立／確認／出貨／取消寄信；Scheduler 定期補貨（§10.12–§10.15）；**A4 全部完成** |
 | ADR-028 | 未確認訂單的逾時取消（Step Functions） | Accepted（2026-11-13） | OrderCreated → Standard 工作流等待（Dev 10 分／Prod 48 小時）→ 仍是 CREATED 就取消並釋放；冪等靠條件寫入（§10.11） |
 | ADR-027 | 訂單狀態機與 staff 端點 | Accepted（2026-11-13） | 狀態以 DynamoDB 為準；一個交易＝訂單（樂觀鎖：原狀態）＋庫存；staff 函數不扮演租戶角色、無 Put／Delete（§10.9） |
 | ADR-026 | 事件層：Streams → Lambda → EventBridge | Accepted（2026-11-13） | 台北沒有 Pipes／Archive；自訂 bus、白名單 detail、`event_id` 去重、Logs 規則留存、DLQ SSE-SQS（§10.10） |
@@ -825,7 +848,9 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-16 | A4c 聯絡人＋欄位層級加密（§10.13，PR #39）部署 Dev、Prod；Dev smoke 68/68、訂單測試 25/25 |
 | ✅ 2026-11-16 | 網域 `brewline-demo.click` 註冊完成（ACTIVE、隱私保護、自動續約）；A4d 訂單通知信（§10.14，PR #41–#43）部署 Dev、Prod；Dev 端到端 4 封信＋逾時 4/4 |
 | 2026-12-01 前 | 確認網域聯絡人驗證信已點擊（ICANN 15 天期限，否則網域停用） |
-| P1 | 下一步：A4e（定期補貨，Scheduler）→ 模擬器 → 溯源 |
+| ✅ 2026-11-16 | A4e 定期補貨（§10.15，PR #46、#47）部署 Dev、Prod；Dev smoke 78/78、`replenish-check` 10/10；**訂貨模組 A1–A4 完成** |
+| 待確認 | `replenish-check` 寄出的 3 封信（訂單已建立、定期補貨未下單、訂單已取消）是否都收到 |
+| P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
