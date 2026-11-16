@@ -214,7 +214,13 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       fromLocalPart: 'orders',
       fromName: 'BrewLine (Demo)',
       // Dev 第一次部署後，把輸出 MailZoneNameServers 的 4 個值貼到這裡 / Paste Dev's MailZoneNameServers here.
-      delegations: [{ subdomain: 'dev', nameServers: [] }],
+      delegations: [
+        {
+          subdomain: 'dev',
+          // brewline-dev-notify 輸出 MailZoneNameServers（2026-11-16，Dev zone Z00697733VLK1TK9WUYKL）
+          nameServers: ['ns-406.awsdns-50.com', 'ns-1983.awsdns-55.co.uk', 'ns-1160.awsdns-17.org', 'ns-970.awsdns-57.net'],
+        },
+      ],
     },
   },
 };

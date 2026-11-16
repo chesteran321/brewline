@@ -109,6 +109,17 @@ export class OrderTimeoutWorkflow extends Construct {
     });
     // 狀態剛好被改（conflict）或忙碌：指數退避重試 3 次（09 §2.3）/ Exponential backoff, 3 attempts.
     cancel.addRetry({ errors: ['RetryableError'], interval: Duration.seconds(10), maxAttempts: 3, backoffRate: 2 });
+    // 保留併發只有 2：同時到期的訂單一多（例如訂單測試一次 11 筆）就會被 Lambda 節流。
+    // retryOnServiceExceptions 不含 TooManyRequestsException → 自己加，含隨機抖動避免同時重試。
+    // Reserved concurrency is 2, so many orders expiring together get throttled; retryOnServiceExceptions does not
+    // cover TooManyRequestsException, so retry it with full jitter.
+    cancel.addRetry({
+      errors: ['Lambda.TooManyRequestsException'],
+      interval: Duration.seconds(5),
+      maxAttempts: 6,
+      backoffRate: 2,
+      jitterStrategy: sfn.JitterType.FULL,
+    });
     const failed = new sfn.Fail(this, 'CancelFailed', {
       error: 'OrderTimeoutCancelFailed',
       cause: 'Could not cancel the unconfirmed order; see the execution history and the function logs',
