@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）完成 / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）、A3d（逾時取消）完成，**訂貨 A3 完成** / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -623,6 +623,26 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - （2026-11-13）`targets.CloudWatchLogGroup` 會部署一個 AwsCustomResource Lambda 寫 log 資源政策（不符 Lambda 標準）→ 改用原生 `AWS::Logs::ResourcePolicy`。
 - （2026-11-13）`aws logs filter-log-events` 自動分頁，`--query` 逐頁套用：`length(events)` 印出 `2⏎0` → 驗證誤判、Prod 延後一次 → 改列 `eventId` 再 `wc -w`（PR #29）。同次另修正 DLQ ARN 的 regex。
 
+### 10.11 逾時取消工作流 / Order Timeout Workflow（P1，2026-11-13～16，ADR-028，PR #33、#34）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| 規則 | `brewline-dev-order-timeout`（bus `brewline-dev`，`source=brewline.ordering`、`OrderCreated`）；input 只有 `tenant_id`、`order_id`、`event_id`；DLQ `brewline-dev-order-timeout-dlq`（SSE-SQS），重試 3 次、最長 2 小時 | 同左 |
+| 狀態機 | `brewline-dev-order-lifecycle`（**Standard**）：`WaitForConfirmation` **600 秒** → `CancelIfStillCreated` → `Done`；`RetryableError` 重試 3 次（10 秒起、×2）；其他錯誤 → `CancelFailed`；X-Ray；log ALL、不含執行資料；整體逾時 = 等待 + 1 小時 | 等待 **172800 秒（48 小時）** |
+| 取消函數 | `brewline-dev-ordering-order-timeout`：重用 `AdminOrderRepo.transition`（`onlyFrom: CREATED`、`actor: system:timeout`）；角色由 CloudFormation 命名（不扮演租戶角色）；Get／Update `TENANT#*`、商品只改庫存欄位；無 Put／Delete／Query | 同左 |
+| 告警（無通知目標） | `brewline-dev-order-lifecycle-failed`、`brewline-dev-order-timeout-dlq-not-empty` | 同左 |
+
+- **冪等靠條件寫入，不靠執行名稱**：EventBridge 的 Step Functions 目標無法指定執行名稱（實際執行名稱為 EventBridge 產生的 UUID）。
+- 費用：Standard 每筆訂單約 4 次轉換（每月 4,000 次免費），`Wait` 期間不計費 → 約 0。
+
+已驗證：
+- CI（`verify-api-stack.sh`，PR #33 部署）：工作流類型、等待秒數、重試、logging、tracing、規則、DLQ 為空、24 小時內沒有 FAILED 的執行；Dev 有 smoke 訂單啟動的執行。
+- **端到端（Dev，2026-11-16，`order-tests` 的 `timeout-setup`／`timeout-check`）**：測試租戶 B 建立 X、Y，確認 Y（庫存 8／2）→ 10 分鐘後 **X = `CANCELLED`（`system:timeout`）、Y 仍是 `CONFIRMED`、庫存 9／1**，`passed: true`。
+- 附帶驗證（第一次嘗試）：工作流在建立後**剛好 10 分鐘**（01:39:56 → 01:49:58 UTC）執行；訂單已被刪除時回報 `not_found`，執行 `SUCCEEDED`，沒有失敗或重試。
+
+教訓 / Lessons：
+- （2026-11-16）第一次端到端測試時，`timeout-check` 在 setup 後 1 分鐘就被執行，失敗後在 `finally` **刪除了測試資料** → 真正的檢查讀不到資料。修正（PR #34）：逾時前執行回報 `too_early`、資料不存在回報 `data_missing`，兩種情況都不寫入；**只有全部通過才清理**，失敗時保留資料。原則：測試的清理不要放在 `finally`。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -642,6 +662,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22 |
 | ADR-024 | 租戶隔離：STS session tag ＋ `LeadingKeys` 完全比對 | Accepted（2026-11-13） | 訂單函數（`brewline-<env>-orders-*`）帶 `tenant_id` 扮演 `brewline-<env>-tenant-access`；商品只能改庫存欄位；Scan 明確 Deny（§10.8） |
 | ADR-025 | 下單交易與冪等 | Accepted（2026-11-13） | 冪等記錄＋訂單＋扣庫存在同一個交易；sk `ORDER#<ULID>`；伺服器端定價；≤ 25 個商品、1–500 kg；路由限流（§10.9） |
+| ADR-028 | 未確認訂單的逾時取消（Step Functions） | Accepted（2026-11-13） | OrderCreated → Standard 工作流等待（Dev 10 分／Prod 48 小時）→ 仍是 CREATED 就取消並釋放；冪等靠條件寫入（§10.11） |
 | ADR-027 | 訂單狀態機與 staff 端點 | Accepted（2026-11-13） | 狀態以 DynamoDB 為準；一個交易＝訂單（樂觀鎖：原狀態）＋庫存；staff 函數不扮演租戶角色、無 Put／Delete（§10.9） |
 | ADR-026 | 事件層：Streams → Lambda → EventBridge | Accepted（2026-11-13） | 台北沒有 Pipes／Archive；自訂 bus、白名單 detail、`event_id` 去重、Logs 規則留存、DLQ SSE-SQS（§10.10） |
 
@@ -649,7 +670,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 |---|---|---|---|---|
 | RSK-014 | 無 WAF，惡意流量只能靠限流與預算控制；execute-api 網址可被直接呼叫 | M | L | ADR-020 的分層控制；前端上線時加 CloudFront＋WAF，評估關閉 execute-api 預設端點 |
 | RSK-015 | 撤銷的帳號在 access token 到期前（≤ 15 分）仍可呼叫 API；staff MFA 無法由 Cognito 強制 | M | M | Token **15 分鐘**（A2a，原 60 分）；部署後驗證偵測 staff 未設 TOTP；A2 起高風險操作在 Lambda 再查使用者狀態 |
-| RSK-016 | A3 之前已預留的庫存不會自動釋放；單筆最多預留 500 kg，可能佔滿某商品 | M | M | 不開放註冊；路由限流；staff 監看 reserved；A3 加入取消與逾時釋放 |
+| RSK-016 | A3 之前已預留的庫存不會自動釋放；單筆最多預留 500 kg，可能佔滿某商品 | M | M | 不開放註冊；路由限流；**A3c staff 可取消、A3d 未確認訂單自動取消並釋放（Dev 10 分／Prod 48 小時）**；剩餘：48 小時內仍可佔住庫存 |
 | RSK-013 | 主要區域無 Macie，無法自動偵測 S3 中的個資 | L | L | 個資只存 DynamoDB；DATA-011/012 設計層預防；資料湖 DQ 檢查加入 Email／電話格式偵測 |
 
 ---
@@ -676,7 +697,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 09 §3.1 | 加註：使用 `TableV2`；Streams `NEW_AND_OLD_IMAGES`（A3a）；GSI 依模組逐一新增 |
 | 09 §2.4 | 台北沒有 **Archive and replay** → 以 Logs 規則留存；DLQ 用 SSE-SQS（ADR-026） |
 | 01 §5 | Streams → EventBridge 改為 **Lambda 發布**（台北沒有 Pipes，ADR-026） |
-| 09 §2.3 | Step Functions「Catch 後發布 `WorkflowFailed`」→ 失敗告警＋DLQ（A3d） |
+| 09 §2.3 | Step Functions「Catch 後發布 `WorkflowFailed`」→ `Fail` 狀態＋失敗告警＋規則 DLQ（A3d，ADR-028） |
+| 03 §3 | ORD-F-005 狀態流轉由 staff API 推進（ADR-027），Step Functions 只負責逾時取消（ADR-028），不是整個流程都在 Step Functions |
 | 03 §6 | GSI1 改為**多用途**（`gsi1pk`／`gsi1sk`）：商品 `CATALOG`／`PRODUCT#<id>`、訂單 `STATUS#<status>`／`<created_at>#<order_id>`（ADR-018 修訂）；訂單 sk `ORDER#<ts>#<id>` → **`ORDER#<ULID>`**；新增冪等項目 `IDEMP#<key>`（ADR-025） |
 | 03 §3 | ORD-F-004 不使用 Lambda Powertools Idempotency，改為同一交易內的冪等記錄（ADR-025） |
 | 03 §11 | 跨租戶存取回 **404**（不是 403），證據為應用層日誌＋IAM 探測（A2 決策 D4），不依賴 CloudTrail 資料事件 |
@@ -726,7 +748,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-13 | 訂貨 A3a Streams（§10.5，PR #27）、A3b 事件層（§10.10，PR #28、#29）部署 Dev、Prod 並驗證 |
 | 有空時 | Developer 權限集加上 EventBridge、Step Functions、SQS 唯讀（目前 `events:ListEventBuses` 被拒） |
 | ✅ 2026-11-13 | 訂貨 A3c：staff 端點＋狀態機部署 Dev、Prod 並驗證（§10.9，PR #31） |
-| P1 | 下一步：訂貨模組 A3d（Step Functions 逾時取消）→ A4（SES／Scheduler）→ 模擬器 → 溯源 |
+| ✅ 2026-11-16 | 訂貨 A3d：逾時取消工作流部署 Dev、Prod；Dev 端到端通過（§10.11，PR #33、#34）；**A3 完成** |
+| P1 | 下一步：訂貨模組 A4（SES 通知、Scheduler 定期補貨、告警接上 SNS）→ 模擬器 → 溯源 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
