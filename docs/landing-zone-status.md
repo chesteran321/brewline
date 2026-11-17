@@ -199,7 +199,8 @@
                "cloudformation:ExecuteChangeSet", "lambda:CreateFunction", "lambda:UpdateFunctionCode",
                "ec2:RunInstances", "s3:CreateBucket", "dynamodb:CreateTable", "states:CreateStateMachine",
                "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream",
-               "athena:StartQueryExecution", "glue:StartJobRun", "glue:StartCrawler"],
+               "athena:StartQueryExecution", "glue:StartJobRun", "glue:StartCrawler",
+               "cognito-idp:AdminInitiateAuth"],
     "Resource": "*",
     "Condition": { "ArnNotLike": { "aws:PrincipalArn": "arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/*AWSReservedSSO_Admin_*" } }
   }]
@@ -208,7 +209,9 @@
 
 - 只擋建立與按次計費呼叫，不擋刪除；Identity Center Admin 角色豁免。
 - 鎖定時 **CDK / GitHub Actions 部署會全部失敗**（錯誤訊息出現 `p-mljh1epv`）。
-- 擋不住已經在跑的排程 Lambda → 模擬器要靠 SIM-N-001 的 SSM 開關。
+- ~~擋不住已經在跑的排程 Lambda~~ → **2026-11-17 加上 `cognito-idp:AdminInitiateAuth`（ADR-030 D7②）**：鎖定時模擬器（以及 Dev smoke test）無法以 IAM 身分登入 Cognito，排程雖然照常觸發，每輪都會在登入時失敗 → 模擬器實質停止。真實咖啡廳走 SRP（`InitiateAuth`，不經 IAM），不受影響。SSM 開關（SIM-N-001）仍是平時的暫停方式。
+  - 已驗證（管理帳號 Admin，暫時掛到 Dev OU 約 3 分鐘）：反向：Dev `OrganizationAccountAccessRole` → `admin-initiate-auth` → `AccessDeniedException … explicit deny in a service control policy: …/p-mljh1epv`；移除後同一指令 → `NotAuthorizedException`（已通過授權、帳號不存在）；`list-targets-for-policy` = `[]`。
+  - 測試選 `OrganizationAccountAccessRole` 的原因：管理帳號不受 SCP 限制、SSO Admin 被此政策豁免；這個角色有 AdministratorAccess 又不在豁免名單，被拒只可能是 SCP。
 
 ### 4.5 `rcp-data-perimeter`
 
@@ -889,7 +892,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | P1 | 模擬器 S1b（stack、paused；§10.16）：部署 Dev、Prod 後補驗證結果；Dev 手動測試開關與探測（`running` → 探測成功；`paused` → 不登入） |
 | P1 | 模擬器 S1c（產生器）→ S1d（Prod 開啟） |
 | 有空時 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`）與 `scheduler:GetSchedule`／`ListSchedules`，讓 Developer 在 Dev 切換模擬器開關 |
-| 手動 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`（管理帳號，S1b 部署前） |
+| ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
