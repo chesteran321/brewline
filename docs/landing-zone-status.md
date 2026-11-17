@@ -866,7 +866,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-16 | A4e 定期補貨（§10.15，PR #46、#47）部署 Dev、Prod；Dev smoke 78/78、`replenish-check` 10/10；**訂貨模組 A1–A4 完成** |
 | P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
 | ✅ 2026-11-17 | 模擬器決策 D1–D9 定案（docs/07 對照，見 ADR-030）；S0（RSK-017）bus 資源政策部署 Dev、Prod 並驗證，含真實憑證反向測試（§10.10，PR #52） |
-| P1 | 模擬器 S1a（simulator app client、synthetic 標記）：部署 Dev、Prod 後補驗證結果（Dev smoke 78 → 92） |
+| P1 | 模擬器 S1a（simulator app client、synthetic 標記）：Dev 已部署、smoke **92/92**（PR #54，`5590a91`）；部署後驗證因讀 Lambda 環境變數失敗（唯讀角色讀不到值，同 §10.14 #8，再犯一次）→ 改為政策模擬；Prod 待修正後部署 |
 | P1 | 模擬器 S1b（stack、paused）→ S1c（產生器）→ S1d（Prod 開啟） |
 | 手動 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`（管理帳號，S1b 部署前） |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
