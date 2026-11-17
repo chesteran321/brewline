@@ -34,7 +34,7 @@ describe('state and config', () => {
 
   const ok = {
     poolSize: 40, initialActive: 30, ordersPerDay: { min: 5, max: 40 }, linesPerOrder: { min: 1, max: 3 },
-    kgPerLine: { min: 1, max: 5 }, duplicateOrderRate: 0.02, seed: 'x',
+    kgPerLine: { min: 1, max: 5 }, duplicateOrderRate: 0.02, seed: 'x', activationStartMonth: '2026-11',
   };
   test('config schema accepts the deployed shape', () => expect(SimulatorConfigSchema.parse(ok)).toEqual(ok));
   test.each([

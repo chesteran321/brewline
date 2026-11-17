@@ -1,34 +1,53 @@
 import { AdminInitiateAuthCommand, CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { Logger } from '@aws-lambda-powertools/logger';
-import { CredentialsSchema, SimulatorConfigSchema, SimulatorState, parseState } from './config';
+import seedProducts from '../../ordering/seed/products.json';
+import { Credentials, CredentialsSchema, SimulatorConfig, SimulatorConfigSchema, SimulatorState, parseState } from './config';
+import { PlannedOrder, planDay, planHash, planHour, taipeiNow } from './generator';
 import { simUsername } from './tenants';
 
 /**
- * 模擬器排程函數（ADR-030）。S1b：只有開關與探測；S1c 才產生訂單。
- * Scheduled simulator. S1b: kill switch and a probe only; order generation arrives in S1c.
+ * 模擬器排程函數（ADR-030）。
+ * Scheduled simulator.
  *
  * - 每一輪先讀 SSM `state`：不是 `running` 就什麼都不做（SIM-N-001；讀不到也當成 paused）。
- * - `running`：用第一個模擬帳號經由 simulator client 登入，呼叫 `GET /products`（不寫入任何資料）。
- * - 手動呼叫帶 `{ "probe": true }`：不論開關都做一次探測（Prod 開啟前驗證登入路徑）。
- * - 預期沒達成就丟錯 → Lambda `Errors` 告警（D9）；非同步重試為 0，失敗事件進 DLQ。
+ * - `running`：依產生器計畫，以各模擬咖啡廳身分經由 simulator client 登入，透過**公開 API** 下單（ADR-011）；
+ *   每秒最多 1 個請求（SIM-N-002）；部分請求用同一個 Idempotency-Key 重送（SIM-F-008）。
+ * - 預期：新單 201、重跑同一小時 200、庫存不足 409 都正常；重送必須 200 且同一個 `order_id`；其他結果算違規。
+ *   有違規就在最後丟錯 → Lambda `Errors` 告警（D9）。非同步重試 0，失敗事件進 DLQ。
+ * - 手動事件：`{ "probe": true }` 不論開關都探測一次；`{ "dryRun": true, "date": "YYYY-MM-DD" }` 只回傳當天計畫的雜湊
+ *   （SIM-F-009），不登入、不呼叫 API。
  *
- * Reads the state first and does nothing unless it is "running" (unreadable counts as paused). When running,
- * signs in as the first simulated café through the simulator client and calls GET /products (writes nothing).
- * A manual `{ "probe": true }` probes regardless of the state. Unmet expectations throw → Errors alarm.
+ * Reads the switch first; when running, signs in as the planned cafés through the simulator client and orders through
+ * the public API at ≤ 1 request/s, resending some requests with the same key. 201/200/409 are fine; a resend must
+ * return 200 with the same order id; anything else is a violation and the run throws at the end (Errors alarm).
  */
 
 const logger = new Logger({ serviceName: 'simulator-run' });
 let cognito = new CognitoIdentityProviderClient({});
 let ssm = new SSMClient({});
 let http: typeof fetch = (...a) => fetch(...a);
+let sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+let clock = () => new Date();
 
 /** 測試用 / For tests. */
-export function setDepsForTesting(d: { cognito?: CognitoIdentityProviderClient; ssm?: SSMClient; fetch?: typeof fetch }): void {
+export function setDepsForTesting(d: {
+  cognito?: CognitoIdentityProviderClient;
+  ssm?: SSMClient;
+  fetch?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => Date;
+}): void {
   if (d.cognito) cognito = d.cognito;
   if (d.ssm) ssm = d.ssm;
   if (d.fetch) http = d.fetch;
+  if (d.sleep) sleep = d.sleep;
+  if (d.now) clock = d.now;
 }
+
+/** 請求間隔：每秒最多 1 個（Dev 路由限流 2 rps 的 50%，SIM-N-002）/ ≤ 1 request/s. */
+export const PACE_MS = 1000;
+export const SEED_PRODUCT_IDS: readonly string[] = (seedProducts as { id: string }[]).map((p) => p.id);
 
 export interface RunEnv {
   readonly stateParam: string;
@@ -68,29 +87,76 @@ export async function readState(env: RunEnv): Promise<SimulatorState> {
   try {
     return parseState(await param(env.stateParam));
   } catch (err) {
-    // 讀不到開關就停（fail safe）；記錄後由下一輪再試 / Unreadable switch → stop; the next run retries.
+    // 讀不到開關就停（fail safe）；下一輪再試 / Unreadable switch → stop; the next run retries.
     logger.warn('state unreadable, treating as paused', { error: (err as Error).name });
     return 'paused';
   }
 }
 
-export async function signIn(env: RunEnv, username: string): Promise<string> {
-  const raw = await param(env.credentialsParam, true);
-  const creds = CredentialsSchema.parse(JSON.parse(raw ?? '{}'));
-  const password = creds[username];
-  if (!password) throw new Error('no stored password for the probe account');
-  const out = await cognito.send(
-    new AdminInitiateAuthCommand({
-      UserPoolId: env.userPoolId,
-      ClientId: env.clientId,
-      AuthFlow: 'ADMIN_USER_PASSWORD_AUTH',
-      AuthParameters: { USERNAME: username, PASSWORD: password },
-    }),
-  );
-  const token = out.AuthenticationResult?.AccessToken;
-  if (!token) throw new Error(`sign-in returned no access token (challenge: ${out.ChallengeName ?? 'none'})`);
-  return token;
+async function readConfig(env: RunEnv): Promise<SimulatorConfig> {
+  // 設定格式錯誤 → 丟錯（告警），不用預設值繼續 / A bad config fails loudly instead of running on defaults.
+  return SimulatorConfigSchema.parse(JSON.parse((await param(env.configParam)) ?? 'null'));
 }
+
+async function readCredentials(env: RunEnv): Promise<Credentials> {
+  return CredentialsSchema.parse(JSON.parse((await param(env.credentialsParam, true)) ?? '{}'));
+}
+
+/** 登入並快取（同一輪內同一家咖啡廳只登入一次）/ Sign in, cached per run. */
+class Sessions {
+  private readonly tokens = new Map<string, Promise<string>>();
+  constructor(
+    private readonly env: RunEnv,
+    private readonly creds: Credentials,
+  ) {}
+
+  token(username: string): Promise<string> {
+    let t = this.tokens.get(username);
+    if (!t) {
+      t = this.signIn(username);
+      this.tokens.set(username, t);
+    }
+    return t;
+  }
+
+  private async signIn(username: string): Promise<string> {
+    const password = this.creds[username];
+    if (!password) throw new Error('no stored password for a planned account');
+    const out = await cognito.send(
+      new AdminInitiateAuthCommand({
+        UserPoolId: this.env.userPoolId,
+        ClientId: this.env.clientId,
+        AuthFlow: 'ADMIN_USER_PASSWORD_AUTH',
+        AuthParameters: { USERNAME: username, PASSWORD: password },
+      }),
+    );
+    const token = out.AuthenticationResult?.AccessToken;
+    if (!token) throw new Error(`sign-in returned no access token (challenge: ${out.ChallengeName ?? 'none'})`);
+    return token;
+  }
+}
+
+interface ApiResponse {
+  readonly status: number;
+  readonly body: Record<string, unknown> | undefined;
+}
+
+async function call(env: RunEnv, path: string, token: string, init: { method?: string; key?: string; body?: unknown } = {}): Promise<ApiResponse> {
+  const res = await http(new URL(path, env.apiEndpoint), {
+    method: init.method ?? 'GET',
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(init.key ? { 'idempotency-key': init.key } : {}),
+      ...(init.body ? { 'content-type': 'application/json' } : {}),
+    },
+    body: init.body ? JSON.stringify(init.body) : undefined,
+    signal: AbortSignal.timeout(10_000),
+  });
+  return { status: res.status, body: (await res.json().catch(() => undefined)) as Record<string, unknown> | undefined };
+}
+
+const claims = (token: string) =>
+  JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString('utf8')) as Record<string, unknown>;
 
 export interface ProbeResult {
   readonly status: number;
@@ -98,37 +164,150 @@ export interface ProbeResult {
   readonly synthetic: boolean;
 }
 
-/** 探測：登入＋讀目錄，不寫入 / Probe: sign in and read the catalog; writes nothing. */
-export async function probe(env: RunEnv): Promise<ProbeResult> {
-  const token = await signIn(env, simUsername(1));
-  const claims = JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString('utf8')) as Record<string, unknown>;
-  const res = await http(new URL('/products', env.apiEndpoint), {
-    headers: { authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(10_000),
-  });
-  const body = (await res.json().catch(() => undefined)) as { items?: unknown[] } | undefined;
-  return { status: res.status, products: Array.isArray(body?.items) ? body.items.length : -1, synthetic: claims.synthetic === 'true' };
+/** 探測：sim-001 登入＋讀目錄，不寫入 / Probe: sign in as sim-001 and read the catalog; writes nothing. */
+async function probe(env: RunEnv, sessions: Sessions): Promise<ProbeResult & { readonly catalog: Map<string, string> }> {
+  const token = await sessions.token(simUsername(1));
+  const r = await call(env, '/products', token);
+  const items = Array.isArray(r.body?.items) ? (r.body.items as { id: string; stock_status: string }[]) : [];
+  return {
+    status: r.status,
+    products: r.status === 200 ? items.length : -1,
+    synthetic: claims(token).synthetic === 'true',
+    catalog: new Map(items.map((i) => [i.id, i.stock_status])),
+  };
+}
+
+export type OrderOutcome = 'created' | 'replayed' | 'insufficient_stock' | 'key_conflict' | 'skipped_no_stock' | 'violation';
+
+export interface HourSummary {
+  readonly date: string;
+  readonly hour: number;
+  readonly planned: number;
+  readonly outcomes: Record<OrderOutcome, number>;
+  readonly duplicatesSent: number;
+  readonly duplicatesOk: number;
+  readonly requests: number;
+  readonly violations: readonly string[];
+}
+
+/**
+ * 執行一個小時的計畫。缺貨或庫存偏低的商品先拿掉（D4：避免佔滿庫存）；全部拿掉就跳過這筆。
+ * Runs one hour of the plan. Lines for low or out-of-stock products are dropped first; an order with no lines left
+ * is skipped.
+ */
+export async function simulateHour(
+  env: RunEnv,
+  cfg: SimulatorConfig,
+  sessions: Sessions,
+  catalog: Map<string, string>,
+  date: string,
+  hour: number,
+): Promise<HourSummary> {
+  const plan = planHour(cfg, date, hour, SEED_PRODUCT_IDS);
+  const outcomes: Record<OrderOutcome, number> = {
+    created: 0, replayed: 0, insufficient_stock: 0, key_conflict: 0, skipped_no_stock: 0, violation: 0,
+  };
+  const violations: string[] = [];
+  let duplicatesSent = 0;
+  let duplicatesOk = 0;
+  let requests = 0;
+
+  const send = async (order: PlannedOrder, items: unknown[]): Promise<ApiResponse> => {
+    if (requests > 0) await sleep(PACE_MS);
+    requests++;
+    const token = await sessions.token(simUsername(order.tenantIndex));
+    let r = await call(env, '/orders', token, { method: 'POST', key: order.idempotencyKey, body: { items } });
+    if (r.status === 503) {
+      // 交易衝突／節流：用同一個 key 重試一次（API 合約）/ Conflict or throttle: retry once with the same key.
+      await sleep(PACE_MS);
+      requests++;
+      r = await call(env, '/orders', token, { method: 'POST', key: order.idempotencyKey, body: { items } });
+    }
+    return r;
+  };
+
+  for (const order of plan) {
+    const items = order.items.filter((l) => catalog.get(l.product_id) === 'in_stock');
+    if (items.length === 0) {
+      outcomes.skipped_no_stock++;
+      continue;
+    }
+    const r = await send(order, items);
+    const ref = `${order.date}T${order.hour}#${order.seq}`;
+    if (r.status === 201) outcomes.created++;
+    else if (r.status === 200) outcomes.replayed++; // 重跑同一小時 / a re-run of the same hour
+    else if (r.status === 409) outcomes.insufficient_stock++;
+    else if (r.status === 422) {
+      // 同一小時重跑、但期間庫存狀態變了 → 商品不同 / Re-run after stock status changed: different lines, same key.
+      outcomes.key_conflict++;
+      logger.warn('idempotency key reused with different lines (re-run after a stock change?)', { ref });
+    } else {
+      outcomes.violation++;
+      violations.push(`${ref}: POST /orders → ${r.status}`);
+      continue;
+    }
+
+    if (order.duplicate && (r.status === 201 || r.status === 200)) {
+      duplicatesSent++;
+      const d = await send(order, items);
+      if (d.status === 200 && d.body?.order_id === r.body?.order_id) duplicatesOk++;
+      else violations.push(`${ref}: duplicate → ${d.status} (order ${String(d.body?.order_id)} vs ${String(r.body?.order_id)})`);
+    }
+  }
+  return { date, hour, planned: plan.length, outcomes, duplicatesSent, duplicatesOk, requests, violations };
 }
 
 export interface RunEvent {
+  readonly source?: string;
   readonly probe?: boolean;
+  readonly dryRun?: boolean;
+  readonly date?: string;
 }
 
-export type RunOutcome = { readonly outcome: 'paused' } | ({ readonly outcome: 'probe_ok'; readonly state: SimulatorState } & ProbeResult);
+export type RunOutcome =
+  | { readonly outcome: 'paused' }
+  | { readonly outcome: 'dry_run'; readonly date: string; readonly orders: number; readonly perHour: number[]; readonly hash: string }
+  | ({ readonly outcome: 'probe_ok'; readonly state: SimulatorState } & ProbeResult)
+  | ({ readonly outcome: 'simulated' } & HourSummary);
 
 export const handler = async (event: RunEvent = {}): Promise<RunOutcome> => {
   const env = readEnv();
+
+  // 計畫重現性（SIM-F-009）：不看開關、不登入、不呼叫 API / Plan reproducibility: no switch, no sign-in, no API.
+  if (event.dryRun === true) {
+    const cfg = await readConfig(env);
+    const date = event.date ?? taipeiNow(clock()).date;
+    const plan = planDay(cfg, date, SEED_PRODUCT_IDS);
+    const perHour = Array.from({ length: 12 }, (_, i) => plan.filter((o) => o.hour === i + 8).length);
+    const out = { outcome: 'dry_run' as const, date, orders: plan.length, perHour, hash: planHash(plan) };
+    logger.info('dry run', out);
+    return out;
+  }
+
   const state = await readState(env);
   if (state !== 'running' && event.probe !== true) {
     logger.info('simulator paused; nothing to do', { state });
     return { outcome: 'paused' };
   }
-  // 設定格式錯誤 → 丟錯（告警），而不是用預設值繼續 / A bad config fails loudly instead of running on defaults.
-  SimulatorConfigSchema.parse(JSON.parse((await param(env.configParam)) ?? 'null'));
-  const r = await probe(env);
-  logger.info('probe', { state, manual: event.probe === true, ...r });
-  if (r.status !== 200 || r.products < 1 || !r.synthetic) {
-    throw new Error(`probe failed: status ${r.status}, products ${r.products}, synthetic ${r.synthetic}`);
+
+  const cfg = await readConfig(env);
+  const sessions = new Sessions(env, await readCredentials(env));
+  const p = await probe(env, sessions);
+  const probeResult: ProbeResult = { status: p.status, products: p.products, synthetic: p.synthetic };
+  if (p.status !== 200 || p.products < 1 || !p.synthetic) {
+    throw new Error(`probe failed: status ${p.status}, products ${p.products}, synthetic ${p.synthetic}`);
   }
-  return { outcome: 'probe_ok', state, ...r };
+  if (event.probe === true) {
+    logger.info('probe', { state, manual: true, ...probeResult });
+    return { outcome: 'probe_ok', state, ...probeResult };
+  }
+
+  const { date, hour } = taipeiNow(clock());
+  const summary = await simulateHour(env, cfg, sessions, p.catalog, date, hour);
+  // 只記錄數量與參考編號，不記錄帳號或 token / Counts and references only; no accounts or tokens.
+  logger.info('simulated hour', { ...summary });
+  if (summary.violations.length > 0) {
+    throw new Error(`simulator expectations failed (${summary.violations.length}): ${summary.violations.slice(0, 5).join('; ')}`);
+  }
+  return { outcome: 'simulated', ...summary };
 };

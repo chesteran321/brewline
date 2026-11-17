@@ -25,8 +25,8 @@ export interface SimulatorStackProps extends StackProps {
 }
 
 /**
- * 模擬器（docs/07、ADR-030）S1b：帳號、開關、排程與探測。訂單產生器在 S1c。
- * Simulator S1b: accounts, kill switch, schedule and probe. The order generator arrives in S1c.
+ * 模擬器（docs/07、ADR-030）：帳號、開關、排程（S1b）與訂單產生器（S1c）。
+ * Simulator: accounts, kill switch, schedule (S1b) and the order generator (S1c).
  *
  * | 資源 | 說明 |
  * |---|---|
@@ -142,7 +142,7 @@ export class SimulatorStack extends Stack {
       module: 'simulator',
       name: 'run',
       entry: 'simulator/src/run.ts',
-      description: 'Scheduled simulator: kill switch (SSM state); S1b probes sign-in + catalog only',
+      description: 'Scheduled simulator: kill switch (SSM state); orders through the public API as simulated cafes',
       reservedConcurrency: props.lambda.reservedConcurrency.simulator,
       timeout: Duration.minutes(2),
       environment: {

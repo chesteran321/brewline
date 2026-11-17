@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）、A3d（逾時取消）完成，**訂貨 A3 完成**；A4a／A4b（CMK key policy＋維運告警 SNS）、A4c（聯絡人＋欄位層級加密）、A4d（SES 訂單通知信）、A4e（定期補貨）完成，**訂貨 A4 完成** / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎、訂貨模組 A1–A4 完成；模擬器 S0（bus 資源政策）、S1a（simulator client、`synthetic`）、S1b（帳號、開關、排程）完成，S1c（訂單產生器）進行中** / P0 complete; P1 CI/CD, data foundation and ordering A1–A4 complete; simulator S0–S1b complete, S1c in progress（2026-11-17）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -765,6 +765,16 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 執行函數 | `brewline-dev-simulator-run`（保留併發 1、逾時 2 分、非同步重試 0 → DLQ）：先讀 `state`，不是 `running` 就結束；**S1b 只做探測**（`sim-001` 經由 simulator client 登入 → `GET /products`，不寫資料）；手動 `{"probe": true}` 不論開關都探測一次 | 同左 |
 | 執行角色 | `cognito-idp:AdminInitiateAuth`（pool）＋`ssm:GetParameter`（3 個參數）＋`kms:Decrypt`（`kms:ViaService = ssm`、`kms:EncryptionContext:PARAMETER_ARN = credentials`）；**不能**建立／修改帳號、寫參數、碰 DynamoDB | 同左 |
 | 告警（D9） | `brewline-dev-simulator-run-errors`（≥ 1）、`…-simulator-dlq-not-empty` → `ops-alerts`；帳號告警總數 9（≤ 10 免費） | 同左 |
+| **產生器（S1c）** | 每日 2–6 筆 | 每日 5–40 筆（docs/07 §2） |
+
+**S1c 訂單產生器**（`services/simulator/src/generator.ts`，純函數）：
+- 每日筆數＝範圍中點 × 季節（12 個月；12 月 1.15、7 月 0.9）× 星期（週一 1.4、週日 0.3）× 雜訊 ±25%，夾在最小／最大值之間；依每小時權重分配到 08–19 時（10 點最多）。
+- 每筆 1–3 個不同商品、每個 1–5 kg；從**完整目錄**（種子檔的 8 個商品）挑選，執行時拿掉 `stock_status` 不是 `in_stock` 的商品，全部拿掉就跳過（`skipped_no_stock`）。
+- 冪等鍵＝`sim-` ＋ sha256(種子│日期│小時│序號) 前 32 個十六進位字元 → 重跑同一小時只會重播（200）；2% 的請求用同一個 key 重送，必須 200 且同一個 `order_id`（SIM-F-008）。
+- 啟用中的帳號：`initialActive` 30，`activationStartMonth`（2026-11）之後每月由種子決定多 1 或 2 家，上限 40（SIM-F-001）。
+- 執行：每一小時依台北日期與小時產生計畫；各帳號經由 simulator client 登入（每輪每帳號一次）；請求間隔 ≥ 1 秒（SIM-N-002）；503 用同一個 key 重試一次。201／200／409 都正常，422（重跑時庫存狀態改變）記為 `key_conflict` 並警告；其他狀態或重送不符 → 跑完這一小時後丟錯 → `run-errors` 告警。日誌只記數量與參考編號（`<日期>T<小時>#<序號>`），不記帳號或 token。
+- 手動事件：`{"dryRun": true, "date": "YYYY-MM-DD"}` 回傳當天計畫的筆數、每小時分布與雜湊（不看開關、不登入、不呼叫 API）→ SIM-F-009 驗收。
+- 模擬訂單在 Dev 10 分／Prod 48 小時後由逾時工作流取消（D5）；模擬帳號沒有聯絡人 → 通知函數 `skipped_no_contact`，不寄信。
 
 - 費用：沒有新的固定費用（SecureString Standard 免費、排程在免費額度內、告警 ≤ 10）。S1b 只有探測，`paused` 時每輪只有 1 次 SSM 讀取。
 - 新 CloudFormation 類型：`AWS::Scheduler::Schedule`（2026-11-17 `describe-type` 實測 LIVE，§2）。
@@ -900,7 +910,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
 | ✅ 2026-11-17 | 模擬器決策 D1–D9 定案（docs/07 對照，見 ADR-030）；S0（RSK-017）bus 資源政策部署 Dev、Prod 並驗證，含真實憑證反向測試（§10.10，PR #52） |
 | ✅ 2026-11-17 | 模擬器 S1a（simulator client、`synthetic`）、S1b（stack、帳號 40、開關 `paused`、排程、探測）部署 Dev、Prod 並驗證，含 Dev 開關測試與 Prod 探測（§10.16，PR #54／#56／#57／#58） |
-| P1 | 模擬器 S1c（產生器）→ S1d（Prod 開啟） |
+| P1 | 模擬器 S1c（產生器，§10.16）：部署後 Dev 驗證 dry-run 雜湊相同、`running` 一小時（建立／重送／事件 `synthetic`）、`paused` 立即停止；Dev 觀察數天 → S1d（Prod 開啟） |
 | 有空時 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`）與 `scheduler:GetSchedule`／`ListSchedules`，讓 Developer 在 Dev 切換模擬器開關 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
