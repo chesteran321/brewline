@@ -769,6 +769,17 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 費用：沒有新的固定費用（SecureString Standard 免費、排程在免費額度內、告警 ≤ 10）。S1b 只有探測，`paused` 時每輪只有 1 次 SSM 讀取。
 - 新 CloudFormation 類型：`AWS::Scheduler::Schedule`（2026-11-17 `describe-type` 實測 LIVE，§2）。
 
+已驗證（2026-11-17，S1a PR #54／#56、S1b PR #57／#58；Deploy run #52、#54）：
+- `verify-simulator-stack.sh` Dev、Prod 全部 ✅（Prod 整體 401 項、0 ❌）：帳號 40、`simulator` 群組 40 人且**沒有人在 staff**、`state = paused`、密碼參數 `SecureString`＋CMK＋Standard、**唯讀角色解不開**、排程（`ENABLED`、cron、`Asia/Taipei`、不重試、DLQ、角色信任排程群組 ARN）、函數標準設定、非同步重試 0 → DLQ、告警 2（帳號總數 9）、Prod 終止保護。
+- 政策模擬（執行角色）：正向 `AdminInitiateAuth`、讀密碼參數 = `allowed`；反向 `AdminCreateUser`、`AdminSetUserPassword`、寫 `state`、讀其他參數、DynamoDB `PutItem` = `implicitDeny`。
+- **Dev 手動開關測試**（Admin）：`paused` → `{"outcome":"paused"}`；`running` → `probe_ok`（`status 200`、`products 8`、`synthetic true`）；`RUNNING`（不認得的值）→ `paused`；`paused`＋`{"probe": true}` → `probe_ok`；最後恢復 `paused`。
+- **Prod 手動探測**（Admin，`state = paused`）：`{"probe": true}` → `probe_ok`（`status 200`、`products 8`、`synthetic true`）；`{"source":"manual"}` → `paused`。Prod 的模擬器**尚未開啟**。
+- 一個 `probe_ok` 同時驗證：SSM 讀密碼（CMK、`kms:EncryptionContext:PARAMETER_ARN`）→ simulator client 登入 → token 的 `synthetic` claim（S1a）→ authorizer audience → 目錄 API。
+
+教訓 / Lessons：
+- 驗證腳本也會有 bug：唯讀角色讀不到 Lambda 環境變數的值（#56，§10.14 #8 再犯一次）、寫死的告警總數（#58）。兩次都是「系統正常、驗證失敗」，管線因此跳過 Prod，沒有讓問題上線。驗證要檢查**不變條件**（全部接上、在上限內、只允許這些），不檢查某個時間點的數量或看不到的值。
+- `state`／`credentials` 刻意不交給 CloudFormation：CloudFormation 不能建 SecureString，而由 CloudFormation 管理的開關會在部署時被覆蓋回預設值。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -888,8 +899,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-16 | A4e 定期補貨（§10.15，PR #46、#47）部署 Dev、Prod；Dev smoke 78/78、`replenish-check` 10/10；**訂貨模組 A1–A4 完成** |
 | P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
 | ✅ 2026-11-17 | 模擬器決策 D1–D9 定案（docs/07 對照，見 ADR-030）；S0（RSK-017）bus 資源政策部署 Dev、Prod 並驗證，含真實憑證反向測試（§10.10，PR #52） |
-| P1 | 模擬器 S1a（simulator app client、synthetic 標記）：Dev 已部署、smoke **92/92**（PR #54，`5590a91`）；部署後驗證因讀 Lambda 環境變數失敗（唯讀角色讀不到值，同 §10.14 #8，再犯一次）→ 改為政策模擬；Prod 待修正後部署 |
-| P1 | 模擬器 S1b（stack、paused；§10.16）：Dev 部署成功（PR #57，smoke 92/92、帳號 40），但 `verify-ops-stack.sh` 寫死告警總數 7 → 9 而失敗、Prod 跳過 → 改為「全部接上主題＋總數 1–10」；部署 Dev、Prod 後補驗證結果；Dev 手動測試開關與探測（`running` → 探測成功；`paused` → 不登入） |
+| ✅ 2026-11-17 | 模擬器 S1a（simulator client、`synthetic`）、S1b（stack、帳號 40、開關 `paused`、排程、探測）部署 Dev、Prod 並驗證，含 Dev 開關測試與 Prod 探測（§10.16，PR #54／#56／#57／#58） |
 | P1 | 模擬器 S1c（產生器）→ S1d（Prod 開啟） |
 | 有空時 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`）與 `scheduler:GetSchedule`／`ListSchedules`，讓 Developer 在 Dev 切換模擬器開關 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |
