@@ -806,7 +806,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-020 | A1 不掛 WAF，改以分層限流 | Accepted（2026-11-12） | 登入／註冊走 Cognito 端點、execute-api 可繞過 CloudFront → CloudFront WAF 無效；regional WAF 每年約 USD 190。改以不開放註冊、JWT、scope、限流、保留併發、DynamoDB 上限、Budget Actions；前端時改 CloudFront＋WAF（§10.7） |
 | ADR-021 | API 類型：HTTP API | Accepted（2026-11-12） | 較便宜、內建 JWT＋scope；無法直接掛 WAF、無每租戶限流（ORD-N-003 待 A2）（§10.7） |
 | ADR-022 | 身分層：Cognito Essentials、scope 授權、`custom:tenant_id` | Accepted（2026-11-12） | pre token V2 群組→scope、tenant_id claim；MFA OPTIONAL＋TOTP；不開放註冊（§10.6） |
-| ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22 |
+| ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12；**2026-11-17 修訂**） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22。**修訂**：aws-cdk-lib 2.277.0 認得 `nodejs26.x`，cdk-nag `AwsSolutions-L1` 因此判定 Node 24 違規；`nodejs26.x` 在 Lambda 仍是公開預覽版（無 SLA、不建議正式環境，GA 須等 Node 26 進入 Active LTS）→ 維持 Node 24，以 `LATEST_RUNTIME_ACK` acknowledge（`BrewlineFunction` 與 CDK provider 框架函數）；GA 後評估升級並移除例外 |
 | ADR-024 | 租戶隔離：STS session tag ＋ `LeadingKeys` 完全比對 | Accepted（2026-11-13） | 訂單函數（`brewline-<env>-orders-*`）帶 `tenant_id` 扮演 `brewline-<env>-tenant-access`；商品只能改庫存欄位；Scan 明確 Deny（§10.8） |
 | ADR-025 | 下單交易與冪等 | Accepted（2026-11-13） | 冪等記錄＋訂單＋扣庫存在同一個交易；sk `ORDER#<ULID>`；伺服器端定價；≤ 25 個商品、1–500 kg；路由限流（§10.9） |
 | ADR-029 | 通知、聯絡人與定期補貨（A4 決策） | Accepted（2026-11-16） | Route 53 網域＋SES DKIM／MAIL FROM／DMARC；聯絡人欄位以 KMS＋encryption context 加密；SNS 用 CMK（key policy 授權服務）；每租戶一位聯絡人；只在建立／確認／出貨／取消寄信；Scheduler 定期補貨（§10.12–§10.15）；**A4 全部完成** |
@@ -913,6 +913,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | P1 | 模擬器 S1c（產生器，§10.16）：部署後 Dev 驗證 dry-run 雜湊相同、`running` 一小時（建立／重送／事件 `synthetic`）、`paused` 立即停止；Dev 觀察數天 → S1d（Prod 開啟） |
 | 有空時 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`）與 `scheduler:GetSchedule`／`ListSchedules`，讓 Developer 在 Dev 切換模擬器開關 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |
+| nodejs26.x GA 後（預計 2026-11 底） | 評估 Lambda 升級到 Node 26（本機、CI、`Runtime`），移除 `LATEST_RUNTIME_ACK`（ADR-023 修訂） |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 

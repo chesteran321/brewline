@@ -116,6 +116,7 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 
 - 一律用 `lib/constructs/brewline-function.ts`：Node 24、arm64、X-Ray、保留併發、自建 log group（Dev 7 天／Prod 30 天）、esbuild 打包（含 AWS SDK）。
 - `lib/aspects/lambda-guardrails.ts` 在 synth 時檢查；CDK 內部函數需用 `LambdaGuardrailsChecker.exempt(scope, reason)` 明確豁免。
+- cdk-nag `AwsSolutions-L1`（最新 runtime）以 `LATEST_RUNTIME_ACK` acknowledge：`nodejs26.x` 仍是 Lambda 預覽版，GA 前維持 Node 24（ADR-023 修訂）。新的 CDK provider 框架函數也要加上這個 acknowledge。
 - Lambda 程式碼在 `services/`（獨立 package：`npm ci && npm test`）。
 
 ### CI/CD 身分 / CI/CD identities（GitHub OIDC）
