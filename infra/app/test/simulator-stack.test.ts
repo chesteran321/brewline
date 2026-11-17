@@ -110,7 +110,10 @@ describe.each(['dev', 'prod'] as const)('SimulatorStack (%s)', (envName) => {
     const ps = resources(template, 'AWS::SSM::Parameter');
     expect(ps.map((p) => p.Properties.Name)).toEqual([`${prefix}/config`]);
     const value = JSON.parse(ps[0]!.Properties.Value);
-    expect(value).toMatchObject({ poolSize: cfg.simulator.poolSize, ordersPerDay: cfg.simulator.ordersPerDay, seed: cfg.simulator.seed });
+    expect(value).toMatchObject({
+      poolSize: cfg.simulator.poolSize, ordersPerDay: cfg.simulator.ordersPerDay, seed: cfg.simulator.seed,
+      activationStartMonth: '2026-11',
+    });
     expect(value).not.toHaveProperty('retainOnDelete');
   });
 

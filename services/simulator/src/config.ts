@@ -17,6 +17,8 @@ export const SimulatorConfigSchema = z.strictObject({
   kgPerLine: Range,
   duplicateOrderRate: z.number().min(0).max(0.5),
   seed: z.string().min(1).max(64),
+  /** 從這個月（YYYY-MM）之後，每月多啟用 1–2 家（SIM-F-001）/ Month after which 1–2 more cafés activate monthly. */
+  activationStartMonth: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
 });
 export type SimulatorConfig = z.infer<typeof SimulatorConfigSchema>;
 

@@ -15,8 +15,8 @@ outputs="${2:?usage: verify-simulator-stack.sh <dev|prod> <outputs.json>}"
 region="${AWS_REGION:-ap-east-2}"
 stack="brewline-${env_name}-simulator"
 case "$env_name" in
-  dev)  want_termination_protection=false; want_pool=40 ;;
-  prod) want_termination_protection=true;  want_pool=40 ;;
+  dev)  want_termination_protection=false; want_pool=40; want_orders=2-6 ;;
+  prod) want_termination_protection=true;  want_pool=40; want_orders=5-40 ;;
   *) echo "unknown env: $env_name" >&2; exit 2 ;;
 esac
 
@@ -49,6 +49,8 @@ check "State is paused or running" "$([[ "$state" == paused || "$state" == runni
 config=$(aws ssm get-parameter --name "${prefix}/config" --region "$region" --query Parameter.Value --output text)
 check "Config poolSize"   "$(jq -r .poolSize <<<"$config")" "$want_pool"
 check "Config has no retainOnDelete" "$(jq 'has("retainOnDelete")' <<<"$config")" "false"
+check "Config activationStartMonth (S1c)" "$(jq -r '.activationStartMonth // "missing"' <<<"$config" | grep -Ec '^[0-9]{4}-(0[1-9]|1[0-2])$')" "1"
+check "Config orders/day range" "$(jq -r '"\(.ordersPerDay.min)-\(.ordersPerDay.max)"' <<<"$config")" "$want_orders"
 cred=$(aws ssm describe-parameters --region "$region" --parameter-filters "Key=Name,Values=${prefix}/credentials" \
   --query 'Parameters[0].[Type,KeyId,Tier]' --output text)
 check "Credentials parameter (type, key, tier)" "$cred" "$(printf 'SecureString\t%s\tStandard' "$key_arn")"

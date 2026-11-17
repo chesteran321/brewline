@@ -109,6 +109,7 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 密碼 | SSM `/brewline/<env>/simulator/credentials`（SecureString，CMK）；只有帳號 custom resource 能寫、執行函數能讀；**不要手動讀或印出** |
 | 開關 | SSM `/brewline/<env>/simulator/state`＝`paused`／`running`；只在第一次建立（`paused`），部署不覆蓋；其他值都當成 `paused` |
 | 執行 | `brewline-<env>-simulator-run`，台北 08:05–19:05 每小時；執行角色只有 `AdminInitiateAuth`＋讀 3 個參數（RSK-018 的權限只在帳號 custom resource） |
+| 產生器 | `services/simulator/src/generator.ts`（純函數）：同一組（種子、日期、小時）→ 同一份計畫與冪等鍵；手動 `{"dryRun": true, "date": …}` 回傳計畫雜湊；`{"probe": true}` 只探測。**改季節／星期／小時權重或挑選邏輯會改變冪等鍵以外的內容 → 同一小時重跑會 422** |
 | 規則 | 模擬流量一律走公開 API（ADR-011），不直接寫 DynamoDB；預期沒達成就丟錯（觸發 `Errors` 告警），不用自訂指標 |
 
 ### Lambda 標準 / Lambda standard（ADR-023）

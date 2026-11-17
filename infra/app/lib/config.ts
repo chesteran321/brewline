@@ -89,6 +89,8 @@ export interface SimulatorSettings {
   readonly duplicateOrderRate: number;
   /** 亂數種子（SIM-F-009）；也決定租戶 ID，改了會建立新的一批租戶 / Seed; also derives tenant ids. */
   readonly seed: string;
+  /** 這個月（YYYY-MM）之後每月多啟用 1–2 家（SIM-F-001）/ After this month, 1–2 more cafés activate monthly. */
+  readonly activationStartMonth: string;
   /** 刪除 stack 時保留模擬帳號與密碼參數 / Keep accounts and the credentials parameter when the stack is deleted. */
   readonly retainOnDelete: boolean;
 }
@@ -205,6 +207,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       kgPerLine: { min: 1, max: 5 },
       duplicateOrderRate: 0.02,
       seed: 'brewline-dev-sim-2026',
+      activationStartMonth: '2026-11',
       retainOnDelete: false,
     },
     mail: {
@@ -253,6 +256,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       kgPerLine: { min: 1, max: 5 },
       duplicateOrderRate: 0.02,
       seed: 'brewline-prod-sim-2026',
+      activationStartMonth: '2026-11',
       retainOnDelete: true,
     },
     mail: {
