@@ -11,6 +11,7 @@ import { AuthStack } from '../lib/stacks/auth-stack';
 import { DataStack } from '../lib/stacks/data-stack';
 import { EventsStack } from '../lib/stacks/events-stack';
 import { NotifyStack } from '../lib/stacks/notify-stack';
+import { SimulatorStack } from '../lib/stacks/simulator-stack';
 import { OpsStack } from '../lib/stacks/ops-stack';
 import { PipelineCheckStack } from '../lib/stacks/pipeline-check-stack';
 
@@ -108,6 +109,22 @@ notifyStack.addStackDependency(opsStack, 'SES events and alarms publish to the o
 notifyStack.addStackDependency(eventsStack, 'rules on the brewline-<env> bus');
 notifyStack.addStackDependency(apiStack, 'the notifier assumes the tenant access role created by the api stack');
 Tags.of(notifyStack).add('module', 'notifications', { priority: 200 });
+
+// 模擬器（docs/07、ADR-030）：需要 auth（client、pool）與 api（endpoint）→ 在它們之後 / Simulator.
+const simulatorStack = new SimulatorStack(app, `brewline-${env.name}-simulator`, {
+  envName: env.name,
+  lambda: env.lambda,
+  simulator: env.simulator,
+  commitSha,
+  env: { account: env.account, region: env.region },
+  description: 'BrewLine simulator (ADR-030): simulated cafe accounts, kill switch, hourly schedule',
+  terminationProtection: env.name === 'prod',
+});
+simulatorStack.addStackDependency(dataStack, 'CMK for the credentials SecureString (SSM)');
+simulatorStack.addStackDependency(authStack, 'user pool and simulator client (SSM)');
+simulatorStack.addStackDependency(opsStack, 'alarms publish to the ops topic (SSM)');
+simulatorStack.addStackDependency(apiStack, 'API endpoint (SSM)');
+Tags.of(simulatorStack).add('module', 'simulator', { priority: 200 });
 
 // 全 app 共用標籤；module 之後由各 stack 覆寫。
 // App-wide tags; individual stacks override "module" later.

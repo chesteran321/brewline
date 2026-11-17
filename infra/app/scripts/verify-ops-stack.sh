@@ -42,7 +42,9 @@ check "Public allow statements" "$(jq '[.Statement[] | select(.Effect == "Allow"
 alarms=$(aws cloudwatch describe-alarms --alarm-name-prefix "brewline-${env_name}-" --region "$region" --output json)
 total=$(jq '.MetricAlarms | length' <<<"$alarms")
 wired=$(jq --arg t "$topic" '[.MetricAlarms[] | select((.AlarmActions | index($t)) and (.OKActions | index($t)))] | length' <<<"$alarms")
-check "Alarms (brewline-${env_name}-*)" "$total" "7"
+# 不寫死數量（每加一個告警就會失敗一次，S1b 踩到）；守住的是「全部接上主題」與「≤ 10 個免費額度」（ADR-030 D9）。
+# No fixed count (it broke on every new alarm); the invariants are "all wired" and "within the 10 free alarms".
+check "Alarms (brewline-${env_name}-*) within free tier (1-10)" "$([[ "$total" -ge 1 && "$total" -le 10 ]] && echo "true ($total)" || echo "false ($total)")" "true ($total)"
 check "Alarms notifying the topic (ALARM + OK)" "$wired" "$total"
 
 rule=$(aws events describe-rule --name "brewline-${env_name}-stock-low" --event-bus-name "brewline-${env_name}" --region "$region" --output json)

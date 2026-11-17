@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎完成；訂貨 A1（身分層＋商品唯讀 API）、A2a（租戶存取角色）、A2b（訂單 API＋Dev 訂單測試）、A3a／A3b（Streams＋事件層）、A3c（staff 端點＋狀態機）、A3d（逾時取消）完成，**訂貨 A3 完成**；A4a／A4b（CMK key policy＋維運告警 SNS）、A4c（聯絡人＋欄位層級加密）、A4d（SES 訂單通知信）、A4e（定期補貨）完成，**訂貨 A4 完成** / P0 complete; P1 CI/CD skeleton, shared data foundation, ordering A1 and A2 complete**（2026-11-13）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎、訂貨模組 A1–A4 完成；模擬器 S0（bus 資源政策）、S1a（simulator client、`synthetic`）、S1b（帳號、開關、排程）完成，S1c（訂單產生器）進行中** / P0 complete; P1 CI/CD, data foundation and ordering A1–A4 complete; simulator S0–S1b complete, S1c in progress（2026-11-17）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -199,7 +199,8 @@
                "cloudformation:ExecuteChangeSet", "lambda:CreateFunction", "lambda:UpdateFunctionCode",
                "ec2:RunInstances", "s3:CreateBucket", "dynamodb:CreateTable", "states:CreateStateMachine",
                "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream",
-               "athena:StartQueryExecution", "glue:StartJobRun", "glue:StartCrawler"],
+               "athena:StartQueryExecution", "glue:StartJobRun", "glue:StartCrawler",
+               "cognito-idp:AdminInitiateAuth"],
     "Resource": "*",
     "Condition": { "ArnNotLike": { "aws:PrincipalArn": "arn:aws:iam::*:role/aws-reserved/sso.amazonaws.com/*AWSReservedSSO_Admin_*" } }
   }]
@@ -208,7 +209,9 @@
 
 - 只擋建立與按次計費呼叫，不擋刪除；Identity Center Admin 角色豁免。
 - 鎖定時 **CDK / GitHub Actions 部署會全部失敗**（錯誤訊息出現 `p-mljh1epv`）。
-- 擋不住已經在跑的排程 Lambda → 模擬器要靠 SIM-N-001 的 SSM 開關。
+- ~~擋不住已經在跑的排程 Lambda~~ → **2026-11-17 加上 `cognito-idp:AdminInitiateAuth`（ADR-030 D7②）**：鎖定時模擬器（以及 Dev smoke test）無法以 IAM 身分登入 Cognito，排程雖然照常觸發，每輪都會在登入時失敗 → 模擬器實質停止。真實咖啡廳走 SRP（`InitiateAuth`，不經 IAM），不受影響。SSM 開關（SIM-N-001）仍是平時的暫停方式。
+  - 已驗證（管理帳號 Admin，暫時掛到 Dev OU 約 3 分鐘）：反向：Dev `OrganizationAccountAccessRole` → `admin-initiate-auth` → `AccessDeniedException … explicit deny in a service control policy: …/p-mljh1epv`；移除後同一指令 → `NotAuthorizedException`（已通過授權、帳號不存在）；`list-targets-for-policy` = `[]`。
+  - 測試選 `OrganizationAccountAccessRole` 的原因：管理帳號不受 SCP 限制、SSO Admin 被此政策豁免；這個角色有 AdministratorAccess 又不在豁免名單，被拒只可能是 SCP。
 
 ### 4.5 `rcp-data-perimeter`
 
@@ -749,6 +752,44 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - （2026-11-16）`aws lambda invoke` 只要呼叫成功就回 0；函數錯誤在輸出檔 → 加 `--query FunctionError`。
 - （2026-11-16）CloudShell `read` 與下一行一起貼上會把下一行讀進變數（今天 2 次）→ 個人環境直接賦值，並 `echo "[$VAR]"` 確認；測試函數的錯誤訊息拆成「缺 KMS_KEY_ARN」與「email 格式錯」。
 
+### 10.16 模擬器 S1b：帳號、開關、排程 / Simulator S1b（P1，2026-11-17，ADR-030）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| Stack | `brewline-dev-simulator`（module `simulator`；部署在 api 之後） | `brewline-prod-simulator`（**終止保護**） |
+| 帳號（D3） | custom resource `Custom::BrewlineSimulatorAccounts`（函數 `brewline-dev-simulator-provision`）：`sim-001`…`sim-040@example.com`、群組 `simulator`、`custom:tenant_id` 由種子決定（`brewline-dev-sim-2026`）；每次部署都檢查（自我修復缺少的帳號或密碼）；tenant_id 不符 → 部署失敗，不自動修正；刪除 stack 時刪除帳號 | 種子 `brewline-prod-sim-2026`；刪除 stack 時**保留**帳號與參數 |
+| 密碼（D2） | SSM `/brewline/dev/simulator/credentials`：SecureString（資料層 CMK，Standard），`{ username: password }`；由 custom resource 以 SDK 建立（CloudFormation 不能建 SecureString）；不寫日誌、不回傳給 CloudFormation | 同左 |
+| 開關（D7） | SSM `/brewline/dev/simulator/state`：`paused`／`running`；**只在不存在時建立為 `paused`**，部署不覆蓋；不認得的值、讀取失敗都當成 `paused` | 同左 |
+| 設定 | SSM `/brewline/dev/simulator/config`（CDK 管理）：`poolSize 40`、`initialActive 30`、每日 2–6 筆、每筆 1–3 個商品 × 1–5 kg、重複下單 2% | 每日 5–40 筆 |
+| 排程（D8） | 群組 `brewline-dev-simulator`，排程 `brewline-dev-simulator-tick`：`cron(5 8-19 * * ? *)` `Asia/Taipei`、`FlexibleTimeWindow OFF`、不重試、DLQ；角色 `brewline-dev-simulator-scheduler`（`aws:SourceArn` = 排程**群組** ARN） | 同左 |
+| 執行函數 | `brewline-dev-simulator-run`（保留併發 1、逾時 2 分、非同步重試 0 → DLQ）：先讀 `state`，不是 `running` 就結束；**S1b 只做探測**（`sim-001` 經由 simulator client 登入 → `GET /products`，不寫資料）；手動 `{"probe": true}` 不論開關都探測一次 | 同左 |
+| 執行角色 | `cognito-idp:AdminInitiateAuth`（pool）＋`ssm:GetParameter`（3 個參數）＋`kms:Decrypt`（`kms:ViaService = ssm`、`kms:EncryptionContext:PARAMETER_ARN = credentials`）；**不能**建立／修改帳號、寫參數、碰 DynamoDB | 同左 |
+| 告警（D9） | `brewline-dev-simulator-run-errors`（≥ 1）、`…-simulator-dlq-not-empty` → `ops-alerts`；帳號告警總數 9（≤ 10 免費） | 同左 |
+| **產生器（S1c）** | 每日 2–6 筆 | 每日 5–40 筆（docs/07 §2） |
+
+**S1c 訂單產生器**（`services/simulator/src/generator.ts`，純函數）：
+- 每日筆數＝範圍中點 × 季節（12 個月；12 月 1.15、7 月 0.9）× 星期（週一 1.4、週日 0.3）× 雜訊 ±25%，夾在最小／最大值之間；依每小時權重分配到 08–19 時（10 點最多）。
+- 每筆 1–3 個不同商品、每個 1–5 kg；從**完整目錄**（種子檔的 8 個商品）挑選，執行時拿掉 `stock_status` 不是 `in_stock` 的商品，全部拿掉就跳過（`skipped_no_stock`）。
+- 冪等鍵＝`sim-` ＋ sha256(種子│日期│小時│序號) 前 32 個十六進位字元 → 重跑同一小時只會重播（200）；2% 的請求用同一個 key 重送，必須 200 且同一個 `order_id`（SIM-F-008）。
+- 啟用中的帳號：`initialActive` 30，`activationStartMonth`（2026-11）之後每月由種子決定多 1 或 2 家，上限 40（SIM-F-001）。
+- 執行：每一小時依台北日期與小時產生計畫；各帳號經由 simulator client 登入（每輪每帳號一次）；請求間隔 ≥ 1 秒（SIM-N-002）；503 用同一個 key 重試一次。201／200／409 都正常，422（重跑時庫存狀態改變）記為 `key_conflict` 並警告；其他狀態或重送不符 → 跑完這一小時後丟錯 → `run-errors` 告警。日誌只記數量與參考編號（`<日期>T<小時>#<序號>`），不記帳號或 token。
+- 手動事件：`{"dryRun": true, "date": "YYYY-MM-DD"}` 回傳當天計畫的筆數、每小時分布與雜湊（不看開關、不登入、不呼叫 API）→ SIM-F-009 驗收。
+- 模擬訂單在 Dev 10 分／Prod 48 小時後由逾時工作流取消（D5）；模擬帳號沒有聯絡人 → 通知函數 `skipped_no_contact`，不寄信。
+
+- 費用：沒有新的固定費用（SecureString Standard 免費、排程在免費額度內、告警 ≤ 10）。S1b 只有探測，`paused` 時每輪只有 1 次 SSM 讀取。
+- 新 CloudFormation 類型：`AWS::Scheduler::Schedule`（2026-11-17 `describe-type` 實測 LIVE，§2）。
+
+已驗證（2026-11-17，S1a PR #54／#56、S1b PR #57／#58；Deploy run #52、#54）：
+- `verify-simulator-stack.sh` Dev、Prod 全部 ✅（Prod 整體 401 項、0 ❌）：帳號 40、`simulator` 群組 40 人且**沒有人在 staff**、`state = paused`、密碼參數 `SecureString`＋CMK＋Standard、**唯讀角色解不開**、排程（`ENABLED`、cron、`Asia/Taipei`、不重試、DLQ、角色信任排程群組 ARN）、函數標準設定、非同步重試 0 → DLQ、告警 2（帳號總數 9）、Prod 終止保護。
+- 政策模擬（執行角色）：正向 `AdminInitiateAuth`、讀密碼參數 = `allowed`；反向 `AdminCreateUser`、`AdminSetUserPassword`、寫 `state`、讀其他參數、DynamoDB `PutItem` = `implicitDeny`。
+- **Dev 手動開關測試**（Admin）：`paused` → `{"outcome":"paused"}`；`running` → `probe_ok`（`status 200`、`products 8`、`synthetic true`）；`RUNNING`（不認得的值）→ `paused`；`paused`＋`{"probe": true}` → `probe_ok`；最後恢復 `paused`。
+- **Prod 手動探測**（Admin，`state = paused`）：`{"probe": true}` → `probe_ok`（`status 200`、`products 8`、`synthetic true`）；`{"source":"manual"}` → `paused`。Prod 的模擬器**尚未開啟**。
+- 一個 `probe_ok` 同時驗證：SSM 讀密碼（CMK、`kms:EncryptionContext:PARAMETER_ARN`）→ simulator client 登入 → token 的 `synthetic` claim（S1a）→ authorizer audience → 目錄 API。
+
+教訓 / Lessons：
+- 驗證腳本也會有 bug：唯讀角色讀不到 Lambda 環境變數的值（#56，§10.14 #8 再犯一次）、寫死的告警總數（#58）。兩次都是「系統正常、驗證失敗」，管線因此跳過 Prod，沒有讓問題上線。驗證要檢查**不變條件**（全部接上、在上限內、只允許這些），不檢查某個時間點的數量或看不到的值。
+- `state`／`credentials` 刻意不交給 CloudFormation：CloudFormation 不能建 SecureString，而由 CloudFormation 管理的開關會在部署時被覆蓋回預設值。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -765,7 +806,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-020 | A1 不掛 WAF，改以分層限流 | Accepted（2026-11-12） | 登入／註冊走 Cognito 端點、execute-api 可繞過 CloudFront → CloudFront WAF 無效；regional WAF 每年約 USD 190。改以不開放註冊、JWT、scope、限流、保留併發、DynamoDB 上限、Budget Actions；前端時改 CloudFront＋WAF（§10.7） |
 | ADR-021 | API 類型：HTTP API | Accepted（2026-11-12） | 較便宜、內建 JWT＋scope；無法直接掛 WAF、無每租戶限流（ORD-N-003 待 A2）（§10.7） |
 | ADR-022 | 身分層：Cognito Essentials、scope 授權、`custom:tenant_id` | Accepted（2026-11-12） | pre token V2 群組→scope、tenant_id claim；MFA OPTIONAL＋TOTP；不開放註冊（§10.6） |
-| ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22 |
+| ADR-023 | Node 24：本機、CI、Lambda 一致 | Accepted（2026-11-12；**2026-11-17 修訂**） | Lambda `nodejs24.x`（淘汰 2028-04-30）；`.nvmrc`、`engines`、`@types/node` 改 24；取代 status §10.3 的 Node 22。**修訂**：aws-cdk-lib 2.277.0 認得 `nodejs26.x`，cdk-nag `AwsSolutions-L1` 因此判定 Node 24 違規；`nodejs26.x` 在 Lambda 仍是公開預覽版（無 SLA、不建議正式環境，GA 須等 Node 26 進入 Active LTS）→ 維持 Node 24，以 `LATEST_RUNTIME_ACK` acknowledge（`BrewlineFunction` 與 CDK provider 框架函數）；GA 後評估升級並移除例外 |
 | ADR-024 | 租戶隔離：STS session tag ＋ `LeadingKeys` 完全比對 | Accepted（2026-11-13） | 訂單函數（`brewline-<env>-orders-*`）帶 `tenant_id` 扮演 `brewline-<env>-tenant-access`；商品只能改庫存欄位；Scan 明確 Deny（§10.8） |
 | ADR-025 | 下單交易與冪等 | Accepted（2026-11-13） | 冪等記錄＋訂單＋扣庫存在同一個交易；sk `ORDER#<ULID>`；伺服器端定價；≤ 25 個商品、1–500 kg；路由限流（§10.9） |
 | ADR-029 | 通知、聯絡人與定期補貨（A4 決策） | Accepted（2026-11-16） | Route 53 網域＋SES DKIM／MAIL FROM／DMARC；聯絡人欄位以 KMS＋encryption context 加密；SNS 用 CMK（key policy 授權服務）；每租戶一位聯絡人；只在建立／確認／出貨／取消寄信；Scheduler 定期補貨（§10.12–§10.15）；**A4 全部完成** |
@@ -780,6 +821,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | RSK-015 | 撤銷的帳號在 access token 到期前（≤ 15 分）仍可呼叫 API；staff MFA 無法由 Cognito 強制 | M | M | Token **15 分鐘**（A2a，原 60 分）；部署後驗證偵測 staff 未設 TOTP；A2 起高風險操作在 Lambda 再查使用者狀態 |
 | RSK-016 | A3 之前已預留的庫存不會自動釋放；單筆最多預留 500 kg，可能佔滿某商品 | M | M | 不開放註冊；路由限流；**A3c staff 可取消、A3d 未確認訂單自動取消並釋放（Dev 10 分／Prod 48 小時）**；剩餘：48 小時內仍可佔住庫存 |
 | RSK-017 | 自訂 bus 沒有資源政策：同帳號內有 `events:PutEvents` 的身分可偽造 `brewline.ordering` 事件（例如假的 `OrderCreated` 會啟動逾時工作流，但取消前會讀 DynamoDB，影響有限） | L | M | **已緩解（S0，2026-11-17）**：bus 資源政策 Deny 白名單以外的 `PutEvents`（§10.10）。剩餘：SSO Admin 與 CloudFormation 執行角色（可改政策）仍可發布 |
+| RSK-018 | 模擬器帳號 custom resource 有 `AdminCreateUser`／`AdminSetUserPassword`／`AdminAddUserToGroup`（IAM 無法依群組或使用者限制）：能修改此函數或其角色的身分，理論上可以重設 staff 密碼或把帳號加進 staff | L | M | 函數只由 CloudFormation provider 呼叫；修改需要 CI 部署或 Admin；Developer 只在 Dev 且不能改 Lambda／IAM；執行中的模擬器函數**只有** `AdminInitiateAuth`（S1b，政策模擬驗證）；`verify-simulator-stack.sh` 檢查模擬帳號不在 staff 群組 |
 | RSK-013 | 主要區域無 Macie，無法自動偵測 S3 中的個資 | L | L | 個資只存 DynamoDB；DATA-011/012 設計層預防；資料湖 DQ 檢查加入 Email／電話格式偵測 |
 
 ---
@@ -822,6 +864,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 09 §1.3 | Lite → **Essentials**；「staff 強制 TOTP」→ OPTIONAL＋偵測性檢查；威脅防護不開（需 Plus，FSBP `Cognito.1` 預期失敗） |
 | 09 §2.1 | CORS：A1 不開；前端改走 CloudFront 同網域 |
 | 09 §2.2 | Node 24（ADR-023）；保留併發 Dev 5／Prod 10（API）；CodeDeploy canary 延後 |
+| 07 | 依 ADR-030 分階段：S1 租戶＋訂單＋重複下單；生豆／烘焙批次 → S2（溯源）；貨櫃、DCSA、IFTSTA、EDI 異常、`S3 edi/inbound` → S3（P2）。SIM-F-001 不建聯絡人（simulator 沒有 profile scope）；帳號部署時建立、依日期啟用（取代執行時新增）；SIM-F-010 改為訂單項目的 `synthetic: true`（伺服器依 JWT 判定）；SIM-N-001 開關「下一輪生效」；docs/11「預測 100% 自動暫停」改為 `scp-budget-lockdown` 擋 `AdminInitiateAuth`；服務清單去掉 S3／DynamoDB 直接寫入（S1） |
 
 ---
 
@@ -866,9 +909,11 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-16 | A4e 定期補貨（§10.15，PR #46、#47）部署 Dev、Prod；Dev smoke 78/78、`replenish-check` 10/10；**訂貨模組 A1–A4 完成** |
 | P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
 | ✅ 2026-11-17 | 模擬器決策 D1–D9 定案（docs/07 對照，見 ADR-030）；S0（RSK-017）bus 資源政策部署 Dev、Prod 並驗證，含真實憑證反向測試（§10.10，PR #52） |
-| P1 | 模擬器 S1a（simulator app client、synthetic 標記）：部署 Dev、Prod 後補驗證結果（Dev smoke 78 → 92） |
-| P1 | 模擬器 S1b（stack、paused）→ S1c（產生器）→ S1d（Prod 開啟） |
-| 手動 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`（管理帳號，S1b 部署前） |
+| ✅ 2026-11-17 | 模擬器 S1a（simulator client、`synthetic`）、S1b（stack、帳號 40、開關 `paused`、排程、探測）部署 Dev、Prod 並驗證，含 Dev 開關測試與 Prod 探測（§10.16，PR #54／#56／#57／#58） |
+| P1 | 模擬器 S1c（產生器，§10.16）：部署後 Dev 驗證 dry-run 雜湊相同、`running` 一小時（建立／重送／事件 `synthetic`）、`paused` 立即停止；Dev 觀察數天 → S1d（Prod 開啟） |
+| 有空時 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`）與 `scheduler:GetSchedule`／`ListSchedules`，讓 Developer 在 Dev 切換模擬器開關 |
+| ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |
+| nodejs26.x GA 後（預計 2026-11 底） | 評估 Lambda 升級到 Node 26（本機、CI、`Runtime`），移除 `LATEST_RUNTIME_ACK`（ADR-023 修訂） |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
