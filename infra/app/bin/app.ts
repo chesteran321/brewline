@@ -65,6 +65,7 @@ Tags.of(opsStack).add('module', 'ops', { priority: 200 });
 const eventsStack = new EventsStack(app, `brewline-${env.name}-events`, {
   envName: env.name,
   lambda: env.lambda,
+  allowTestPublisher: env.api.orderTests,
   env: { account: env.account, region: env.region },
   description: 'BrewLine event layer: EventBridge bus, Streams publisher, audit log, DLQs, alarms',
   terminationProtection: env.name === 'prod',

@@ -80,6 +80,7 @@ describe.each(['dev', 'prod'] as const)('EventsStack alerts wiring (%s)', (envNa
   const stack = new EventsStack(new App({ context: { 'aws:cdk:bundling-stacks': [] } }), `brewline-${envName}-events`, {
     envName,
     lambda: env.lambda,
+    allowTestPublisher: env.api.orderTests,
     env: { account: env.account, region: env.region },
   });
   const template = Template.fromStack(stack);

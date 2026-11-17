@@ -76,6 +76,7 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | Bus | `brewline-<env>`；SSM `/brewline/<env>/events/{bus-name,bus-arn}` |
 | 來源 | DynamoDB Streams → `brewline-<env>-events-stream-publisher`（台北**沒有** Pipes、Archive）；事件過濾只處理訂單與庫存 |
 | 事件 | `source=brewline.ordering`：`OrderCreated`、`OrderStatusChanged`、`StockLow`；detail 白名單、`event_id`＝stream eventID（下游去重） |
+| 發布者白名單 | bus 資源政策 Deny 白名單以外的 `PutEvents`（RSK-017）；**新增會發布事件的函數時，角色名稱要加進 `EventsStack.publisherRoleNames()`** |
 | 留存 | 規則寫入 `/aws/events/brewline-<env>`（取代 Archive）；DLQ SSE-SQS |
 
 ### 維運通知 / Ops notifications（ADR-029）
