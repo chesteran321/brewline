@@ -73,6 +73,20 @@ has_smoke=$(aws cognito-idp list-user-pool-clients --user-pool-id "$pool_id" --r
   --query "length(UserPoolClients[?ClientName=='smoke-test'])" --output text)
 check "Smoke-test client present" "$([[ "$has_smoke" == "1" ]] && echo true || echo false)" "$want_smoke_client"
 
+# --- 模擬器 client（ADR-030 D2，兩個環境都有）/ Simulator client (both envs) ---
+sim_client=$(jq -r --arg s "$stack" '.[$s].SimulatorClientId // empty' "$outputs")
+sim=$(aws cognito-idp describe-user-pool-client --user-pool-id "$pool_id" --client-id "$sim_client" --region "$region" --output json 2>/dev/null || echo '{}')
+check "Simulator client name"         "$(jq -r '.UserPoolClient.ClientName // "missing"' <<<"$sim")" "simulator"
+check "Simulator client auth flows"   "$(jq -c '.UserPoolClient.ExplicitAuthFlows // [] | sort' <<<"$sim")" '["ALLOW_ADMIN_USER_PASSWORD_AUTH","ALLOW_REFRESH_TOKEN_AUTH"]'
+check "Simulator client has no secret" "$(jq -r '.UserPoolClient.ClientSecret == null' <<<"$sim")" "true"
+check "Simulator client cannot write tenant_id" \
+  "$(jq -r '.UserPoolClient.WriteAttributes | index("custom:tenant_id") == null' <<<"$sim")" "true"
+check "Simulator client access token validity" "$(jq -r '"\(.UserPoolClient.AccessTokenValidity) \(.UserPoolClient.TokenValidityUnits.AccessToken)"' <<<"$sim")" "15 minutes"
+check "SSM simulator-client-id" "$(aws ssm get-parameter --name "/brewline/${env_name}/auth/simulator-client-id" --region "$region" \
+  --query Parameter.Value --output text)" "$sim_client"
+check "Pre token reads simulator-client-id param" "$(aws lambda get-function-configuration --function-name "$fn_name" --region "$region" \
+  --query Environment.Variables.SIMULATOR_CLIENT_ID_PARAM --output text 2>/dev/null)" "/brewline/${env_name}/auth/simulator-client-id"
+
 # --- Pre token Lambda ---
 cfg=$(aws lambda get-function-configuration --function-name "$fn_name" --region "$region" --output json)
 check "Lambda runtime"               "$(jq -r '.Runtime' <<<"$cfg")" "nodejs24.x"
@@ -97,6 +111,10 @@ check "Self sign-up rejected" "$(error_code aws cognito-idp sign-up --no-sign-re
   --client-id "$web_client" --username "$probe_user" --password "$probe_pass")" "NotAuthorizedException"
 check "USER_PASSWORD_AUTH rejected on web client" "$(error_code aws cognito-idp initiate-auth --no-sign-request --region "$region" \
   --client-id "$web_client" --auth-flow USER_PASSWORD_AUTH --auth-parameters "USERNAME=${probe_user},PASSWORD=${probe_pass}")" \
+  "InvalidParameterException"
+# 模擬器 client 只接受 IAM 簽章的 admin 流程 / The simulator client accepts only the IAM-signed admin flow.
+check "USER_PASSWORD_AUTH rejected on simulator client" "$(error_code aws cognito-idp initiate-auth --no-sign-request --region "$region" \
+  --client-id "$sim_client" --auth-flow USER_PASSWORD_AUTH --auth-parameters "USERNAME=${probe_user},PASSWORD=${probe_pass}")" \
   "InvalidParameterException"
 
 # --- 偵測性控制：已啟用的 staff 帳號都必須設定 TOTP（ADR-022）---

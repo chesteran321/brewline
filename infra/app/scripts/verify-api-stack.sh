@@ -68,6 +68,10 @@ issuer=$(aws ssm get-parameter --name "/brewline/${env_name}/auth/issuer" --regi
 web_client=$(aws ssm get-parameter --name "/brewline/${env_name}/auth/web-client-id" --region "$region" --query Parameter.Value --output text)
 check "Authorizer issuer = user pool" "$(jq -r '.Items[0].JwtConfiguration.Issuer' <<<"$authz")" "$issuer"
 check "Authorizer audience has web client" "$(jq -r --arg c "$web_client" '.Items[0].JwtConfiguration.Audience | index($c) != null' <<<"$authz")" "true"
+sim_client=$(aws ssm get-parameter --name "/brewline/${env_name}/auth/simulator-client-id" --region "$region" --query Parameter.Value --output text)
+check "Authorizer audience has simulator client" "$(jq -r --arg c "$sim_client" '.Items[0].JwtConfiguration.Audience | index($c) != null' <<<"$authz")" "true"
+check "SSM api/endpoint = API URL" "$(aws ssm get-parameter --name "/brewline/${env_name}/api/endpoint" --region "$region" \
+  --query Parameter.Value --output text)" "$api_url"
 
 stage=$(aws apigatewayv2 get-stage --api-id "$api_id" --stage-name '$default' --region "$region" --output json)
 # ThrottlingRateLimit 是浮點數（API 回 10.0），先轉整數再比對 / The API returns the rate as a float (10.0).

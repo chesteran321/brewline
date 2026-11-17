@@ -58,6 +58,10 @@ export class ApiStack extends Stack {
   public readonly orderTimeout: OrderTimeoutWorkflow;
   public readonly tenantAccess: TenantAccessRole;
 
+  public static parameterPrefix(envName: EnvName): string {
+    return `/brewline/${envName}/api`;
+  }
+
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
     const { envName } = props;
@@ -72,6 +76,8 @@ export class ApiStack extends Stack {
     const issuer = param(`${authPrefix}/issuer`);
     const webClientId = param(`${authPrefix}/web-client-id`);
     const smokeClientId = props.api.smokeTest ? param(`${authPrefix}/smoke-test-client-id`) : undefined;
+    // 模擬器 client（ADR-030 D2，Dev 與 Prod）/ Simulator client (Dev and Prod).
+    const simulatorClientId = param(`${authPrefix}/simulator-client-id`);
     const gsi1Arn = `${tableArn}/index/${DataStack.GSI1.indexName}`;
 
     // --- 2) IAM 片段 / IAM building blocks ---
@@ -255,7 +261,7 @@ export class ApiStack extends Stack {
     // Access tokens carry client_id (not aud); the authorizer accepts either claim from this list.
     const authorizer = new HttpJwtAuthorizer('CognitoJwt', issuer, {
       authorizerName: 'cognito-jwt',
-      jwtAudience: smokeClientId ? [webClientId, smokeClientId] : [webClientId],
+      jwtAudience: [webClientId, simulatorClientId, ...(smokeClientId ? [smokeClientId] : [])],
       identitySource: ['$request.header.Authorization'],
     });
 
@@ -400,6 +406,7 @@ export class ApiStack extends Stack {
           ApiUrl: this.httpApi.apiEndpoint,
           UserPoolId: param(`${authPrefix}/user-pool-id`),
           ClientId: smokeClientId,
+          SimulatorClientId: simulatorClientId,
           ProductId: SMOKE_PRODUCT_ID,
           OrderProductId: SMOKE_ORDER_PRODUCT_ID,
           ScheduleGroup: Replenishment.groupName(envName),
@@ -492,6 +499,13 @@ export class ApiStack extends Stack {
     }
 
     new CfnOutput(this, 'ApiUrl', { value: this.httpApi.apiEndpoint });
+    // 模擬器以 SSM 取得 API 位址（ADR-030；不用 CloudFormation Export）/ The simulator reads the API URL from SSM.
+    new ssm.StringParameter(this, 'ApiEndpointParam', {
+      parameterName: `${ApiStack.parameterPrefix(envName)}/endpoint`,
+      stringValue: this.httpApi.apiEndpoint,
+      tier: ssm.ParameterTier.STANDARD,
+      description: `BrewLine ${envName} ordering API endpoint`,
+    });
     new CfnOutput(this, 'TenantAccessRoleArn', { value: this.tenantAccess.role.roleArn });
     new CfnOutput(this, 'ApiId', { value: this.httpApi.apiId });
     new CfnOutput(this, 'FunctionNames', {

@@ -457,9 +457,12 @@ components:
       allOf:
         - $ref: '#/components/schemas/Order'
         - type: object
-          required: [tenant_id]
+          required: [tenant_id, synthetic]
           properties:
             tenant_id: { type: string }
+            synthetic:
+              type: boolean
+              description: 模擬器建立的訂單（ADR-030 D6；依已驗證 token 的群組判定，咖啡廳的回應沒有此欄位）/ Created by the simulator
     TenantContactInput:
       type: object
       additionalProperties: false

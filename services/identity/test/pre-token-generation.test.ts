@@ -1,19 +1,25 @@
+import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import type { PreTokenGenerationV2TriggerEvent } from 'aws-lambda';
-import { decide, handler } from '../src/pre-token-generation';
+import { mockClient } from 'aws-sdk-client-mock';
+import { decide, handler, resetSimulatorClientIdCache } from '../src/pre-token-generation';
 import { SCOPES, TENANT_ID_PATTERN } from '../src/scopes';
 
 const TENANT = 't_01JD8Z3K5M7N9P0Q2R4S6T8V0W';
 const SIM_SCOPES = [SCOPES.catalogRead, SCOPES.ordersRead, SCOPES.ordersWrite].sort();
 const CAFE_SCOPES = [...SIM_SCOPES, SCOPES.profileRead, SCOPES.profileWrite].sort();
 
-function event(groups: string[], attrs: Record<string, string> = {}): PreTokenGenerationV2TriggerEvent {
+const SIM_CLIENT = 'sim-client-id';
+const PARAM = '/brewline/dev/auth/simulator-client-id';
+const ssmMock = mockClient(SSMClient);
+
+function event(groups: string[], attrs: Record<string, string> = {}, clientId = 'web-client-id'): PreTokenGenerationV2TriggerEvent {
   return {
     version: '2',
     triggerSource: 'TokenGeneration_Authentication',
     region: 'ap-east-2',
     userPoolId: 'ap-east-2_example',
     userName: 'user',
-    callerContext: { awsSdkVersion: 'x', clientId: 'client' },
+    callerContext: { awsSdkVersion: 'x', clientId },
     request: { userAttributes: { sub: 'abc', ...attrs }, groupConfiguration: { groupsToOverride: groups } },
     response: { claimsAndScopeOverrideDetails: {} },
   } as PreTokenGenerationV2TriggerEvent;
@@ -25,8 +31,27 @@ describe('decide()', () => {
     expect(decide(['cafe'], TENANT)).toEqual({ scopes: CAFE_SCOPES, tenantId: TENANT });
   });
 
-  test('simulator is treated like a café for orders (ADR-011) but gets no profile scopes (ADR-029 D4)', () => {
-    expect(decide(['simulator'], TENANT)).toEqual({ scopes: SIM_SCOPES, tenantId: TENANT });
+  test('simulator is treated like a café for orders (ADR-011) but gets no profile scopes (ADR-029 D4), and is synthetic', () => {
+    expect(decide(['simulator'], TENANT)).toEqual({ scopes: SIM_SCOPES, tenantId: TENANT, synthetic: true });
+  });
+
+  // ADR-030 D2：simulator client 只服務 simulator 群組 / The simulator client serves the simulator group only.
+  test('simulator via the simulator client: same scopes, synthetic', () => {
+    expect(decide(['simulator'], TENANT, { viaSimulatorClient: true })).toEqual({ scopes: SIM_SCOPES, tenantId: TENANT, synthetic: true });
+  });
+
+  test.each([
+    [['cafe'], TENANT],
+    [['staff'], undefined],
+    [['cafe', 'simulator'], TENANT],
+    [['simulator', 'staff'], TENANT],
+  ] as const)('groups %j via the simulator client → no scopes (client-not-allowed)', (groups, tenant) => {
+    expect(decide(groups, tenant, { viaSimulatorClient: true })).toEqual({ scopes: [], denyReason: 'client-not-allowed' });
+  });
+
+  test('cafe and staff are never synthetic', () => {
+    expect(decide(['cafe'], TENANT).synthetic).toBeUndefined();
+    expect(decide(['staff'], undefined).synthetic).toBeUndefined();
   });
 
   test('only cafe gets profile.read / profile.write', () => {
@@ -81,6 +106,44 @@ describe('TENANT_ID_PATTERN', () => {
 });
 
 describe('handler', () => {
+  beforeEach(() => {
+    ssmMock.reset();
+    resetSimulatorClientIdCache();
+    process.env.SIMULATOR_CLIENT_ID_PARAM = PARAM;
+    ssmMock.on(GetParameterCommand, { Name: PARAM }).resolves({ Parameter: { Value: SIM_CLIENT } });
+  });
+
+  test('simulator: synthetic claim next to tenant_id', async () => {
+    const out = await handler(event(['simulator'], { 'custom:tenant_id': TENANT }, SIM_CLIENT));
+    expect(out.response.claimsAndScopeOverrideDetails).toEqual({
+      accessTokenGeneration: { scopesToAdd: SIM_SCOPES, claimsToAddOrOverride: { tenant_id: TENANT, synthetic: 'true' } },
+    });
+  });
+
+  test('cafe via the simulator client: no scopes, no claims', async () => {
+    const out = await handler(event(['cafe'], { 'custom:tenant_id': TENANT }, SIM_CLIENT));
+    expect(out.response.claimsAndScopeOverrideDetails.accessTokenGeneration).toEqual({ scopesToAdd: [] });
+  });
+
+  test('client id is read from SSM once and cached', async () => {
+    await handler(event(['cafe'], { 'custom:tenant_id': TENANT }));
+    await handler(event(['staff']));
+    expect(ssmMock.commandCalls(GetParameterCommand)).toHaveLength(1);
+  });
+
+  test('fail closed: SSM error fails the sign-in and is not cached', async () => {
+    ssmMock.on(GetParameterCommand).rejectsOnce(new Error('ThrottlingException'));
+    await expect(handler(event(['cafe'], { 'custom:tenant_id': TENANT }))).rejects.toThrow('ThrottlingException');
+    ssmMock.on(GetParameterCommand, { Name: PARAM }).resolves({ Parameter: { Value: SIM_CLIENT } });
+    await expect(handler(event(['cafe'], { 'custom:tenant_id': TENANT }))).resolves.toBeDefined();
+    expect(ssmMock.commandCalls(GetParameterCommand)).toHaveLength(2);
+  });
+
+  test('fail closed: missing parameter name', async () => {
+    delete process.env.SIMULATOR_CLIENT_ID_PARAM;
+    await expect(handler(event(['cafe'], { 'custom:tenant_id': TENANT }))).rejects.toThrow('SIMULATOR_CLIENT_ID_PARAM');
+  });
+
   test('writes scopes and tenant claim into the access token only', async () => {
     const out = await handler(event(['cafe'], { 'custom:tenant_id': TENANT }));
     expect(out.response.claimsAndScopeOverrideDetails).toEqual({

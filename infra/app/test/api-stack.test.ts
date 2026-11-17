@@ -73,10 +73,14 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
     expect(routes['GET /admin/products/{id}/stock']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/admin'] });
   });
 
-  test('JWT authorizer reads issuer and audience from SSM; smoke client only in Dev', () => {
+  test('JWT authorizer reads issuer and audience from SSM; simulator client in both envs, smoke client only in Dev', () => {
     const [[, a]] = resources(template, 'AWS::ApiGatewayV2::Authorizer') as [[string, Res]];
     expect(a.Properties.AuthorizerType).toBe('JWT');
-    expect(a.Properties.JwtConfiguration.Audience).toHaveLength(cfg.api.smokeTest ? 2 : 1);
+    const aud = JSON.stringify(a.Properties.JwtConfiguration.Audience);
+    expect(a.Properties.JwtConfiguration.Audience).toHaveLength(cfg.api.smokeTest ? 3 : 2);
+    expect(aud).toContain(`brewline${envName}authwebclientid`);
+    expect(aud).toContain(`brewline${envName}authsimulatorclientid`);
+    expect(aud.includes('smoketestclientid')).toBe(cfg.api.smokeTest);
     const params = Object.keys(template.toJSON().Parameters);
     expect(params.some((p) => p.includes(`brewline${envName}authissuer`))).toBe(true);
     expect(params.some((p) => p.includes('smoketestclientid'))).toBe(cfg.api.smokeTest);
@@ -323,6 +327,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
     if (cfg.api.smokeTest) {
       const [, s] = smoke[0]!;
       expect(s.Properties).toMatchObject({ ProductId: 'p-0001', OrderProductId: 'p-9002', Commit: 'abc1234' });
+      expect(JSON.stringify(s.Properties.SimulatorClientId)).toContain('simulatorclientid');
       expect(s.DependsOn).toEqual(expect.arrayContaining(['CatalogSeed']));
       expect(s.DependsOn!.some((d) => d.startsWith('DefaultStage'))).toBe(true);
       expect(s.DependsOn!.filter((d) => /^HttpApi(GET|POST|PUT|PATCH|DELETE)/.test(d) && !d.includes('Integration'))).toHaveLength(14);
@@ -355,6 +360,14 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
       expect(r.Properties).toMatchObject({ Runtime: 'nodejs24.x', Architectures: ['arm64'], TracingConfig: { Mode: 'Active' } });
     }
     expect(fns.length - ours.length).toBe(cfg.api.smokeTest ? 2 : 1); // provider framework
+  });
+
+  test('API endpoint published to SSM for the simulator (ADR-030)', () => {
+    template.hasResourceProperties('AWS::SSM::Parameter', {
+      Name: `/brewline/${envName}/api/endpoint`,
+      Tier: 'Standard',
+      Value: { 'Fn::GetAtt': [Match.stringLikeRegexp('^HttpApi'), 'ApiEndpoint'] },
+    });
   });
 
   test('no CloudFormation exports', () => {
