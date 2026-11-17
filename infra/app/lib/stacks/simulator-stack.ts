@@ -10,7 +10,7 @@ import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import { LambdaGuardrailsChecker } from '../aspects/lambda-guardrails';
 import { EnvName, LambdaSettings, SimulatorSettings } from '../config';
-import { BrewlineFunction } from '../constructs/brewline-function';
+import { BrewlineFunction, LATEST_RUNTIME_ACK } from '../constructs/brewline-function';
 import { ApiStack } from './api-stack';
 import { AuthStack } from './auth-stack';
 import { DataStack } from './data-stack';
@@ -264,6 +264,8 @@ function createProvider(scope: Stack, pid: string, onEvent: BrewlineFunction): c
   });
   role.addToPolicy(new iam.PolicyStatement({ actions: ['logs:CreateLogStream', 'logs:PutLogEvents'], resources: [logGroup.logGroupArn] }));
   const provider = new cr.Provider(scope, pid, { onEventHandler: onEvent.function, frameworkOnEventRole: role, logGroup });
+  // 框架函數的 runtime 由 CDK 決定 / CDK chooses the framework function's runtime.
+  Validations.of(provider).acknowledge(LATEST_RUNTIME_ACK);
   LambdaGuardrailsChecker.exempt(provider, 'CDK provider framework function: runtime/architecture are chosen by CDK; it runs only during deployments.');
   Validations.of(role).acknowledge({
     id: `AwsSolutions-IAM5[Resource::<${scope.getLogicalId(onEvent.function.node.defaultChild as never)}.Arn>:*]`,

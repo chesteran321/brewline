@@ -14,7 +14,7 @@ import { Construct } from 'constructs';
 import { SCOPES } from '../../../../services/identity/src/scopes';
 import { LambdaGuardrailsChecker } from '../aspects/lambda-guardrails';
 import { ApiSettings, EnvName, LambdaSettings } from '../config';
-import { BrewlineFunction, SERVICES_ROOT } from '../constructs/brewline-function';
+import { BrewlineFunction, LATEST_RUNTIME_ACK, SERVICES_ROOT } from '../constructs/brewline-function';
 import { OrderTimeoutWorkflow } from '../constructs/order-timeout-workflow';
 import { Replenishment } from '../constructs/replenishment';
 import { TenantAccessRole } from '../constructs/tenant-access-role';
@@ -539,6 +539,8 @@ export class ApiStack extends Stack {
       frameworkOnEventRole: role,
       logGroup,
     });
+    // 框架函數的 runtime 由 CDK 決定 / CDK chooses the framework function's runtime.
+    Validations.of(provider).acknowledge(LATEST_RUNTIME_ACK);
     LambdaGuardrailsChecker.exempt(
       provider,
       'CDK provider framework function: runtime/architecture are chosen by CDK; it runs only during deployments.',
