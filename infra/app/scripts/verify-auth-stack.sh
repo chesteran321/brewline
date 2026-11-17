@@ -84,8 +84,15 @@ check "Simulator client cannot write tenant_id" \
 check "Simulator client access token validity" "$(jq -r '"\(.UserPoolClient.AccessTokenValidity) \(.UserPoolClient.TokenValidityUnits.AccessToken)"' <<<"$sim")" "15 minutes"
 check "SSM simulator-client-id" "$(aws ssm get-parameter --name "/brewline/${env_name}/auth/simulator-client-id" --region "$region" \
   --query Parameter.Value --output text)" "$sim_client"
-check "Pre token reads simulator-client-id param" "$(aws lambda get-function-configuration --function-name "$fn_name" --region "$region" \
-  --query Environment.Variables.SIMULATOR_CLIENT_ID_PARAM --output text 2>/dev/null)" "/brewline/${env_name}/auth/simulator-client-id"
+# 唯讀角色讀不到 Lambda 環境變數的值（status §10.14 #8）→ 驗證真正的控管：觸發器角色只能讀這一個參數。
+# The read-only role cannot see env var values, so verify the real control: the trigger role reads only this parameter.
+trigger_role=$(aws lambda get-function-configuration --function-name "$fn_name" --region "$region" --query Role --output text)
+account=$(cut -d: -f5 <<<"$trigger_role")
+ssm_arn() { echo "arn:aws:ssm:${region}:${account}:parameter$1"; }
+sim_decision() { aws iam simulate-principal-policy --policy-source-arn "$trigger_role" --action-names ssm:GetParameter \
+  --resource-arns "$(ssm_arn "$1")" --query 'EvaluationResults[0].EvalDecision' --output text; }
+check "Pre token role → simulator-client-id (allowed)" "$(sim_decision "/brewline/${env_name}/auth/simulator-client-id")" "allowed"
+check "Pre token role → data/kms-key-arn (negative)"   "$(sim_decision "/brewline/${env_name}/data/kms-key-arn")" "implicitDeny"
 
 # --- Pre token Lambda ---
 cfg=$(aws lambda get-function-configuration --function-name "$fn_name" --region "$region" --output json)
