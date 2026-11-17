@@ -31,6 +31,27 @@ check "Bus exists" "$(aws events describe-event-bus --name "$bus" --region "$reg
 check "SSM bus-name" "$(aws ssm get-parameter --name "/brewline/${env_name}/events/bus-name" --region "$region" \
   --query Parameter.Value --output text)" "$bus"
 
+# --- Bus 資源政策（RSK-017）：只有已知發布者能 PutEvents / Only known publishers may PutEvents ---
+account=$(aws sts get-caller-identity --query Account --output text)
+policy=$(aws events describe-event-bus --name "$bus" --region "$region" --query Policy --output text 2>/dev/null || echo '{}')
+[[ "$policy" == "None" ]] && policy='{}'
+deny=$(jq -c '[.Statement[]? | select(.Effect == "Deny" and .Action == "events:PutEvents")] | first // {}' <<<"$policy")
+# 單一值的條件陣列會被正規化成字串（status §10.8）→ 一律轉成陣列 / Single-value arrays come back as strings.
+allowed=$(jq -c '[.Condition.ArnNotLike["aws:PrincipalArn"] // empty] | flatten | sort' <<<"$deny")
+publisher_role=$(aws lambda get-function-configuration --function-name "$(out PublisherFunctionName)" --region "$region" \
+  --query Role --output text)
+want_allowed=$(jq -nc --arg p "$publisher_role" --arg a "$account" --arg e "$env_name" --arg t "$want_orders" '
+  [$p, "arn:aws:iam::\($a):role/brewline-\($e)-orders-replenish",
+   "arn:aws:iam::\($a):role/aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_Admin_*"]
+  + (if $t == "true" then ["arn:aws:iam::\($a):role/brewline-\($e)-orders-tests"] else [] end) | sort')
+# CDK 以 StatementId `cdk-<sid>` 建立 / CDK names the statement `cdk-<sid>`.
+check "Bus policy: Deny PutEvents statement" "$(jq -r '.Sid // "missing"' <<<"$deny")" "cdk-DenyPutEventsExceptKnownPublishers"
+check "Bus policy: Deny principal = everyone" "$(jq -r 'if .Principal == "*" or .Principal == {"AWS":"*"} then "*" else (.Principal | tostring) end' <<<"$deny")" "*"
+check "Bus policy: allowed publishers"       "$allowed" "$want_allowed"
+# 反向：沒有 Allow（不開放跨帳號）、沒有萬用的 orders-* / Negative: no Allow (no cross-account), no orders-* wildcard.
+check "Bus policy: Allow statements"         "$(jq '[.Statement[]? | select(.Effect == "Allow")] | length' <<<"$policy")" "0"
+check "Bus policy: orders-* wildcard"        "$(jq -r 'map(select(endswith("orders-*"))) | length' <<<"$allowed")" "0"
+
 # --- Streams 事件來源對應 / Stream event source mapping ---
 esm=$(aws lambda get-event-source-mapping --uuid "$(out StreamMappingId)" --region "$region" --output json)
 stream_arn=$(aws ssm get-parameter --name "/brewline/${env_name}/data/table-stream-arn" --region "$region" --query Parameter.Value --output text)

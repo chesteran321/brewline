@@ -12,6 +12,7 @@ function buildApp(envName: EnvName) {
   const stack = new EventsStack(app, `brewline-${envName}-events`, {
     envName,
     lambda: env.lambda,
+    allowTestPublisher: env.api.orderTests,
     env: { account: env.account, region: env.region },
   });
   Tags.of(stack).add('module', 'events', { priority: 200 });
@@ -73,6 +74,31 @@ describe.each(['dev', 'prod'] as const)('EventsStack (%s)', (envName) => {
       ReservedConcurrentExecutions: cfg.lambda.reservedConcurrency.streamPublisher,
       Environment: { Variables: Match.objectLike({ EVENT_BUS_NAME: { Ref: Match.stringLikeRegexp('^Bus') } }) },
     });
+  });
+
+  test('bus policy (RSK-017): Deny PutEvents to everyone except known publishers', () => {
+    const policies = resources(template, 'AWS::Events::EventBusPolicy');
+    expect(policies).toHaveLength(1);
+    const [[, p]] = policies as [[string, Res]];
+    expect(p.Properties.EventBusName).toEqual({ Ref: expect.stringMatching(/^Bus/) });
+    const st = p.Properties.Statement;
+    expect(st).toMatchObject({ Effect: 'Deny', Principal: { AWS: '*' }, Action: 'events:PutEvents' });
+    expect(st.Resource).toEqual({ 'Fn::GetAtt': [expect.stringMatching(/^Bus/), 'Arn'] });
+    expect(Object.keys(st.Condition)).toEqual(['ArnNotLike']);
+    const allowed = JSON.stringify(st.Condition.ArnNotLike['aws:PrincipalArn']);
+    // 正向：發布函數（本 stack 的角色）、補貨執行角色、SSO Admin / Positive: publisher, replenish run role, SSO Admin.
+    expect(allowed).toContain('StreamPublisherRole');
+    expect(allowed).toContain(`:iam::${cfg.account}:role/brewline-${envName}-orders-replenish"`);
+    expect(allowed).toContain(`:iam::${cfg.account}:role/aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_Admin_*"`);
+    // Dev 才有訂單測試函數 / Only Dev has the order-test publisher.
+    expect(allowed.includes(`role/brewline-${envName}-orders-tests"`)).toBe(cfg.api.orderTests);
+    // 反向：沒有放行整個帳號或整個 orders-* 前綴、沒有 Developer
+    // Negative: no account-wide or orders-* wildcard, no Developer.
+    expect(allowed).not.toContain('orders-*');
+    expect(allowed).not.toContain('Developer');
+    expect(allowed).not.toMatch(/:role\/\*"/);
+    // 沒有任何 Allow（同帳號由身分政策決定，也不開放跨帳號）/ No Allow: identity policies decide, no cross-account.
+    expect(JSON.stringify(policies)).not.toContain('"Allow"');
   });
 
   test('audit rule: brewline.* → log group, native resource policy scoped to the rule, rule DLQ', () => {

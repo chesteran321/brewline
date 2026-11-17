@@ -613,8 +613,10 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 稽核 log | 規則 `brewline-dev-audit-log`（`brewline.*`）→ `/aws/events/brewline-dev`（7 天）；原生 `AWS::Logs::ResourcePolicy`，`aws:SourceArn` = 規則 | 30 天 |
 | DLQ | `events-stream-dlq`、`events-rule-dlq`：SSE-SQS、僅 TLS、14 天 | 同左 |
 | 告警（無通知目標，A4 接上） | `…-events-stream-iterator-age`（> 5 分）、`…-events-stream-dlq-not-empty`、`…-events-rule-dlq-not-empty` | 同左 |
+| Bus 資源政策（RSK-017，S0） | `AWS::Events::EventBusPolicy`：**Deny** `events:PutEvents`，`Principal *`，`ArnNotLike aws:PrincipalArn` 白名單＝發布函數角色、`brewline-dev-orders-replenish`、`brewline-dev-orders-tests`（只有 Dev）、SSO `AWSReservedSSO_Admin_*`；沒有任何 Allow（不開放跨帳號） | 同左（無 `orders-tests`） |
 
 - 部署順序 data → events → api（api 依賴 events，Dev smoke test 下的單才會產生事件）。
+- **Bus 資源政策（2026-11-17，S0）**：同帳號內身分政策的 Allow 就能發布，資源政策的明確 Deny 會蓋過它 → 即使之後某個角色被誤給 `events:PutEvents`，也無法偽造 `brewline.*` 事件。白名單用**固定角色名稱**（補貨、測試角色在之後部署的 api stack）；新增發布者時要同時改 `EventsStack.publisherRoleNames()`，否則新函數 `PutEvents` 會收到 `AccessDeniedException`（explicit deny in a resource-based policy）。SSO Admin 保留，供手動測試與事故處理。
 - 費用：Lambda 觸發器讀 Streams 免費；自訂事件 USD 1／百萬；其餘在免費額度內 → 約 0。
 
 已驗證（2026-11-13，`scripts/verify-events-stack.sh`，commit `55c4799`）：
@@ -764,7 +766,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | RSK-014 | 無 WAF，惡意流量只能靠限流與預算控制；execute-api 網址可被直接呼叫 | M | L | ADR-020 的分層控制；前端上線時加 CloudFront＋WAF，評估關閉 execute-api 預設端點 |
 | RSK-015 | 撤銷的帳號在 access token 到期前（≤ 15 分）仍可呼叫 API；staff MFA 無法由 Cognito 強制 | M | M | Token **15 分鐘**（A2a，原 60 分）；部署後驗證偵測 staff 未設 TOTP；A2 起高風險操作在 Lambda 再查使用者狀態 |
 | RSK-016 | A3 之前已預留的庫存不會自動釋放；單筆最多預留 500 kg，可能佔滿某商品 | M | M | 不開放註冊；路由限流；**A3c staff 可取消、A3d 未確認訂單自動取消並釋放（Dev 10 分／Prod 48 小時）**；剩餘：48 小時內仍可佔住庫存 |
-| RSK-017 | 自訂 bus 沒有資源政策：同帳號內有 `events:PutEvents` 的身分可偽造 `brewline.ordering` 事件（例如假的 `OrderCreated` 會啟動逾時工作流，但取消前會讀 DynamoDB，影響有限） | L | M | Developer 權限集沒有 `events:*`；CI／Admin 才有；之後加 bus 資源政策只允許發布函數角色 |
+| RSK-017 | 自訂 bus 沒有資源政策：同帳號內有 `events:PutEvents` 的身分可偽造 `brewline.ordering` 事件（例如假的 `OrderCreated` 會啟動逾時工作流，但取消前會讀 DynamoDB，影響有限） | L | M | **已緩解（S0，2026-11-17）**：bus 資源政策 Deny 白名單以外的 `PutEvents`（§10.10）。剩餘：SSO Admin 與 CloudFormation 執行角色（可改政策）仍可發布 |
 | RSK-013 | 主要區域無 Macie，無法自動偵測 S3 中的個資 | L | L | 個資只存 DynamoDB；DATA-011/012 設計層預防；資料湖 DQ 檢查加入 Email／電話格式偵測 |
 
 ---
@@ -850,6 +852,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 2026-12-01 前 | 確認網域聯絡人驗證信已點擊（ICANN 15 天期限，否則網域停用） |
 | ✅ 2026-11-16 | A4e 定期補貨（§10.15，PR #46、#47）部署 Dev、Prod；Dev smoke 78/78、`replenish-check` 10/10；**訂貨模組 A1–A4 完成** |
 | P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
+| P1 | S0（RSK-017）bus 資源政策：部署 Dev、Prod 後補上 `verify-events-stack.sh` 結果與真實憑證反向測試（`OrganizationAccountAccessRole` → `AccessDeniedException`）；`AWS::Events::EventBusPolicy` 的 `describe-type` 實測寫入 §2 |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 

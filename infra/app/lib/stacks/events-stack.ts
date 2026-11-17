@@ -12,12 +12,18 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { EnvName, LambdaSettings } from '../config';
 import { BrewlineFunction } from '../constructs/brewline-function';
+import { TenantAccessRole } from '../constructs/tenant-access-role';
 import { DataStack } from './data-stack';
 import { OpsStack, notifyAlarms } from './ops-stack';
 
 export interface EventsStackProps extends StackProps {
   readonly envName: EnvName;
   readonly lambda: LambdaSettings;
+  /**
+   * Dev 的手動訂單測試函數（`orders-tests`）也能發布 `ReplenishmentFailed`（A4e replenish-check）。
+   * Whether the Dev order-test function may publish (it sends ReplenishmentFailed in replenish-check).
+   */
+  readonly allowTestPublisher: boolean;
 }
 
 /**
@@ -32,6 +38,16 @@ export class EventsStack extends Stack {
 
   public static parameterPrefix(envName: EnvName): string {
     return `/brewline/${envName}/events`;
+  }
+
+  /**
+   * 允許發布到 bus 的角色名稱（發布函數的角色在本 stack，另以 ARN 參照）。名稱固定，因為角色在之後部署的 api stack。
+   * Role names allowed to publish besides the stream publisher (which is referenced by ARN). Names are fixed because
+   * those roles live in the api stack, which deploys after this one.
+   */
+  public static publisherRoleNames(envName: EnvName, allowTestPublisher: boolean): string[] {
+    const prefix = TenantAccessRole.callerRolePrefix(envName);
+    return [`${prefix}replenish`, ...(allowTestPublisher ? [`${prefix}tests`] : [])];
   }
 
   constructor(scope: Construct, id: string, props: EventsStackProps) {
@@ -103,6 +119,32 @@ export class EventsStack extends Stack {
       }),
     );
     this.bus.grantPutEventsTo(publisher.role);
+
+    // --- 3b) bus 資源政策：只有已知的發布者能 PutEvents（RSK-017）/ Only known publishers may PutEvents ---
+    // 同帳號內，身分政策的 Allow 就足以發布；資源政策的明確 Deny 會蓋過它 → 即使某個角色被誤給 events:PutEvents，
+    // 也無法偽造 brewline.* 事件。SSO Admin 保留（手動測試、事故處理；Admin 本來就能改這份政策）。
+    // Same account: an identity-policy Allow is enough to publish, but an explicit Deny here overrides it, so a role
+    // wrongly granted events:PutEvents still cannot forge brewline.* events. SSO Admin stays allowed (manual tests,
+    // incidents; Admin could edit this policy anyway).
+    const roleArn = (name: string) => `arn:${this.partition}:iam::${this.account}:role/${name}`;
+    this.bus.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: 'DenyPutEventsExceptKnownPublishers',
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ['events:PutEvents'],
+        resources: [this.bus.eventBusArn],
+        conditions: {
+          ArnNotLike: {
+            'aws:PrincipalArn': [
+              publisher.role.roleArn,
+              ...EventsStack.publisherRoleNames(envName, props.allowTestPublisher).map(roleArn),
+              roleArn('aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_Admin_*'),
+            ],
+          },
+        },
+      }),
+    );
     Validations.of(publisher.role).acknowledge({
       id: 'AwsSolutions-IAM5[Resource::*]',
       reason: 'dynamodb:ListStreams does not support resource-level permissions (it is an account-level list call).',
