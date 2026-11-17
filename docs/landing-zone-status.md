@@ -889,7 +889,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
 | ✅ 2026-11-17 | 模擬器決策 D1–D9 定案（docs/07 對照，見 ADR-030）；S0（RSK-017）bus 資源政策部署 Dev、Prod 並驗證，含真實憑證反向測試（§10.10，PR #52） |
 | P1 | 模擬器 S1a（simulator app client、synthetic 標記）：Dev 已部署、smoke **92/92**（PR #54，`5590a91`）；部署後驗證因讀 Lambda 環境變數失敗（唯讀角色讀不到值，同 §10.14 #8，再犯一次）→ 改為政策模擬；Prod 待修正後部署 |
-| P1 | 模擬器 S1b（stack、paused；§10.16）：部署 Dev、Prod 後補驗證結果；Dev 手動測試開關與探測（`running` → 探測成功；`paused` → 不登入） |
+| P1 | 模擬器 S1b（stack、paused；§10.16）：Dev 部署成功（PR #57，smoke 92/92、帳號 40），但 `verify-ops-stack.sh` 寫死告警總數 7 → 9 而失敗、Prod 跳過 → 改為「全部接上主題＋總數 1–10」；部署 Dev、Prod 後補驗證結果；Dev 手動測試開關與探測（`running` → 探測成功；`paused` → 不登入） |
 | P1 | 模擬器 S1c（產生器）→ S1d（Prod 開啟） |
 | 有空時 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`）與 `scheduler:GetSchedule`／`ListSchedules`，讓 Developer 在 Dev 切換模擬器開關 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |
