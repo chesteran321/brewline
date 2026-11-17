@@ -55,6 +55,7 @@
   - ✅ 已確認可用：Lambda、API Gateway、DynamoDB、Step Functions、EventBridge、Scheduler、SQS、SNS、SES、Cognito、S3、Firehose、Glue、Athena、SSM、KMS、X-Ray、CloudWatch、CodeDeploy、CloudFormation、Bedrock（模型清單需另查）、GuardDuty、Security Hub、Config、CloudTrail、Access Analyzer
   - ⚠️ **服務可用 ≠ CloudFormation 支援**：CDK 內建區域資料（aws-cdk-lib 2.275.0）把 `AWS::SES::EmailIdentity`、`ConfigurationSet`、`ConfigurationSetEventDestination` 判為台北不支援（synth 錯誤 F3006）；2026-11-16 以 `aws cloudformation describe-type --region ap-east-2`（需 Admin，Developer 沒有 `cloudformation:DescribeType`）實測都存在 → 程式中 acknowledge。新增資源類型前都用 `describe-type` 實測。
   - CloudShell **沒有**台北區域：在東京開 CloudShell，指令加 `--region ap-east-2`。
+  - ✅ `describe-type` 實測（2026-11-17，Dev Admin）：`AWS::Scheduler::Schedule`、`AWS::Events::EventBusPolicy` 皆 `FULLY_MUTABLE LIVE`；對照組 `AWS::Cognito::UserPoolClient` LIVE、反向 `AWS::Pipes::Pipe` → `TypeNotFoundException`（證明查的是台北）。CDK 2.275.0 對這兩種類型**沒有** F3006。
 
 ---
 
@@ -616,8 +617,16 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | Bus 資源政策（RSK-017，S0） | `AWS::Events::EventBusPolicy`：**Deny** `events:PutEvents`，`Principal *`，`ArnNotLike aws:PrincipalArn` 白名單＝發布函數角色、`brewline-dev-orders-replenish`、`brewline-dev-orders-tests`（只有 Dev）、SSO `AWSReservedSSO_Admin_*`；沒有任何 Allow（不開放跨帳號） | 同左（無 `orders-tests`） |
 
 - 部署順序 data → events → api（api 依賴 events，Dev smoke test 下的單才會產生事件）。
-- **Bus 資源政策（2026-11-17，S0）**：同帳號內身分政策的 Allow 就能發布，資源政策的明確 Deny 會蓋過它 → 即使之後某個角色被誤給 `events:PutEvents`，也無法偽造 `brewline.*` 事件。白名單用**固定角色名稱**（補貨、測試角色在之後部署的 api stack）；新增發布者時要同時改 `EventsStack.publisherRoleNames()`，否則新函數 `PutEvents` 會收到 `AccessDeniedException`（explicit deny in a resource-based policy）。SSO Admin 保留，供手動測試與事故處理。
+- **Bus 資源政策（2026-11-17，S0，PR #52，commit `1f0085c`）**：同帳號內身分政策的 Allow 就能發布，資源政策的明確 Deny 會蓋過它 → 即使之後某個角色被誤給 `events:PutEvents`，也無法偽造 `brewline.*` 事件。白名單用**固定角色名稱**（補貨、測試角色在之後部署的 api stack）；新增發布者時要同時改 `EventsStack.publisherRoleNames()`，否則新函數 `PutEvents` 會收到 `AccessDeniedException`（explicit deny in a resource-based policy）。SSO Admin 保留，供手動測試與事故處理。
 - 費用：Lambda 觸發器讀 Streams 免費；自訂事件 USD 1／百萬；其餘在免費額度內 → 約 0。
+
+已驗證（2026-11-17，S0）：
+- CI `cdk diff`：只有 `[+] AWS::Events::EventBusPolicy`，bus **無 replacement**（政策是獨立資源）。
+- `verify-events-stack.sh` 新增 5 項：Dev、Prod 全部 ✅：Deny 敘述 `cdk-DenyPutEventsExceptKnownPublishers`、Principal `*`、白名單＝實際的發布函數角色 ARN（含 CloudFormation 後綴）＋`orders-replenish`＋SSO Admin（Dev 另有 `orders-tests`；Prod 3 個，無 `orders-tests`）、Allow = 0、沒有 `orders-*`。
+- Dev smoke test **78/78**；政策生效後 smoke 訂單仍產生 `OrderCreated`、`OrderStatusChanged → COMPLETED` → 發布函數沒有被誤擋。
+- **反向（真實憑證）**：管理帳號 Admin 扮演 Dev `OrganizationAccountAccessRole`（AdministratorAccess）→ `put-events` → `AccessDeniedException … with an explicit deny in a resource-based policy`。
+- **正向**：Dev SSO Admin `put-events`（`source=brewline.verify`、`BusPolicyProbe`）→ `FailedEntryCount: 0`，稽核 log 查得到。
+- 附帶：Dev 自己的 SSO Admin 扮演 `OrganizationAccountAccessRole` → `AccessDenied … sts:AssumeRole`（信任政策只信任管理帳號，§1 設計如預期）。
 
 已驗證（2026-11-13，`scripts/verify-events-stack.sh`，commit `55c4799`）：
 - Dev 28 項、Prod 26 項全部 ✅：bus、SSM、對應 `Enabled`／來源 = SSM stream ARN／部分失敗／重試 3／bisect／on-failure DLQ／2 個過濾、函數設定、規則與 pattern、log 保留、DLQ SSE-SQS 且 0 則訊息、3 個告警且無 ALARM、終止保護。
@@ -760,6 +769,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-028 | 未確認訂單的逾時取消（Step Functions） | Accepted（2026-11-13） | OrderCreated → Standard 工作流等待（Dev 10 分／Prod 48 小時）→ 仍是 CREATED 就取消並釋放；冪等靠條件寫入（§10.11） |
 | ADR-027 | 訂單狀態機與 staff 端點 | Accepted（2026-11-13） | 狀態以 DynamoDB 為準；一個交易＝訂單（樂觀鎖：原狀態）＋庫存；staff 函數不扮演租戶角色、無 Put／Delete（§10.9） |
 | ADR-026 | 事件層：Streams → Lambda → EventBridge | Accepted（2026-11-13） | 台北沒有 Pipes／Archive；自訂 bus、白名單 detail、`event_id` 去重、Logs 規則留存、DLQ SSE-SQS（§10.10） |
+| ADR-030 | 模擬器（docs/07）範圍與設計（S1 決策 D1–D9） | Accepted（2026-11-17） | D1 S1＝租戶＋訂單＋重複下單異常；生豆／烘焙批次 → S2（溯源），貨櫃／DCSA／IFTSTA／EDI 異常 → S3（P2）。D2 專用 `simulator` app client（`ADMIN_USER_PASSWORD_AUTH`）＋每人隨機密碼存 SSM SecureString（CMK）；pre token 限制此 client 只發 scope 給 `simulator` 群組。D3 部署時 custom resource 建 40 個使用者（先啟用 30，每月依日期啟用 1–2）；執行函數只有 `AdminInitiateAuth`。D4 Dev、Prod 都跑（Prod 每天 5–40、Dev 2–6；每筆 1–3 個商品 × 1–5 kg；跳過庫存偏低）；首次部署 `paused`。D5 S1 不推進訂單（逾時取消），S2 再設計烘焙廠操作員。D6 `synthetic: true` 由伺服器依 `cognito:groups` 標記於訂單與事件。D7 `state` 參數只在首次建立時寫入（Dev 可由 Developer 切換）、`config` 由 CDK 管理；`scp-budget-lockdown` 加 `cognito-idp:AdminInitiateAuth`。D8 台北 08:05–19:05 每小時；冪等鍵＝hash(種子, 日期, 小時, 序號)；重現性以 dry-run 計畫雜湊驗證。D9 不建自訂指標；預期失敗即函數錯誤 → `Errors` 告警；每帳號告警 ≤ 10。前置：S0（RSK-017）完成 |
 
 | 風險 | 內容 | L | I | 緩解 |
 |---|---|---|---|---|
@@ -852,7 +862,9 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 2026-12-01 前 | 確認網域聯絡人驗證信已點擊（ICANN 15 天期限，否則網域停用） |
 | ✅ 2026-11-16 | A4e 定期補貨（§10.15，PR #46、#47）部署 Dev、Prod；Dev smoke 78/78、`replenish-check` 10/10；**訂貨模組 A1–A4 完成** |
 | P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
-| P1 | S0（RSK-017）bus 資源政策：部署 Dev、Prod 後補上 `verify-events-stack.sh` 結果與真實憑證反向測試（`OrganizationAccountAccessRole` → `AccessDeniedException`）；`AWS::Events::EventBusPolicy` 的 `describe-type` 實測寫入 §2 |
+| ✅ 2026-11-17 | 模擬器決策 D1–D9 定案（docs/07 對照，見 ADR-030）；S0（RSK-017）bus 資源政策部署 Dev、Prod 並驗證，含真實憑證反向測試（§10.10，PR #52） |
+| P1 | 模擬器 S1a（simulator app client、synthetic 標記）→ S1b（stack、paused）→ S1c（產生器）→ S1d（Prod 開啟） |
+| 手動 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`（管理帳號，S1b 部署前） |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
@@ -862,7 +874,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 
 - 每次開 CloudShell 先跑 `aws sts get-caller-identity`，確認在哪個帳號。CloudShell 跟著登入的帳號和角色走。
 - CloudShell 開在東京；對台北的指令一律加 `--region ap-east-2`（否則被 `scp-region-restrict` 擋）。管理帳號不受 SCP 限制。
-- 錯誤訊息判讀：`explicit deny in a service control policy` → 查 SCP；`resource control policy` → 查 RCP；`no identity-based policy allows` → 查 IAM。錯誤中的政策 ID 對照 §4。
+- 錯誤訊息判讀：`explicit deny in a service control policy` → 查 SCP；`resource control policy` → 查 RCP；`explicit deny in a resource-based policy` → 查資源本身的政策（例如 bus 政策，§10.10）；`no identity-based policy allows` → 查 IAM。錯誤中的政策 ID 對照 §4。先看**哪個 API 被拒**：`AssumeRole` 被拒＝還沒拿到憑證（角色信任政策），不是目標資源的問題。
 - 測試防護欄時選「就算成功也無害」的操作，並做正向＋反向測試。
 - 合規檢查（Config、Security Hub CSPM）用 **ReadOnly** 即可（ViewOnlyAccess + SecurityAudit）。教訓：只有 ViewOnlyAccess 時 `config:GetDiscoveredResourceCounts` 被拒，畫面顯示「資源 (0)」不代表沒有記錄，要先看有沒有存取遭拒。
 - 主控台搜尋「Security Hub」會開到**新版 Security Hub**（台北不支援，顯示 Region Unsupported）；FSBP 結果要搜尋 **Security Hub CSPM**。CLI `aws securityhub` 呼叫的是 CSPM。
