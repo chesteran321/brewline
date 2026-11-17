@@ -494,11 +494,12 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | MFA | OPTIONAL，只開 TOTP；無 SMS 設定 | 同左 |
 | 自訂屬性 | `custom:tenant_id`（String 1–64，mutable；**任何 app client 都不能寫**；不可刪除或改名） | 同左 |
 | 群組 | `cafe`、`simulator`、`staff` | 同左 |
-| App client | `web`（SRP＋refresh、無 OAuth、token 撤銷、access／ID **15 分**（A2a，原 60 分）／refresh 7 天）；`smoke-test`（`ADMIN_USER_PASSWORD_AUTH`） | 只有 `web` |
+| App client | `web`（SRP＋refresh、無 OAuth、token 撤銷、access／ID **15 分**（A2a，原 60 分）／refresh 7 天）；`smoke-test`（`ADMIN_USER_PASSWORD_AUTH`）；**`simulator`**（S1a，`ADMIN_USER_PASSWORD_AUTH`＋refresh、無 secret、15 分） | `web`、**`simulator`** |
 | pre token 觸發器 | `brewline-dev-identity-pre-token`（V2_0，Node 24 arm64，保留併發 5，log 7 天） | `…-prod-…`（保留併發 10，log 30 天） |
-| SSM | `/brewline/dev/auth/{user-pool-id,user-pool-arn,web-client-id,issuer,smoke-test-client-id}` | 前 4 個 |
+| SSM | `/brewline/dev/auth/{user-pool-id,user-pool-arn,web-client-id,issuer,smoke-test-client-id,simulator-client-id}` | 除 `smoke-test-client-id` 以外 |
 
 - Scope 對照（`services/identity/src/scopes.ts`）：`cafe`／`simulator` → `brewline/catalog.read`、`brewline/orders.read`、`brewline/orders.write`（訂單 scope 於 A2a 加入）；`staff` → `brewline/catalog.read`、`brewline/admin`（**沒有訂單 scope**：staff 不屬於任何租戶）。staff 與 cafe／simulator 同時存在、缺 tenant 或格式錯誤 → 不加任何 scope（fail closed）。
+- **模擬器（S1a，ADR-030 D2／D6）**：pre token 觸發器在冷啟動時從 SSM 讀 `simulator-client-id`（用環境變數會造成 pool → 觸發器 → client → pool 的循環依賴），讀取失敗即登入失敗（fail closed，不快取失敗）。經由 `simulator` client 登入時，**只有 `simulator` 群組**拿得到 scope（其他 → `client-not-allowed`，無 scope）。`simulator` 群組的 access token 另有 `synthetic: "true"` claim（不論經由哪個 client）。觸發器角色只有該參數的 `ssm:GetParameter`。
 - cdk-nag 例外：`AwsSolutions-COG2`（MFA 只能整個 pool 設定）、`AwsSolutions-COG8`（Plus 無免費額度）、`AwsSolutions-IAM5[Resource::*]`（X-Ray）。
 - 費用：約 0（10,000 MAU 免費額度以 organization 計）。
 
@@ -514,7 +515,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | Stack | `brewline-dev-api`（module `ordering`） | `brewline-prod-api`（**終止保護**） |
 | HTTP API | `brewline-dev-api`，`$default` stage，無 CORS | `brewline-prod-api` |
 | 限流 | 10／20 req/s | 50／100 req/s |
-| Authorizer | Cognito JWT（issuer、audience 來自 SSM；audience 含 `web`＋`smoke-test`） | audience 只有 `web` |
+| Authorizer | Cognito JWT（issuer、audience 來自 SSM；audience 含 `web`＋`simulator`＋`smoke-test`） | audience `web`＋`simulator` |
 | 路由 | `GET /products`、`GET /products/{id}`（`brewline/catalog.read`）；`GET /admin/products/{id}/stock`（`brewline/admin`） | 同左 |
 | Lambda | `brewline-dev-ordering-{list-products,get-product,get-product-stock}`：Node 24 arm64、X-Ray、保留併發 5、log 7 天 | 保留併發 10、log 30 天 |
 | Access log | `/aws/apigateway/brewline-dev-api`（JSON，不記錄 token／標頭／query） | 30 天 |
@@ -524,6 +525,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - IAM：每個函數一個角色；DynamoDB 以 `dynamodb:LeadingKeys` 限定 `PRODUCT#*`（GSI 查詢限定 `CATALOG`）；KMS 限 `kms:ViaService = dynamodb.ap-east-2.amazonaws.com`；**明確 Deny `dynamodb:Scan`**（表與 `/index/*`）；API Gateway 呼叫權限的 `SourceArn` 限定到單一路由。
 - 新增 `ApiGuardrailsChecker`：每條路由 JWT＋至少一個 scope；每個 stage 必須有 access log 與限流。
 - 合約：`api/openapi.yaml`。
+- SSM `/brewline/<env>/api/endpoint`（S1a）：API 位址，給模擬器讀取。
 - 費用：Dev 約 USD 0.2、Prod 約 USD 0.3／月（以 us-east-1 單價估算）。
 
 已驗證（2026-11-13，`scripts/verify-api-stack.sh`）：
@@ -581,6 +583,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 狀態機 | `CREATED → CONFIRMED → ROASTING_SCHEDULED → ROASTED → SHIPPED → COMPLETED`；`CREATED`／`CONFIRMED → CANCELLED`；一個交易＝訂單（條件：原狀態）＋庫存（SHIPPED 消耗、CANCELLED 釋放，`reserved >= q`） | 同左 |
 | 訂單測試（手動） | `brewline-dev-ordering-order-tests`（角色 `brewline-dev-orders-tests`，保留併發 1）；`infra/app/scripts/run-order-tests.sh`；夾具權限只限 `PRODUCT#p-9001` 與兩個 `TENANT#t_01CNCRTST…` | 無 |
 
+- **`synthetic`（S1a，ADR-030 D6）**：`create-order` 只依已驗證 JWT 的 `synthetic` claim（值必須是字串 `"true"`）在訂單項目寫入 `synthetic: true`；body 帶 `synthetic` → 400（不信任用戶端）。staff DTO 有 `synthetic`（true／false），咖啡廳的 DTO 沒有；`OrderCreated`／`OrderStatusChanged` 的 detail 只在模擬訂單帶 `synthetic: true`。補貨執行函數下的單不標記（S1 模擬器不建補貨）。
 - 回應：201 建立；200 同一個 key 重送（回原訂單）；422 同一個 key 不同內容；409 庫存不足（什麼都沒扣）；400 輸入錯誤／商品不存在；503 交易衝突或 throttle（同一個 key 重試）；別的租戶的訂單 → 404。
 - 費用：STS 免費；每筆訂單 6–54 WRU；smoke test 規模每月 < USD 0.1。帳號保留併發：Dev 新增 15、Prod 新增 30。
 
@@ -863,7 +866,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-16 | A4e 定期補貨（§10.15，PR #46、#47）部署 Dev、Prod；Dev smoke 78/78、`replenish-check` 10/10；**訂貨模組 A1–A4 完成** |
 | P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
 | ✅ 2026-11-17 | 模擬器決策 D1–D9 定案（docs/07 對照，見 ADR-030）；S0（RSK-017）bus 資源政策部署 Dev、Prod 並驗證，含真實憑證反向測試（§10.10，PR #52） |
-| P1 | 模擬器 S1a（simulator app client、synthetic 標記）→ S1b（stack、paused）→ S1c（產生器）→ S1d（Prod 開啟） |
+| P1 | 模擬器 S1a（simulator app client、synthetic 標記）：部署 Dev、Prod 後補驗證結果（Dev smoke 78 → 92） |
+| P1 | 模擬器 S1b（stack、paused）→ S1c（產生器）→ S1d（Prod 開啟） |
 | 手動 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`（管理帳號，S1b 部署前） |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |

@@ -40,7 +40,7 @@ export const handler = async (event: APIGatewayProxyEventV2WithJWTAuthorizer): P
     });
   }
 
-  const log = { tenant_id: tenant.data, lines: req.data.items.length };
+  const log = { tenant_id: tenant.data, lines: req.data.items.length, synthetic: claim(event, 'synthetic') === 'true' };
   try {
     const result = await orderRepo().createOrder({
       tenantId: tenant.data,
@@ -49,6 +49,9 @@ export const handler = async (event: APIGatewayProxyEventV2WithJWTAuthorizer): P
       request: req.data,
       orderId: `o_${ulid()}`,
       now: new Date(),
+      // 只信任已驗證 JWT 的 claim（pre token 觸發器只發給 simulator 群組）；body 沒有這個欄位
+      // Only the verified JWT claim counts (issued to the simulator group only); the body has no such field.
+      synthetic: claim(event, 'synthetic') === 'true',
     });
     logger.info('create-order', { ...log, outcome: result.kind, ...('order' in result ? { order_id: result.order.order_id } : {}) });
     switch (result.kind) {

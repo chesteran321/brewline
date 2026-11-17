@@ -9,6 +9,7 @@ import {
   orderIdFromSk,
   orderSk,
   requestHash,
+  toAdminOrder,
   toPublicOrder,
 } from '../src/lib/order-model';
 
@@ -87,4 +88,16 @@ test('public order DTO is an allow-list', () => {
   });
   for (const f of ['pk', 'sk', 'entity', 'tenant_id', 'created_by', 'idempotency_key', 'gsi1pk']) expect(dto).not.toHaveProperty(f);
   expect(dto).toMatchObject({ status: 'CREATED', payment_status: 'PAID_MOCK', total: 10 });
+});
+
+test('synthetic: staff DTO shows it (true/false); the public DTO never does', () => {
+  const base = {
+    pk: 'TENANT#t', sk: 'ORDER#x', entity: 'Order' as const, order_id: `o_${'0'.repeat(26)}`, tenant_id: `t_${'0'.repeat(26)}`,
+    status: 'CREATED' as const, payment_status: 'PAID_MOCK' as const,
+    items: [{ product_id: 'p-0001', name: 'A', qty_kg: 1, price_per_kg: 10, line_total: 10 }],
+    total: 10, currency: 'TWD', created_by: 'sub-123', created_at: '2026-11-13T00:00:00.000Z', idempotency_key: 'k'.repeat(16),
+  };
+  expect(toAdminOrder({ ...base, synthetic: true }).synthetic).toBe(true);
+  expect(toAdminOrder(base).synthetic).toBe(false);
+  expect(toPublicOrder({ ...base, synthetic: true })).not.toHaveProperty('synthetic');
 });

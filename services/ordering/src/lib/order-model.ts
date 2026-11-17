@@ -107,6 +107,8 @@ export const OrderItemSchema = z.object({
   idempotency_key: z.string(),
   updated_at: z.string().optional(),
   status_history: z.array(StatusChangeSchema).optional(),
+  /** 模擬器建立（ADR-030 D6；SIM-F-010）。只有 true 會寫入 / Created by the simulator; written only when true. */
+  synthetic: z.literal(true).optional(),
 });
 export type OrderItem = z.infer<typeof OrderItemSchema>;
 
@@ -166,6 +168,7 @@ export function toAdminOrder(o: OrderItem) {
   return {
     ...toPublicOrder(o),
     tenant_id: o.tenant_id,
+    synthetic: o.synthetic === true,
     status_history: (o.status_history ?? []).map((h) => ({ from: h.from, to: h.to, at: h.at, by: h.by })),
   };
 }

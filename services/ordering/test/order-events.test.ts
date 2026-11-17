@@ -37,6 +37,12 @@ describe('toDomainEvent', () => {
     const json = JSON.stringify(e.detail);
     for (const f of ['user-sub-secret', 'created_by', 'pk', 'idempotency_key', 'TENANT#']) expect(json).not.toContain(f);
   });
+  test('synthetic orders carry synthetic: true on OrderCreated and OrderStatusChanged; others do not', () => {
+    const sim = { ...order('CREATED'), synthetic: true };
+    expect(toDomainEvent(rec('INSERT', sim))!.detail).toMatchObject({ synthetic: true });
+    expect(toDomainEvent(rec('MODIFY', { ...sim, status: 'CANCELLED' }, sim))!.detail).toMatchObject({ synthetic: true });
+    expect(toDomainEvent(rec('INSERT', order('CREATED')))!.detail).not.toHaveProperty('synthetic');
+  });
   test('status change → OrderStatusChanged with previous_status', () => {
     expect(toDomainEvent(rec('MODIFY', order('CONFIRMED'), order('CREATED')))).toMatchObject({
       detailType: 'OrderStatusChanged',

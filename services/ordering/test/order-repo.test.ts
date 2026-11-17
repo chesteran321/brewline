@@ -65,6 +65,19 @@ test('creates: one transaction = idempotency Put + order Put + one stock Update 
   expect(tenantsSeen.every((t) => t === A)).toBe(true);
 });
 
+test('synthetic input → synthetic: true on the order item; otherwise the attribute is absent', async () => {
+  ddb.on(TransactWriteCommand).resolves({});
+  await repo.createOrder({ ...input, synthetic: true });
+  await repo.createOrder({ ...input, synthetic: false });
+  await repo.createOrder(input);
+  const items = ddb.commandCalls(TransactWriteCommand).map((c) => c.args[0].input.TransactItems![1]!.Put!.Item!);
+  expect(items[0]).toMatchObject({ synthetic: true });
+  expect(items[1]).not.toHaveProperty('synthetic');
+  expect(items[2]).not.toHaveProperty('synthetic');
+  // 冪等記錄不帶標記 / The idempotency record carries no marker.
+  expect(ddb.commandCalls(TransactWriteCommand)[0]!.args[0].input.TransactItems![0]!.Put!.Item).not.toHaveProperty('synthetic');
+});
+
 test('replay with the same body returns the original order without a new transaction', async () => {
   ddb.on(GetCommand, { Key: { pk: `TENANT#${A}`, sk: `IDEMP#${KEY}` } }).resolves({
     Item: { pk: `TENANT#${A}`, sk: `IDEMP#${KEY}`, request_hash: requestHash(request), order_id: ORDER_ID, expires_at: NOW_SEC + 10 },

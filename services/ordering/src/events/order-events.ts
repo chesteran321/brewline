@@ -12,7 +12,7 @@ import type { DynamoDBRecord } from 'aws-lambda';
  * | OrderStatusChanged  | MODIFY，entity = Order，status 改變                                  |
  * | StockLow            | MODIFY，sk = STOCK，available_kg 從 ≥ 門檻 **跌破** 門檻（只在跨越時發一次） |
  *
- * detail 一律白名單：不含 created_by（使用者 sub）、pk／sk、冪等鍵。
+ * detail 一律白名單：不含 created_by（使用者 sub）、pk／sk、冪等鍵。模擬器的訂單另有 `synthetic: true`。
  * Details are allow-listed: never the user's sub, keys, or idempotency key.
  */
 
@@ -62,6 +62,8 @@ export function toDomainEvent(record: DynamoDBRecord): DomainEvent | undefined {
       tenant_id: str(now.tenant_id),
       order_id: str(now.order_id),
       status: str(now.status),
+      // 模擬資料標記（ADR-030 D6）：下游分析可以排除 / Synthetic marker so analytics can filter it out.
+      ...(now.synthetic === true ? { synthetic: true } : {}),
     };
     if (!order.tenant_id || !order.order_id || !order.status) return undefined;
     if (record.eventName === 'INSERT') {

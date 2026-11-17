@@ -1,4 +1,5 @@
 import { Logger } from '@aws-lambda-powertools/logger';
+import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import type { PreTokenGenerationV2TriggerEvent } from 'aws-lambda';
 import { GROUP_SCOPES, GROUPS, Group, Scope, TENANT_GROUPS, TENANT_ID_PATTERN } from './scopes';
 
@@ -13,6 +14,11 @@ import { GROUP_SCOPES, GROUPS, Group, Scope, TENANT_GROUPS, TENANT_ID_PATTERN } 
  *   2. 把 custom:tenant_id 以 `tenant_id` claim 放進 access token（A2 的租戶隔離會用到）。
  *      Copy custom:tenant_id into the access token as `tenant_id` (used by A2 tenant isolation).
  *
+ *   3. 模擬器（ADR-030 D2／D6）：`simulator` app client 只發 scope 給 `simulator` 群組；`simulator` 群組的 token
+ *      加上 `synthetic: "true"` claim，訂單函數據此標記模擬資料（由簽章保護，client 無法偽造）。
+ *      The `simulator` app client issues scopes only to the simulator group; simulator tokens carry
+ *      `synthetic: "true"`, which the order function uses to tag synthetic data (signed, so unforgeable).
+ *
  * 一律 fail closed：群組衝突、缺 tenant_id 或格式錯誤時不加任何 scope（登入仍成功，但呼叫 API 會 403）。
  * Always fail closed: on conflicts or a missing/invalid tenant_id no scopes are added.
  */
@@ -22,17 +28,34 @@ const logger = new Logger({ serviceName: 'identity-pre-token' });
 export interface TokenDecision {
   readonly scopes: Scope[];
   readonly tenantId?: string;
+  /** 模擬器產生的資料（只有 simulator 群組）/ Synthetic data (simulator group only). */
+  readonly synthetic?: true;
   /** 不授予 scope 的原因（記錄用）/ Why no scopes were granted (for logs). */
-  readonly denyReason?: 'no-known-group' | 'conflicting-groups' | 'missing-tenant-id' | 'invalid-tenant-id';
+  readonly denyReason?:
+    | 'no-known-group'
+    | 'conflicting-groups'
+    | 'missing-tenant-id'
+    | 'invalid-tenant-id'
+    | 'client-not-allowed';
+}
+
+export interface DecideOptions {
+  /** 這次登入是否來自 `simulator` app client / Whether this sign-in came through the simulator app client. */
+  readonly viaSimulatorClient?: boolean;
 }
 
 const isGroup = (g: string): g is Group => (GROUPS as readonly string[]).includes(g);
 
 /** 純函式，方便測試 / Pure function for easy testing. */
-export function decide(groupNames: readonly string[], rawTenantId: string | undefined): TokenDecision {
+export function decide(groupNames: readonly string[], rawTenantId: string | undefined, opts: DecideOptions = {}): TokenDecision {
   const groups = [...new Set(groupNames.filter(isGroup))];
   if (groups.length === 0) {
     return { scopes: [], denyReason: 'no-known-group' };
+  }
+  // simulator client 只服務 simulator 群組：外洩的 cafe／staff 密碼無法透過這個 client（IAM 呼叫）取得 scope。
+  // The simulator client serves only the simulator group, so leaked cafe/staff passwords get no scopes through it.
+  if (opts.viaSimulatorClient && groups.some((g) => g !== 'simulator')) {
+    return { scopes: [], denyReason: 'client-not-allowed' };
   }
 
   const isStaff = groups.includes('staff');
@@ -55,12 +78,45 @@ export function decide(groupNames: readonly string[], rawTenantId: string | unde
   const scopes = [...new Set(groups.flatMap((g) => GROUP_SCOPES[g]))].sort();
   // staff 不屬於任何租戶：就算屬性被誤設，也不放進 token。
   // Staff never carry a tenant claim, even if the attribute was set by mistake.
-  return isTenantMember ? { scopes, tenantId: rawTenantId } : { scopes };
+  if (!isTenantMember) return { scopes };
+  return groups.includes('simulator') ? { scopes, tenantId: rawTenantId, synthetic: true } : { scopes, tenantId: rawTenantId };
+}
+
+const ssm = new SSMClient({});
+let simulatorClientIdCache: Promise<string> | undefined;
+
+/**
+ * simulator client ID 從 SSM 讀取並快取（user pool → 觸發器 → client → user pool 會形成循環依賴，不能用環境變數）。
+ * 讀取失敗就丟錯 → 登入失敗（fail closed）；失敗不快取，下次重試。
+ * Read from SSM and cached (an env var would create a pool → trigger → client → pool cycle).
+ * Errors fail the sign-in (fail closed) and are not cached.
+ */
+export function simulatorClientId(): Promise<string> {
+  const name = process.env.SIMULATOR_CLIENT_ID_PARAM;
+  if (!name) return Promise.reject(new Error('SIMULATOR_CLIENT_ID_PARAM is not set'));
+  simulatorClientIdCache ??= ssm
+    .send(new GetParameterCommand({ Name: name }))
+    .then((out) => {
+      const v = out.Parameter?.Value;
+      if (!v) throw new Error('simulator client id parameter is empty');
+      return v;
+    })
+    .catch((err: unknown) => {
+      simulatorClientIdCache = undefined;
+      throw err;
+    });
+  return simulatorClientIdCache;
+}
+
+/** 測試用 / For tests. */
+export function resetSimulatorClientIdCache(): void {
+  simulatorClientIdCache = undefined;
 }
 
 export const handler = async (event: PreTokenGenerationV2TriggerEvent): Promise<PreTokenGenerationV2TriggerEvent> => {
   const groups = event.request.groupConfiguration.groupsToOverride ?? [];
-  const decision = decide(groups, event.request.userAttributes['custom:tenant_id']);
+  const viaSimulatorClient = event.callerContext.clientId === (await simulatorClientId());
+  const decision = decide(groups, event.request.userAttributes['custom:tenant_id'], { viaSimulatorClient });
 
   // 只記錄判斷結果，不記錄 Email 等個資 / Log the decision only, never PII such as email.
   const logFields = {
@@ -68,6 +124,8 @@ export const handler = async (event: PreTokenGenerationV2TriggerEvent): Promise<
     groups,
     scopes: decision.scopes,
     hasTenant: decision.tenantId !== undefined,
+    viaSimulatorClient,
+    synthetic: decision.synthetic === true,
   };
   if (decision.denyReason) {
     logger.warn('No scopes granted', { ...logFields, denyReason: decision.denyReason });
@@ -79,7 +137,14 @@ export const handler = async (event: PreTokenGenerationV2TriggerEvent): Promise<
     claimsAndScopeOverrideDetails: {
       accessTokenGeneration: {
         scopesToAdd: decision.scopes,
-        ...(decision.tenantId ? { claimsToAddOrOverride: { tenant_id: decision.tenantId } } : {}),
+        ...(decision.tenantId
+          ? {
+              claimsToAddOrOverride: {
+                tenant_id: decision.tenantId,
+                ...(decision.synthetic ? { synthetic: 'true' } : {}),
+              },
+            }
+          : {}),
       },
     },
   };

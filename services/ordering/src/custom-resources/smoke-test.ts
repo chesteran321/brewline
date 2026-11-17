@@ -48,6 +48,8 @@ interface Config {
   readonly apiUrl: string;
   readonly userPoolId: string;
   readonly clientId: string;
+  /** 模擬器 app client（ADR-030 D2）/ Simulator app client. */
+  readonly simulatorClientId: string;
   readonly productId: string;
   /** 下單用的 Dev 測試商品（p-9002，不在目錄）/ Dev test product for orders (hidden from the catalog). */
   readonly orderProductId: string;
@@ -61,6 +63,13 @@ interface Tokens {
   readonly id: string;
 }
 
+/** 經由 simulator client 登入的 token（ADR-030 D2）/ Tokens obtained through the simulator client. */
+export interface SimClientTokens {
+  readonly simulator: Tokens;
+  readonly cafe: Tokens;
+  readonly staff: Tokens;
+}
+
 type Role = 'cafe' | 'cafeB' | 'staff' | 'simulator' | 'conflict';
 
 function decodeClaims(jwt: string): Record<string, unknown> {
@@ -70,7 +79,26 @@ function decodeClaims(jwt: string): Record<string, unknown> {
 
 const randomPassword = () => `${randomBytes(18).toString('base64url')}Aa1!`;
 
-async function createUser(cfg: Config, runId: string, role: Role): Promise<{ username: string; tokens: Tokens }> {
+async function login(userPoolId: string, clientId: string, username: string, password: string, label: string): Promise<Tokens> {
+  const auth = await cognito.send(
+    new AdminInitiateAuthCommand({
+      UserPoolId: userPoolId,
+      ClientId: clientId,
+      AuthFlow: 'ADMIN_USER_PASSWORD_AUTH',
+      AuthParameters: { USERNAME: username, PASSWORD: password },
+    }),
+  );
+  const access = auth.AuthenticationResult?.AccessToken;
+  const id = auth.AuthenticationResult?.IdToken;
+  if (!access || !id) throw new Error(`No tokens for ${label} (challenge: ${auth.ChallengeName ?? 'none'})`);
+  return { access, id };
+}
+
+async function createUser(
+  cfg: Config,
+  runId: string,
+  role: Role,
+): Promise<{ username: string; tokens: Tokens; password: string }> {
   const username = `${USER_PREFIX}${runId}-${role}@example.com`; // 保留網域 / reserved domain
   const password = randomPassword();
   const attrs = [
@@ -88,18 +116,7 @@ async function createUser(cfg: Config, runId: string, role: Role): Promise<{ use
   for (const g of groups) {
     await cognito.send(new AdminAddUserToGroupCommand({ UserPoolId: cfg.userPoolId, Username: username, GroupName: g }));
   }
-  const auth = await cognito.send(
-    new AdminInitiateAuthCommand({
-      UserPoolId: cfg.userPoolId,
-      ClientId: cfg.clientId,
-      AuthFlow: 'ADMIN_USER_PASSWORD_AUTH',
-      AuthParameters: { USERNAME: username, PASSWORD: password },
-    }),
-  );
-  const access = auth.AuthenticationResult?.AccessToken;
-  const id = auth.AuthenticationResult?.IdToken;
-  if (!access || !id) throw new Error(`No tokens for ${role} (challenge: ${auth.ChallengeName ?? 'none'})`);
-  return { username, tokens: { access, id } };
+  return { username, tokens: await login(cfg.userPoolId, cfg.clientId, username, password, role), password };
 }
 
 async function call(
@@ -132,6 +149,39 @@ async function call(
 
 /** 公開 DTO 不可出現的欄位 / Fields that must never appear in the public DTO. */
 const INTERNAL_FIELDS = ['pk', 'sk', 'gsi1pk', 'gsi1sk', 'available_kg', 'reserved_kg', 'version', 'low_threshold_kg', 'entity'];
+
+/**
+ * 模擬器 client 與 synthetic claim（ADR-030 D2／D6）。不下單，不影響後面的庫存斷言。
+ * Simulator client and the synthetic claim. Places no orders, so later stock assertions are unaffected.
+ */
+export async function simulatorClientChecks(cfg: Config, tokens: Record<Role, Tokens>, sim: SimClientTokens): Promise<Check[]> {
+  const checks: Check[] = [];
+  const expect = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
+
+  // 正向 / Positive
+  const s = decodeClaims(sim.simulator.access);
+  expect('simulator via simulator client: client_id', s.client_id === cfg.simulatorClientId, String(s.client_id));
+  expect('simulator via simulator client: orders.write scope', String(s.scope).includes('brewline/orders.write'), String(s.scope));
+  expect('simulator via simulator client: synthetic claim', s.synthetic === 'true', String(s.synthetic));
+  let r = await call(cfg, '/products', sim.simulator.access);
+  expect('simulator-client token GET /products → 200 (audience)', r.status === 200, `got ${r.status}`);
+  r = await call(cfg, '/orders', sim.simulator.access);
+  expect('simulator-client token GET /orders → 200', r.status === 200, `got ${r.status}`);
+  // synthetic 來自群組，與 client 無關 / Synthetic follows the group, not the client.
+  expect('simulator via smoke client: synthetic claim', decodeClaims(tokens.simulator.access).synthetic === 'true', '');
+  expect('cafe token has no synthetic claim', decodeClaims(tokens.cafe.access).synthetic === undefined, '');
+
+  // 反向：simulator client 只服務 simulator 群組 / Negative: the simulator client serves the simulator group only.
+  const c = decodeClaims(sim.cafe.access);
+  expect('cafe via simulator client: no brewline scopes', !String(c.scope).includes('brewline/'), String(c.scope));
+  r = await call(cfg, '/products', sim.cafe.access);
+  expect('cafe via simulator client GET /products → 403', r.status === 403, `got ${r.status}`);
+  const st = decodeClaims(sim.staff.access);
+  expect('staff via simulator client: no brewline scopes', !String(st.scope).includes('brewline/'), String(st.scope));
+  r = await call(cfg, `/admin/products/${cfg.productId}/stock`, sim.staff.access);
+  expect('staff via simulator client GET /admin/... → 403', r.status === 403, `got ${r.status}`);
+  return checks;
+}
 
 export async function runChecks(cfg: Config, tokens: Record<Role, Tokens>): Promise<Check[]> {
   const checks: Check[] = [];
@@ -417,8 +467,16 @@ export async function adminChecks(cfg: Config, tokens: Record<Role, Tokens>, ord
     call(cfg, path(id), token, { body: { status }, method: 'PATCH' });
   const stock = async () => (await call(cfg, `/admin/products/${cfg.orderProductId}/stock`, tokens.staff.access)).body;
 
+  // --- synthetic 標記（ADR-030 D6）：staff 看得到，咖啡廳的 DTO 沒有 / Staff see it; the café DTO never has it ---
+  let r = await call(cfg, path(simOrderId), tokens.staff.access);
+  expect('staff GET simulator order → synthetic true', r.status === 200 && r.body?.synthetic === true, `got ${r.status} ${r.body?.synthetic}`);
+  r = await call(cfg, path(orderId), tokens.staff.access);
+  expect('staff GET cafe order → synthetic false', r.status === 200 && r.body?.synthetic === false, `got ${r.status} ${r.body?.synthetic}`);
+  r = await call(cfg, `/orders/${simOrderId}`, tokens.cafe.access);
+  expect('public order DTO has no synthetic field', r.status === 200 && !('synthetic' in (r.body ?? {})), `got ${r.status}`);
+
   // --- 反向：授權與輸入 / Negative: authorization and input ---
-  let r = await patch(orderId, 'CONFIRMED', tokens.cafe.access);
+  r = await patch(orderId, 'CONFIRMED', tokens.cafe.access);
   expect('cafe PATCH admin order → 403', r.status === 403, `got ${r.status}`);
   r = await call(cfg, path(orderId), undefined, { body: { status: 'CONFIRMED' }, method: 'PATCH' });
   expect('PATCH without token → 401', r.status === 401, `got ${r.status}`);
@@ -552,6 +610,7 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
     apiUrl: String(props.ApiUrl),
     userPoolId: String(props.UserPoolId),
     clientId: String(props.ClientId),
+    simulatorClientId: String(props.SimulatorClientId),
     productId: String(props.ProductId),
     orderProductId: String(props.OrderProductId),
     tableName: String(props.TableName),
@@ -570,12 +629,18 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
   let checks: Check[] = [];
   try {
     const tokens = {} as Record<Role, Tokens>;
+    const users = {} as Record<Role, { username: string; password: string }>;
     for (const role of ['cafe', 'cafeB', 'staff', 'simulator', 'conflict'] as const) {
       const u = await createUser(cfg, runId, role);
       created.push(u.username);
       tokens[role] = u.tokens;
+      users[role] = u;
     }
-    checks = await runChecks(cfg, tokens);
+    // 同一批使用者再經由 simulator client 登入（密碼只在記憶體）/ Same users through the simulator client.
+    const viaSim = (role: 'simulator' | 'cafe' | 'staff') =>
+      login(cfg.userPoolId, cfg.simulatorClientId, users[role].username, users[role].password, `${role} via simulator client`);
+    const sim: SimClientTokens = { simulator: await viaSim('simulator'), cafe: await viaSim('cafe'), staff: await viaSim('staff') };
+    checks = [...(await simulatorClientChecks(cfg, tokens, sim)), ...(await runChecks(cfg, tokens))];
   } finally {
     await deleteUsers(cfg.userPoolId, created);
     const deleted = await cleanTenants(cfg.tableName, cfg.scheduleGroup).catch((err: Error) => {

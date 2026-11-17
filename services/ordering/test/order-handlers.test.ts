@@ -39,11 +39,14 @@ interface Opts {
   body?: unknown;
   id?: string;
   query?: Record<string, string>;
+  /** 額外的 JWT claim / Extra JWT claims. */
+  claims?: Record<string, string>;
 }
 function event(o: Opts = {}): APIGatewayProxyEventV2WithJWTAuthorizer {
   const scopes = o.scopes ?? ['brewline/orders.read', 'brewline/orders.write'];
   const claims: Record<string, string> = { sub: 'sub-1', scope: scopes.join(' ') };
   if (o.tenant !== null) claims.tenant_id = o.tenant ?? A;
+  Object.assign(claims, o.claims);
   return {
     headers: o.key === null ? {} : { 'idempotency-key': o.key ?? 'key-0000000000000001' },
     body: o.body === undefined ? JSON.stringify({ items: [{ product_id: 'p-0001', qty_kg: 3 }] }) : typeof o.body === 'string' ? o.body : JSON.stringify(o.body),
@@ -72,6 +75,23 @@ describe('POST /orders', () => {
     expect(parse(r)).not.toHaveProperty('tenant_id');
     expect(calls[0]).toMatchObject({ tenantId: A, createdBy: 'sub-1', idempotencyKey: 'key-0000000000000001' });
     expect(calls[0]!.orderId).toMatch(/^o_[0-9A-HJKMNP-TV-Z]{26}$/);
+  });
+
+  // ADR-030 D6：synthetic 只來自已驗證的 JWT claim / Synthetic comes only from the verified JWT claim.
+  test('synthetic claim "true" → synthetic order; anything else → not synthetic', async () => {
+    await createOrder(event({ claims: { synthetic: 'true' } }));
+    expect(calls[0]!.synthetic).toBe(true);
+    for (const v of [undefined, 'false', 'TRUE', '1']) {
+      calls.length = 0;
+      await createOrder(event(v === undefined ? {} : { claims: { synthetic: v } }));
+      expect(calls[0]!.synthetic).toBe(false);
+    }
+  });
+
+  test('negative: a synthetic field in the body is rejected, not trusted', async () => {
+    const r = await createOrder(event({ body: { items: [{ product_id: 'p-0001', qty_kg: 3 }], synthetic: true } }));
+    expect(r.statusCode).toBe(400);
+    expect(calls).toHaveLength(0);
   });
 
   test.each([

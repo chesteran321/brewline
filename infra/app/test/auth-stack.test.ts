@@ -87,15 +87,47 @@ describe.each(['dev', 'prod'] as const)('AuthStack (%s)', (envName) => {
 
   test(`smoke-test client ${auth.smokeTestClient ? 'exists (Dev)' : 'is absent (Prod)'}`, () => {
     const names = clientsOf(template).map((c) => c.Properties.ClientName);
-    expect(names.sort()).toEqual(auth.smokeTestClient ? ['smoke-test', 'web'] : ['web']);
+    expect(names.sort()).toEqual(auth.smokeTestClient ? ['simulator', 'smoke-test', 'web'] : ['simulator', 'web']);
     const adminFlow = clientsOf(template).filter((c) =>
       (c.Properties.ExplicitAuthFlows as string[]).includes('ALLOW_ADMIN_USER_PASSWORD_AUTH'),
     );
-    expect(adminFlow).toHaveLength(auth.smokeTestClient ? 1 : 0);
+    // simulator（兩個環境）＋ smoke-test（只有 Dev）/ simulator (both envs) + smoke-test (Dev only).
+    expect(adminFlow.map((c) => c.Properties.ClientName).sort()).toEqual(auth.smokeTestClient ? ['simulator', 'smoke-test'] : ['simulator']);
     // 任何 client 都不允許 USER_PASSWORD_AUTH（密碼明文經過網路）/ No client allows plain USER_PASSWORD_AUTH.
     for (const c of clientsOf(template)) {
       expect(c.Properties.ExplicitAuthFlows).not.toContain('ALLOW_USER_PASSWORD_AUTH');
     }
+  });
+
+  // ADR-030 D2：模擬器 client / Simulator client.
+  test('simulator client: admin password auth + refresh only, no secret, no OAuth, 15-minute tokens', () => {
+    const [sim] = clientsOf(template).filter((c) => c.Properties.ClientName === 'simulator');
+    expect(sim).toBeDefined();
+    expect((sim!.Properties.ExplicitAuthFlows as string[]).sort()).toEqual(['ALLOW_ADMIN_USER_PASSWORD_AUTH', 'ALLOW_REFRESH_TOKEN_AUTH']);
+    expect(sim!.Properties).toMatchObject({
+      GenerateSecret: false,
+      AllowedOAuthFlowsUserPoolClient: false,
+      PreventUserExistenceErrors: 'ENABLED',
+      EnableTokenRevocation: true,
+      AccessTokenValidity: 15,
+      IdTokenValidity: 15,
+    });
+    // 反向：不能寫 custom:tenant_id、不允許 SRP 以外的使用者端流程 / Negative: cannot write the tenant, no user-side flows.
+    expect(sim!.Properties.WriteAttributes).not.toContain('custom:tenant_id');
+    expect(sim!.Properties.ExplicitAuthFlows).not.toContain('ALLOW_USER_SRP_AUTH');
+  });
+
+  test('pre token trigger reads only the simulator client id parameter (no env var cycle)', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      FunctionName: `brewline-${envName}-identity-pre-token`,
+      Environment: { Variables: Match.objectLike({ SIMULATOR_CLIENT_ID_PARAM: `/brewline/${envName}/auth/simulator-client-id` }) },
+    });
+    const st = Object.values(template.findResources('AWS::IAM::Policy')).flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+    const ssmSt = st.filter((s: any) => [].concat(s.Action).some((a: string) => a.startsWith('ssm:')));
+    expect(ssmSt).toHaveLength(1);
+    expect(ssmSt[0]).toMatchObject({ Sid: 'ReadSimulatorClientId', Action: 'ssm:GetParameter' });
+    expect(JSON.stringify(ssmSt[0].Resource)).toContain(`:parameter/brewline/${envName}/auth/simulator-client-id`);
+    expect(JSON.stringify(ssmSt[0].Resource)).not.toContain('*');
   });
 
   test('groups cafe, staff, simulator', () => {
@@ -136,7 +168,7 @@ describe.each(['dev', 'prod'] as const)('AuthStack (%s)', (envName) => {
   });
 
   test('publishes IDs to SSM and uses no CloudFormation exports', () => {
-    const names = ['user-pool-id', 'user-pool-arn', 'web-client-id', 'issuer'];
+    const names = ['user-pool-id', 'user-pool-arn', 'web-client-id', 'issuer', 'simulator-client-id'];
     if (auth.smokeTestClient) names.push('smoke-test-client-id');
     template.resourceCountIs('AWS::SSM::Parameter', names.length);
     for (const name of names) {

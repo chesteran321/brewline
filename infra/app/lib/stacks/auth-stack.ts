@@ -1,5 +1,6 @@
 import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps, Tags, Validations } from 'aws-cdk-lib';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { GROUPS, Group } from '../../../../services/identity/src/scopes';
@@ -35,9 +36,15 @@ export class AuthStack extends Stack {
   public readonly userPool: cognito.UserPool;
   public readonly webClient: cognito.UserPoolClient;
   public readonly smokeTestClient?: cognito.UserPoolClient;
+  public readonly simulatorClient: cognito.UserPoolClient;
 
   public static parameterPrefix(envName: EnvName): string {
     return `/brewline/${envName}/auth`;
+  }
+
+  /** simulator client ID 的 SSM 參數（pre token 觸發器在執行時讀取）/ Read by the trigger at run time. */
+  public static simulatorClientIdParameter(envName: EnvName): string {
+    return `${AuthStack.parameterPrefix(envName)}/simulator-client-id`;
   }
 
   constructor(scope: Construct, id: string, props: AuthStackProps) {
@@ -57,8 +64,22 @@ export class AuthStack extends Stack {
       // 每次登入或 refresh 都會同步呼叫，必須快 / Invoked synchronously on every sign-in and refresh.
       timeout: Duration.seconds(5),
       memorySize: 256,
-      environment: { POWERTOOLS_SERVICE_NAME: 'identity-pre-token' },
+      environment: {
+        POWERTOOLS_SERVICE_NAME: 'identity-pre-token',
+        // 用參數名稱而不是 client ID：pool → 觸發器 → client → pool 會循環依賴（ADR-030 D2）
+        // The parameter name, not the client id: pool → trigger → client → pool would be a dependency cycle.
+        SIMULATOR_CLIENT_ID_PARAM: AuthStack.simulatorClientIdParameter(envName),
+      },
     });
+    preToken.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadSimulatorClientId',
+        actions: ['ssm:GetParameter'],
+        resources: [
+          `arn:${this.partition}:ssm:${this.region}:${this.account}:parameter${AuthStack.simulatorClientIdParameter(envName)}`,
+        ],
+      }),
+    );
 
     // 2) User pool
     this.userPool = new cognito.UserPool(this, 'UserPool', {
@@ -174,6 +195,16 @@ export class AuthStack extends Stack {
       });
     }
 
+    // 模擬器（ADR-030 D2，Dev 與 Prod）：ADMIN_USER_PASSWORD_AUTH 只能以 IAM 身分呼叫；pre token 觸發器只發 scope 給
+    // simulator 群組，所以外洩的 cafe／staff 密碼無法經由這個 client 取得 scope。
+    // Simulator (Dev and Prod): admin password auth needs IAM credentials; the trigger issues scopes only to the
+    // simulator group through this client.
+    this.simulatorClient = this.userPool.addClient('SimulatorClient', {
+      userPoolClientName: 'simulator',
+      authFlows: { adminUserPassword: true },
+      ...tokenSettings,
+    });
+
     // 5) SSM 參數 / SSM parameters
     const prefix = AuthStack.parameterPrefix(envName);
     const params: Array<[string, string, string]> = [
@@ -181,6 +212,7 @@ export class AuthStack extends Stack {
       ['UserPoolArnParam', 'user-pool-arn', this.userPool.userPoolArn],
       ['WebClientIdParam', 'web-client-id', this.webClient.userPoolClientId],
       ['IssuerParam', 'issuer', this.userPool.userPoolProviderUrl],
+      ['SimulatorClientIdParam', 'simulator-client-id', this.simulatorClient.userPoolClientId],
     ];
     if (this.smokeTestClient) {
       params.push(['SmokeTestClientIdParam', 'smoke-test-client-id', this.smokeTestClient.userPoolClientId]);
@@ -198,6 +230,7 @@ export class AuthStack extends Stack {
     new CfnOutput(this, 'UserPoolId', { value: this.userPool.userPoolId });
     new CfnOutput(this, 'WebClientId', { value: this.webClient.userPoolClientId });
     new CfnOutput(this, 'PreTokenFunctionName', { value: preToken.function.functionName });
+    new CfnOutput(this, 'SimulatorClientId', { value: this.simulatorClient.userPoolClientId });
     if (this.smokeTestClient) {
       new CfnOutput(this, 'SmokeTestClientId', { value: this.smokeTestClient.userPoolClientId });
     }
