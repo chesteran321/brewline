@@ -7,6 +7,19 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
 import { EnvName, LambdaSettings } from '../config';
 
+/**
+ * cdk-nag `AwsSolutions-L1`（「必須用 CDK 認得的最新 runtime」）的刻意例外（ADR-023）。
+ * aws-cdk-lib 2.277.0 起認得 `nodejs26.x`，但它在 Lambda 仍是**公開預覽版**（不在 SLA 內、不建議正式環境），
+ * 因此維持 Node 24（淘汰日 2028-04-30）。nodejs26.x GA 後評估升級並移除此例外（status §13）。
+ * Deliberate exception: nodejs26.x is a public-preview runtime (no SLA, not for production); stay on Node 24
+ * until it is GA, then revisit and remove this acknowledgement.
+ */
+export const LATEST_RUNTIME_ACK = {
+  id: 'AwsSolutions-L1',
+  reason:
+    'ADR-023: stay on nodejs24.x (deprecation 2028-04-30). nodejs26.x is a Lambda public-preview runtime (no SLA, not for production); revisit when it is GA.',
+} as const;
+
 /** Lambda 程式碼所在的 package（repo 根目錄的 services/）/ Package holding the Lambda code. */
 export const SERVICES_ROOT = path.join(__dirname, '..', '..', '..', '..', 'services');
 
@@ -109,6 +122,8 @@ export class BrewlineFunction extends Construct {
         externalModules: [],
       },
     });
+
+    Validations.of(this.function).acknowledge(LATEST_RUNTIME_ACK);
 
     // X-Ray 的 PutTraceSegments／PutTelemetryRecords 不支援資源層級權限，CDK 只能給 Resource "*"。
     // X-Ray write actions do not support resource-level permissions, so CDK grants Resource "*".
