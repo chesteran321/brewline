@@ -65,7 +65,32 @@ export interface LambdaSettings {
     readonly notifier: number;
     /** 定期補貨執行（A4e；09:00 同時觸發，節流由非同步重試處理）/ Replenishment runs (throttles retried async). */
     readonly replenish: number;
+    /** 模擬器執行（ADR-030；1 = 同一時間只跑一輪）/ Simulator run (1 = one run at a time). */
+    readonly simulator: number;
   };
+}
+
+/**
+ * 模擬器（docs/07、ADR-030）。產生器參數（每日筆數、商品數、公斤數、異常比例）在 S1c 才使用，
+ * 但先放進 SSM config，讓 S1b 部署時就能驗證格式。
+ * Simulator settings. Generator parameters are used from S1c but already live in the SSM config.
+ */
+export interface SimulatorSettings {
+  /** 部署時建立的模擬咖啡廳帳號數（D3）/ Simulated café accounts created at deploy time. */
+  readonly poolSize: number;
+  /** 一開始啟用的帳號數；之後依日期每月啟用 1–2 個（S1c）/ Active at start; more are activated monthly. */
+  readonly initialActive: number;
+  /** 每日訂單數範圍（D4）/ Orders per day. */
+  readonly ordersPerDay: { readonly min: number; readonly max: number };
+  /** 每筆商品數、每個商品公斤數（D4，避免佔滿庫存）/ Lines per order and kg per line (keeps reservations small). */
+  readonly linesPerOrder: { readonly min: number; readonly max: number };
+  readonly kgPerLine: { readonly min: number; readonly max: number };
+  /** 重複下單的比例（SIM-F-008，D1）/ Share of requests resent with the same Idempotency-Key. */
+  readonly duplicateOrderRate: number;
+  /** 亂數種子（SIM-F-009）；也決定租戶 ID，改了會建立新的一批租戶 / Seed; also derives tenant ids. */
+  readonly seed: string;
+  /** 刪除 stack 時保留模擬帳號與密碼參數 / Keep accounts and the credentials parameter when the stack is deleted. */
+  readonly retainOnDelete: boolean;
 }
 
 /**
@@ -131,6 +156,7 @@ export interface BrewlineEnv {
   readonly lambda: LambdaSettings;
   readonly api: ApiSettings;
   readonly mail: MailSettings;
+  readonly simulator: SimulatorSettings;
 }
 
 /** Lambda 標準 runtime（ADR-023）/ Standard Lambda runtime. */
@@ -159,7 +185,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 7, // COST-007
-      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2 },
+      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2, simulator: 1 },
     },
     api: {
       throttleRateLimit: 10,
@@ -170,6 +196,16 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       testProducts: true,
       orderTests: true,
       orderTimeoutSeconds: 10 * 60,
+    },
+    simulator: {
+      poolSize: 40,
+      initialActive: 30,
+      ordersPerDay: { min: 2, max: 6 }, // D4：Dev 少量 / small in Dev
+      linesPerOrder: { min: 1, max: 3 },
+      kgPerLine: { min: 1, max: 5 },
+      duplicateOrderRate: 0.02,
+      seed: 'brewline-dev-sim-2026',
+      retainOnDelete: false,
     },
     mail: {
       domain: 'dev.brewline-demo.click',
@@ -197,7 +233,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 30, // COST-007
-      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2 },
+      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2, simulator: 1 },
     },
     api: {
       throttleRateLimit: 50,
@@ -208,6 +244,16 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       testProducts: false,
       orderTests: false,
       orderTimeoutSeconds: 48 * 60 * 60,
+    },
+    simulator: {
+      poolSize: 40,
+      initialActive: 30,
+      ordersPerDay: { min: 5, max: 40 }, // docs/07 §2
+      linesPerOrder: { min: 1, max: 3 },
+      kgPerLine: { min: 1, max: 5 },
+      duplicateOrderRate: 0.02,
+      seed: 'brewline-prod-sim-2026',
+      retainOnDelete: true,
     },
     mail: {
       domain: 'brewline-demo.click',

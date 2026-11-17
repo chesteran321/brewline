@@ -100,6 +100,17 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 通知函數 | `brewline-<env>-notifications-order-notifier`，角色 `brewline-<env>-orders-notify`（扮演租戶角色讀聯絡人／解密）；只寄 建立／確認／出貨／取消；`NOTIFY#<event_id>` 條件寫入防重複；`example.com` 等保留網域不寄；**日誌不記錄收件地址** |
 | 區域注意 | CDK 內建資料誤判台北沒有 `AWS::SES::*`；新增資源類型前用 `aws cloudformation describe-type --region ap-east-2` 實測 |
 
+### 模擬器 / Simulator（ADR-030，docs/07）
+
+| 項目 Item | 值 Value |
+|---|---|
+| Stack | `brewline-<env>-simulator`（module `simulator`；Prod 終止保護）；部署在 api 之後 |
+| 帳號 | 部署時由 custom resource 建立 `sim-NNN@example.com`（群組 `simulator`，tenant_id 由 `config.ts` 的 `simulator.seed` 決定）；**改種子會產生新的一批租戶** |
+| 密碼 | SSM `/brewline/<env>/simulator/credentials`（SecureString，CMK）；只有帳號 custom resource 能寫、執行函數能讀；**不要手動讀或印出** |
+| 開關 | SSM `/brewline/<env>/simulator/state`＝`paused`／`running`；只在第一次建立（`paused`），部署不覆蓋；其他值都當成 `paused` |
+| 執行 | `brewline-<env>-simulator-run`，台北 08:05–19:05 每小時；執行角色只有 `AdminInitiateAuth`＋讀 3 個參數（RSK-018 的權限只在帳號 custom resource） |
+| 規則 | 模擬流量一律走公開 API（ADR-011），不直接寫 DynamoDB；預期沒達成就丟錯（觸發 `Errors` 告警），不用自訂指標 |
+
 ### Lambda 標準 / Lambda standard（ADR-023）
 
 - 一律用 `lib/constructs/brewline-function.ts`：Node 24、arm64、X-Ray、保留併發、自建 log group（Dev 7 天／Prod 30 天）、esbuild 打包（含 AWS SDK）。
