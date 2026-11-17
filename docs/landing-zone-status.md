@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎、訂貨模組 A1–A4 完成；模擬器 S0（bus 資源政策）、S1a（simulator client、`synthetic`）、S1b（帳號、開關、排程）完成，S1c（訂單產生器）進行中** / P0 complete; P1 CI/CD, data foundation and ordering A1–A4 complete; simulator S0–S1b complete, S1c in progress（2026-11-17）
+> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎、訂貨模組 A1–A4 完成；模擬器 S0（bus 資源政策）、S1a（simulator client、`synthetic`）、S1b（帳號、開關、排程）、S1c（訂單產生器）完成；Dev 觀察期中，Prod 尚未開啟（S1d）** / P0 complete; P1 CI/CD, data foundation and ordering A1–A4 complete; simulator S0–S1c complete, Dev under observation, Prod not yet enabled (S1d)（2026-11-17）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -752,7 +752,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - （2026-11-16）`aws lambda invoke` 只要呼叫成功就回 0；函數錯誤在輸出檔 → 加 `--query FunctionError`。
 - （2026-11-16）CloudShell `read` 與下一行一起貼上會把下一行讀進變數（今天 2 次）→ 個人環境直接賦值，並 `echo "[$VAR]"` 確認；測試函數的錯誤訊息拆成「缺 KMS_KEY_ARN」與「email 格式錯」。
 
-### 10.16 模擬器 S1b：帳號、開關、排程 / Simulator S1b（P1，2026-11-17，ADR-030）
+### 10.16 模擬器 S1b／S1c：帳號、開關、排程、訂單產生器 / Simulator S1b–S1c（P1，2026-11-17，ADR-030，PR #57、#58、#60）
 
 | 項目 | Dev | Prod |
 |---|---|---|
@@ -786,9 +786,18 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - **Prod 手動探測**（Admin，`state = paused`）：`{"probe": true}` → `probe_ok`（`status 200`、`products 8`、`synthetic true`）；`{"source":"manual"}` → `paused`。Prod 的模擬器**尚未開啟**。
 - 一個 `probe_ok` 同時驗證：SSM 讀密碼（CMK、`kms:EncryptionContext:PARAMETER_ARN`）→ simulator client 登入 → token 的 `synthetic` claim（S1a）→ authorizer audience → 目錄 API。
 
+已驗證 S1c（2026-11-17，PR #60；之後 #61、#48、#55 部署後重驗：Dev 406 項 ✅、smoke 92/92，Prod 403 項 ✅）：
+- **重現性（SIM-F-009）**：Dev `{"dryRun": true, "date": "2026-11-17"}` → 4 筆、每小時 `[0,0,0,1,0,1,0,0,0,1,1,0]`、雜湊 `01658fc9f7b61ec3…`，與本機用同一份程式碼算出的**完全相同**；反向：`2026-11-18` → 雜湊 `088545e2e101a52e…`（不同）、分布 10 時 2 筆、11 時 1 筆、14 時 1 筆，也與本機相同。
+- **執行一小時**（Dev，`running`，17 時手動）：`simulated`、`planned 1`、`created 1`、`violations []`；**同一小時重跑** → `replayed 1`、`created 0`（冪等，沒有多下單）。
+- **事件標記**：bus 日誌 `synthetic IS TRUE` 只有 1 筆 `OrderCreated CREATED`（重播不產生事件）；10 分鐘後多 1 筆 `OrderStatusChanged CANCELLED`——逾時工作流（`system:timeout`）取消的訂單也帶 `synthetic`，因為事件 detail 來自 Streams 的 NewImage，標記屬於訂單本身。
+- **排程**：18:05 由 Scheduler 觸發 → `hour 18`、`planned 1`、`created 1`；19:05 → `planned 0`、沒有下單（反向）；20 時以後沒有執行（反向，cron `8-19`）；DLQ 0。
+- **Dev 目前 `running`**（觀察期，每天 2–6 筆）；**Prod 仍是 `paused`**，S1d 再開啟。
+
 教訓 / Lessons：
 - 驗證腳本也會有 bug：唯讀角色讀不到 Lambda 環境變數的值（#56，§10.14 #8 再犯一次）、寫死的告警總數（#58）。兩次都是「系統正常、驗證失敗」，管線因此跳過 Prod，沒有讓問題上線。驗證要檢查**不變條件**（全部接上、在上限內、只允許這些），不檢查某個時間點的數量或看不到的值。
 - `state`／`credentials` 刻意不交給 CloudFormation：CloudFormation 不能建 SecureString，而由 CloudFormation 管理的開關會在部署時被覆蓋回預設值。
+- 決定性的產生器讓驗收變簡單：不必比對每一筆訂單，只比對一個雜湊；本機（單元測試）與 Lambda 的結果相同，就代表計畫只由（種子、日期）決定。
+- Dependabot（#48、#55）：main 前進後 PR 的 `checks` 會過期，要 rebase 或 update branch 重跑。#48 把 aws-cdk-lib 升到 2.277.0，新版認得 `nodejs26.x`，cdk-nag `AwsSolutions-L1` 因此對 24 個函數報錯 → 先合併 #61（acknowledge，ADR-023 修訂），再更新 #48。依賴更新**一次只合併、部署一個**，出問題時容易判斷是哪個變更造成的。
 
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
@@ -881,7 +890,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-10 | `.gitignore` 補強；`infra/app` 初始化；PR／Deploy workflow；pipeline-check stack 驗證 Dev、Prod 整條管線（§10.4，PR #1） |
 | ✅ 2026-11-10 | ruleset required status check `checks`；`.github/dependabot.yml` |
 | ✅ 2026-11-10 | 本機 `D:\brewline` 改為 `git clone` GitHub repo |
-| P1 | 處理 Dependabot 開的更新 PR（確認 `checks` 綠燈再合併） |
+| ✅ 2026-11-17 | 處理 Dependabot 更新 PR：#48（aws-cdk 群組）、#55（aws-sdk 群組），逐一合併並部署 Dev、Prod（§10.16 教訓）；之後每週照同樣方式處理 |
 | ✅ 2026-11-11 | 共用資料基礎：`brewline-<env>-data` 部署 Dev、Prod 並驗證（§10.5，PR #6） |
 | ✅ 2026-11-11 | 決定：OIDC 角色**不**由 workload app／CI 管理；之後另建 `infra/landing-zone` app，以 `cdk import` 匯入，由 Admin 本機部署（可選：`scp-baseline` 加 Sid 禁止非 SSO Admin 修改 `gha-*` 角色） |
 | ✅ 2026-11-11 | Prod Config 記錄 `brewline-prod-core`（`AWS::DynamoDB::Table`，合規） |
@@ -910,7 +919,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
 | ✅ 2026-11-17 | 模擬器決策 D1–D9 定案（docs/07 對照，見 ADR-030）；S0（RSK-017）bus 資源政策部署 Dev、Prod 並驗證，含真實憑證反向測試（§10.10，PR #52） |
 | ✅ 2026-11-17 | 模擬器 S1a（simulator client、`synthetic`）、S1b（stack、帳號 40、開關 `paused`、排程、探測）部署 Dev、Prod 並驗證，含 Dev 開關測試與 Prod 探測（§10.16，PR #54／#56／#57／#58） |
-| P1 | 模擬器 S1c（產生器，§10.16）：部署後 Dev 驗證 dry-run 雜湊相同、`running` 一小時（建立／重送／事件 `synthetic`）、`paused` 立即停止；Dev 觀察數天 → S1d（Prod 開啟） |
+| ✅ 2026-11-17 | 模擬器 S1c 產生器（§10.16，PR #60）部署 Dev、Prod；Dev 驗證 dry-run 雜湊與本機相同、手動一小時（建立／重播／事件 `synthetic`）、逾時取消帶 `synthetic`、排程 18 時下單、19 時 0 筆；Dev 留在 `running` |
+| P1 | 模擬器 Dev 觀察期（至少到 2026-11-18：10、11、14 時共 4 筆、`run-errors` 告警沒有觸發、DLQ 0）→ S1d：Prod `state` 改 `running` 並驗證 |
 | 有空時 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`）與 `scheduler:GetSchedule`／`ListSchedules`，讓 Developer 在 Dev 切換模擬器開關 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |
 | nodejs26.x GA 後（預計 2026-11 底） | 評估 Lambda 升級到 Node 26（本機、CI、`Runtime`），移除 `LATEST_RUNTIME_ACK`（ADR-023 修訂） |
@@ -932,6 +942,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - Identity Center 建立的角色路徑含區域：`/aws-reserved/sso.amazonaws.com/ap-east-2/`；查 ARN 用 `aws iam list-roles --path-prefix /aws-reserved/`，不要手打。
 - 許可集要能用 CloudShell，需另加 `AWSCloudShellFullAccess`（ViewOnlyAccess 不含）。
 - CloudShell 一開始先 `export AWS_PAGER=""`：否則長輸出會進入 `less`，之後貼上的指令會被當成分頁器按鍵。
+- CloudShell 閒置約 20 分鐘會斷線，**重新連線後 shell 變數全部消失**（2026-11-17：`$F` 變空 → log group 變成 `/aws/lambda/` → `ResourceNotFoundException`）。之後要再跑的驗證指令寫成自足的形式（名稱寫死），時間範圍用固定時刻（`date -d '2026-11-17 17:30 +0800' +%s`），不要用「最近 N 分鐘」。
+- 查 Powertools 的 JSON 日誌用 JSON filter pattern（`{ $.message = "simulated hour" }`、`{ $.detail.synthetic IS TRUE }`），比全文搜尋精準。
 - 貼上多行指令時，`\` 結尾的下一行若是註解，指令會在那裡結束、後面參數被吃掉（2026-11-13：第一次隱藏 `Cognito.1` 沒有帶到備註）→ 一次貼一個完整指令，並用查詢驗證實際狀態。
 - Security Hub 的「資源 ID」是完整 ARN（例如 user pool 是 `…:userpool/<pool-id>`，不含名稱）；篩選控制項用「安全控制 ID」，或直接從「控制項」頁面搜尋。
 - `scp-budget-lockdown` 平時必須沒有任何目標。
