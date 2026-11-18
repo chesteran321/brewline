@@ -1,7 +1,7 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyStructuredResultV2 } from 'aws-lambda';
 import { z } from 'zod';
 import { SCOPES } from '../../../identity/src/scopes';
-import { claim, hasScope, json, jsonBody, problem } from '../lib/http';
+import { claim, hasAnyScope, isSyntheticCaller, json, jsonBody, problem } from '../lib/http';
 import { TRANSITIONS } from '../lib/order-lifecycle';
 import {
   OrderIdSchema,
@@ -13,8 +13,12 @@ import {
 } from '../lib/order-model';
 import { adminOrderRepo, logger } from '../lib/runtime';
 
+/** staff 與烘焙廠都能用（S2，ADR-031 D6）/ Staff and the roastery may use these. */
+const ALLOWED = [SCOPES.admin, SCOPES.roastery];
+
 /**
- * staff 訂單端點（scope brewline/admin，ORD-F-009，A3c，ADR-027）。
+ * staff 訂單端點（scope brewline/admin 或 brewline/roastery，ORD-F-009，A3c，ADR-027）。
+ * 模擬烘焙廠（synthetic）只看得到、改得到模擬訂單 / A synthetic caller sees and changes synthetic orders only.
  *   GET   /admin/orders?status=CREATED                    → 各租戶該狀態的訂單（GSI1）
  *   GET   /admin/tenants/{tenantId}/orders/{orderId}      → 明細（含 status_history 與 tenant_id）
  *   PATCH /admin/tenants/{tenantId}/orders/{orderId}      → { "status": "<下一個狀態>" }
@@ -40,7 +44,7 @@ const fail = (op: string, err: unknown) => {
 };
 
 export const listHandler = async (event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<APIGatewayProxyStructuredResultV2> => {
-  if (!hasScope(event, SCOPES.admin)) return problem(403, 'forbidden', 'Missing required scope');
+  if (!hasAnyScope(event, ALLOWED)) return problem(403, 'forbidden', 'Missing required scope');
   const q = ListQuery.safeParse(event.queryStringParameters ?? {});
   if (!q.success) return problem(400, 'invalid_query', 'status must be a known status; limit 1-50; only status, limit, next_token');
   let start: Record<string, string> | undefined;
@@ -50,8 +54,9 @@ export const listHandler = async (event: APIGatewayProxyEventV2WithJWTAuthorizer
   }
   try {
     const page = await adminOrderRepo().listByStatus(q.data.status, q.data.limit, start);
+    const visible = isSyntheticCaller(event) ? page.orders.filter((o) => o.synthetic === true) : page.orders;
     return json(200, {
-      items: page.orders.map(toAdminOrder),
+      items: visible.map(toAdminOrder),
       ...(page.last ? { next_token: encodeAdminCursor(page.last) } : {}),
     });
   } catch (err) {
@@ -60,19 +65,21 @@ export const listHandler = async (event: APIGatewayProxyEventV2WithJWTAuthorizer
 };
 
 export const getHandler = async (event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<APIGatewayProxyStructuredResultV2> => {
-  if (!hasScope(event, SCOPES.admin)) return problem(403, 'forbidden', 'Missing required scope');
+  if (!hasAnyScope(event, ALLOWED)) return problem(403, 'forbidden', 'Missing required scope');
   const ids = pathIds(event);
   if (!ids) return problem(400, 'invalid_path', 'tenantId must be t_<26>, orderId must be o_<26>');
   try {
     const order = await adminOrderRepo().get(ids.tenantId, ids.orderId);
-    return order ? json(200, toAdminOrder(order)) : problem(404, 'not_found', 'Order not found');
+    // 模擬呼叫者看不到真實訂單（回 404，不透露存在）/ Synthetic callers cannot see real orders (404, existence not revealed).
+    const visible = order && (!isSyntheticCaller(event) || order.synthetic === true);
+    return visible ? json(200, toAdminOrder(order)) : problem(404, 'not_found', 'Order not found');
   } catch (err) {
     return fail('admin get-order', err);
   }
 };
 
 export const patchHandler = async (event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<APIGatewayProxyStructuredResultV2> => {
-  if (!hasScope(event, SCOPES.admin)) return problem(403, 'forbidden', 'Missing required scope');
+  if (!hasAnyScope(event, ALLOWED)) return problem(403, 'forbidden', 'Missing required scope');
   const sub = claim(event, 'sub');
   if (!sub) return problem(403, 'forbidden', 'Missing subject');
   const ids = pathIds(event);
@@ -81,9 +88,11 @@ export const patchHandler = async (event: APIGatewayProxyEventV2WithJWTAuthorize
   if (!body.success) return problem(400, 'invalid_request', 'Body must be {"status": "<order status>"}');
 
   try {
-    const r = await adminOrderRepo().transition({ ...ids, to: body.data.status, actor: `staff:${sub}`, now: new Date() });
+    const synthetic = isSyntheticCaller(event);
+    const actor = hasAnyScope(event, [SCOPES.admin]) ? `staff:${sub}` : `roastery:${sub}`;
+    const r = await adminOrderRepo().transition({ ...ids, to: body.data.status, actor, now: new Date(), requireSynthetic: synthetic });
     // 稽核：誰在何時把哪張訂單改成什麼（A2 決策 D4 的應用層證據）/ Audit log line.
-    logger.info('admin transition', { ...ids, to: body.data.status, outcome: r.kind, staff_sub: sub });
+    logger.info('admin transition', { ...ids, to: body.data.status, outcome: r.kind, actor, synthetic });
     switch (r.kind) {
       case 'updated':
         return json(200, toAdminOrder(r.order));
@@ -98,6 +107,10 @@ export const patchHandler = async (event: APIGatewayProxyEventV2WithJWTAuthorize
         return problem(409, 'conflict', 'The order changed meanwhile; read it again and retry');
       case 'busy':
         return problem(503, 'try_again', 'The service is busy; retry');
+      case 'forbidden':
+        return problem(403, 'synthetic_only', 'Simulator accounts may change synthetic orders only');
+      case 'not_ready':
+        return problem(409, r.reason, 'Every line must be fully allocated to roasted batches first', { refs: r.refs });
     }
   } catch (err) {
     return fail('admin patch-order', err);

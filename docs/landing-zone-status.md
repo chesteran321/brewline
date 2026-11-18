@@ -803,6 +803,20 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 決定性的產生器讓驗收變簡單：不必比對每一筆訂單，只比對一個雜湊；本機（單元測試）與 Lambda 的結果相同，就代表計畫只由（種子、日期）決定。
 - Dependabot（#48、#55）：main 前進後 PR 的 `checks` 會過期，要 rebase 或 update branch 重跑。#48 把 aws-cdk-lib 升到 2.277.0，新版認得 `nodejs26.x`，cdk-nag `AwsSolutions-L1` 因此對 24 個函數報錯 → 先合併 #61（acknowledge，ADR-023 修訂），再更新 #48。依賴更新**一次只合併、部署一個**，出問題時容易判斷是哪個變更造成的。
 
+### 10.17 溯源 S2a：生豆批次、烘焙批次、烘焙廠角色 / Traceability S2a（P1，2026-11-18，ADR-031）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| 資料（D5，單表、鄰接清單、**沒有新 GSI**） | `LOT#<lot_id>/META`（種子 `seed/lots.json`，每次部署覆寫；生產者名稱虛構）、`LOT#<lot>/ROAST#<日期>#<roast_id>`（邊）、`ROAST#<roast_id>/META`、`ROAST#<r>/ORDER#<tenant>#<order>`（邊，含 kg）；訂單品項加 `allocated_kg`、`roast_ids` | 同左（Dev 另有測試批次 `L-9999-00x`） |
+| 身分（D6） | 新 scope `brewline/roastery`（staff 也有）；新群組 `simulator-roastery`（`catalog.read`＋`roastery`、`synthetic`、沒有租戶、沒有 admin、可經由 simulator client）；操作員群組（staff、simulator-roastery）最多一個且不能與租戶群組並存 → 模擬帳號永遠不會是 staff（RSK-018 不變條件） | 同左 |
+| 新路由（皆 JWT＋scope） | `POST /admin/roasts`、`PATCH /admin/roasts/{id}`、`POST /admin/products/{id}/restock`（roastery）；`POST /admin/roasts/{id}/recall`（**只有 admin**）；`GET /admin/trace`（admin 或 roastery）；既有 `/admin/orders*`、`/admin/products/{id}/stock` 改為 admin 或 roastery | 同左 |
+| 規則 | 只在 `ROASTING_SCHEDULED` 分配；每批 ≤ 15 kg、分配總和 ≤ 批次、每品項不超量（條件寫入）；批次 ID 由 Idempotency-Key 決定（重送 200、內容不同 422）；`→ROASTED` 需全數分配且批次已烘焙（批次狀態只會往前，先檢查後轉換是安全的）；QR token 128-bit，`ROASTED` 時產生一次；召回一次、公開文字不含 `<>`；補貨用 `version` 樂觀鎖（重送 409）、上限 2000 kg | 同左 |
+| synthetic 保護 | 帶 `synthetic` 的呼叫者：只看得到、改得到模擬訂單與批次（真實的回 404／403 `synthetic_only`）；模擬批次只能分配模擬訂單，反之亦然 | 同左 |
+| 函數（5 個，角色由 CloudFormation 命名，不扮演租戶角色） | `create-roast`：Get（PRODUCT／LOT／ROAST／TENANT）、Put 只在 `ROAST#`／`LOT#`、訂單 UpdateItem 只能動 `items`（`dynamodb:Attributes`）；`update-roast`／`recall-roast`：只有 `ROAST#`；`restock`：庫存欄位；`trace`：唯讀；全部明確 Deny Scan、沒有 Delete | 同左 |
+
+- 費用：每批次數個 WRU，約 0；沒有新的固定費用。
+- 尚未包含（S2b–S2d）：公開溯源頁（S3 投影＋CloudFront Free 方案）、事件（`RoastBatchRoasted`／`Recalled`）、模擬烘焙廠的排程。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -826,6 +840,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-028 | 未確認訂單的逾時取消（Step Functions） | Accepted（2026-11-13） | OrderCreated → Standard 工作流等待（Dev 10 分／Prod 48 小時）→ 仍是 CREATED 就取消並釋放；冪等靠條件寫入（§10.11） |
 | ADR-027 | 訂單狀態機與 staff 端點 | Accepted（2026-11-13） | 狀態以 DynamoDB 為準；一個交易＝訂單（樂觀鎖：原狀態）＋庫存；staff 函數不扮演租戶角色、無 Put／Delete（§10.9） |
 | ADR-026 | 事件層：Streams → Lambda → EventBridge | Accepted（2026-11-13） | 台北沒有 Pipes／Archive；自訂 bus、白名單 detail、`event_id` 去重、Logs 規則留存、DLQ SSE-SQS（§10.10） |
+| ADR-031 | 溯源（docs/04）範圍與設計（S2 決策 D1–D9） | Accepted（2026-11-18） | D1 S2＝生豆批次（8 個種子）＋烘焙批次＋QR＋公開頁＋staff 追溯＋召回＋模擬烘焙廠；航程（SHP）、天氣（PRC）、換批、召回寄信延後。D2 公開頁＝S3 預先產生的白名單 JSON 投影（事件觸發），讀取路徑沒有 Lambda／API／DynamoDB。D3 CloudFront 統一費率 **Free 方案**（WAF＋IP 速率限制＋DDoS，`AWS::PricingPlanManager::Subscription`）；快取用 `Cache-Control: max-age=300`；不合格時退回 pay-as-you-go 不掛 WAF。D4 us-east-1 `edge`（ACM、CLOUDFRONT web ACL）→ config → 台北 `trace`（bucket、OAC、distribution、方案訂閱）；describe-type 實測台北可建 Distribution／Subscription、不能建 ACM。D5 鄰接清單，不加 GSI2。D6 `brewline/roastery` scope＋`simulator-roastery` 群組，伺服器端 synthetic 保護。D7 補貨（樂觀鎖）。D8 模擬操作員節奏（同一輪確認 90%、16:05 排烘、隔天烘焙／出貨、2 天後完成）。D9 QR 128-bit、召回 admin only（§10.17） |
 | ADR-030 | 模擬器（docs/07）範圍與設計（S1 決策 D1–D9） | Accepted（2026-11-17） | D1 S1＝租戶＋訂單＋重複下單異常；生豆／烘焙批次 → S2（溯源），貨櫃／DCSA／IFTSTA／EDI 異常 → S3（P2）。D2 專用 `simulator` app client（`ADMIN_USER_PASSWORD_AUTH`）＋每人隨機密碼存 SSM SecureString（CMK）；pre token 限制此 client 只發 scope 給 `simulator` 群組。D3 部署時 custom resource 建 40 個使用者（先啟用 30，每月依日期啟用 1–2）；執行函數只有 `AdminInitiateAuth`。D4 Dev、Prod 都跑（Prod 每天 5–40、Dev 2–6；每筆 1–3 個商品 × 1–5 kg；跳過庫存偏低）；首次部署 `paused`。D5 S1 不推進訂單（逾時取消），S2 再設計烘焙廠操作員。D6 `synthetic: true` 由伺服器依 `cognito:groups` 標記於訂單與事件。D7 `state` 參數只在首次建立時寫入（Dev 可由 Developer 切換）、`config` 由 CDK 管理；`scp-budget-lockdown` 加 `cognito-idp:AdminInitiateAuth`。D8 台北 08:05–19:05 每小時；冪等鍵＝hash(種子, 日期, 小時, 序號)；重現性以 dry-run 計畫雜湊驗證。D9 不建自訂指標；預期失敗即函數錯誤 → `Errors` 告警；每帳號告警 ≤ 10。前置：S0（RSK-017）完成 |
 
 | 風險 | 內容 | L | I | 緩解 |
@@ -835,6 +850,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | RSK-016 | A3 之前已預留的庫存不會自動釋放；單筆最多預留 500 kg，可能佔滿某商品 | M | M | 不開放註冊；路由限流；**A3c staff 可取消、A3d 未確認訂單自動取消並釋放（Dev 10 分／Prod 48 小時）**；剩餘：48 小時內仍可佔住庫存 |
 | RSK-017 | 自訂 bus 沒有資源政策：同帳號內有 `events:PutEvents` 的身分可偽造 `brewline.ordering` 事件（例如假的 `OrderCreated` 會啟動逾時工作流，但取消前會讀 DynamoDB，影響有限） | L | M | **已緩解（S0，2026-11-17）**：bus 資源政策 Deny 白名單以外的 `PutEvents`（§10.10）。剩餘：SSO Admin 與 CloudFormation 執行角色（可改政策）仍可發布 |
 | RSK-018 | 模擬器帳號 custom resource 有 `AdminCreateUser`／`AdminSetUserPassword`／`AdminAddUserToGroup`（IAM 無法依群組或使用者限制）：能修改此函數或其角色的身分，理論上可以重設 staff 密碼或把帳號加進 staff | L | M | 函數只由 CloudFormation provider 呼叫；修改需要 CI 部署或 Admin；Developer 只在 Dev 且不能改 Lambda／IAM；執行中的模擬器函數**只有** `AdminInitiateAuth`（S1b，政策模擬驗證）；`verify-simulator-stack.sh` 檢查模擬帳號不在 staff 群組 |
+| RSK-019 | 公開溯源頁若輸出錯誤欄位，可能洩漏租戶或訂單資訊 | L | M | 公開資料只來自寫入時的白名單投影（S2c）；租戶角色讀不到 `ROAST#`／`LOT#`；公開讀取路徑沒有資料庫權限；驗收搜尋租戶 ID、Email 結果為 0 |
 | RSK-013 | 主要區域無 Macie，無法自動偵測 S3 中的個資 | L | L | 個資只存 DynamoDB；DATA-011/012 設計層預防；資料湖 DQ 檢查加入 Email／電話格式偵測 |
 
 ---
@@ -877,6 +893,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 09 §1.3 | Lite → **Essentials**；「staff 強制 TOTP」→ OPTIONAL＋偵測性檢查；威脅防護不開（需 Plus，FSBP `Cognito.1` 預期失敗） |
 | 09 §2.1 | CORS：A1 不開；前端改走 CloudFront 同網域 |
 | 09 §2.2 | Node 24（ADR-023）；保留併發 Dev 5／Prod 10（API）；CodeDeploy canary 延後 |
+| 04 | 依 ADR-031：公開頁改 S3 靜態投影（不經 API Gateway／Lambda）；WAF 來自 CloudFront Free 方案；GSI2 改鄰接清單；QR 對應不另存 `QR#`（存在批次上）；TRC-F-004／005 延後；新增 `/admin/roasts*`、`/admin/products/{id}/restock`、`GET /admin/trace?…`（取代 `/admin/trace/{type}/{id}`） |
 | 07 | 依 ADR-030 分階段：S1 租戶＋訂單＋重複下單；生豆／烘焙批次 → S2（溯源）；貨櫃、DCSA、IFTSTA、EDI 異常、`S3 edi/inbound` → S3（P2）。SIM-F-001 不建聯絡人（simulator 沒有 profile scope）；帳號部署時建立、依日期啟用（取代執行時新增）；SIM-F-010 改為訂單項目的 `synthetic: true`（伺服器依 JWT 判定）；SIM-N-001 開關「下一輪生效」；docs/11「預測 100% 自動暫停」改為 `scp-budget-lockdown` 擋 `AdminInitiateAuth`；服務清單去掉 S3／DynamoDB 直接寫入（S1） |
 
 ---
@@ -924,6 +941,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-17 | 模擬器決策 D1–D9 定案（docs/07 對照，見 ADR-030）；S0（RSK-017）bus 資源政策部署 Dev、Prod 並驗證，含真實憑證反向測試（§10.10，PR #52） |
 | ✅ 2026-11-17 | 模擬器 S1a（simulator client、`synthetic`）、S1b（stack、帳號 40、開關 `paused`、排程、探測）部署 Dev、Prod 並驗證，含 Dev 開關測試與 Prod 探測（§10.16，PR #54／#56／#57／#58） |
 | ✅ 2026-11-17 | 模擬器 S1c 產生器（§10.16，PR #60）部署 Dev、Prod；Dev 驗證 dry-run 雜湊與本機相同、手動一小時（建立／重播／事件 `synthetic`）、逾時取消帶 `synthetic`、排程 18 時下單、19 時 0 筆；Dev 留在 `running` |
+| P1 | 溯源 S2a（§10.17）：部署 Dev、Prod 並驗證（smoke 擴充、IAM 政策模擬）→ S2b（edge stack）→ S2c（公開頁）→ S2d（模擬烘焙廠） |
 | P1 | 模擬器 Dev 觀察期（至少到 2026-11-18：10、11、14 時共 4 筆、`run-errors` 告警沒有觸發、DLQ 0）→ S1d：Prod `state` 改 `running` 並驗證 |
 | ✅ 2026-11-18 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`），Developer 可在 Dev 切換模擬器開關（§3） |
 | 2026-11-18 | Dependabot 安全警示 2 筆（`minimatch` < 11.0.1，Moderate，只在測試／synth 工具鏈）：PR #63 以 npm `overrides` 升到 11.0.9；`aws-cdk-lib` 內部打包（bundleDependencies）的一份要等新版 |

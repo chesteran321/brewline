@@ -41,5 +41,9 @@ export const handler = async (event: unknown): Promise<{ outcome: TimeoutOutcome
     case 'busy':
       // 狀態剛好在這時被改、或暫時忙碌 → 交給 Step Functions 重試 / Let Step Functions retry.
       throw new RetryableError(r.kind);
+    case 'forbidden':
+    case 'not_ready':
+      // 取消不需要分配、也不限 synthetic，不會發生 / Cancelling needs neither; cannot happen.
+      throw new Error(`Unexpected transition result: ${r.kind}`);
   }
 };

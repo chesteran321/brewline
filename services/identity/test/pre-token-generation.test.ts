@@ -7,6 +7,8 @@ import { SCOPES, TENANT_ID_PATTERN } from '../src/scopes';
 const TENANT = 't_01JD8Z3K5M7N9P0Q2R4S6T8V0W';
 const SIM_SCOPES = [SCOPES.catalogRead, SCOPES.ordersRead, SCOPES.ordersWrite].sort();
 const CAFE_SCOPES = [...SIM_SCOPES, SCOPES.profileRead, SCOPES.profileWrite].sort();
+const STAFF_SCOPES = [SCOPES.admin, SCOPES.catalogRead, SCOPES.roastery].sort();
+const ROASTER_SCOPES = [SCOPES.catalogRead, SCOPES.roastery].sort();
 
 const SIM_CLIENT = 'sim-client-id';
 const PARAM = '/brewline/dev/auth/simulator-client-id';
@@ -69,9 +71,17 @@ describe('decide()', () => {
     expect(scopes).not.toContain(SCOPES.ordersWrite);
   });
 
-  test('staff gets admin + catalog.read and never a tenant claim', () => {
-    expect(decide(['staff'], undefined)).toEqual({ scopes: [SCOPES.admin, SCOPES.catalogRead].sort() });
-    expect(decide(['staff'], TENANT)).toEqual({ scopes: [SCOPES.admin, SCOPES.catalogRead].sort() });
+  test('staff gets admin + catalog.read + roastery and never a tenant claim', () => {
+    expect(decide(['staff'], undefined)).toEqual({ scopes: STAFF_SCOPES });
+    expect(decide(['staff'], TENANT)).toEqual({ scopes: STAFF_SCOPES });
+  });
+
+  // S2（ADR-031 D6）：模擬烘焙廠操作員 / Simulated roastery operator
+  test('simulator-roastery: catalog.read + roastery, synthetic, no tenant, no admin', () => {
+    expect(decide(['simulator-roastery'], undefined)).toEqual({ scopes: ROASTER_SCOPES, synthetic: true });
+    expect(decide(['simulator-roastery'], TENANT)).toEqual({ scopes: ROASTER_SCOPES, synthetic: true });
+    expect(decide(['simulator-roastery'], undefined, { viaSimulatorClient: true })).toEqual({ scopes: ROASTER_SCOPES, synthetic: true });
+    expect(decide(['simulator-roastery'], undefined).scopes).not.toContain(SCOPES.admin);
   });
 
   test('unknown groups are ignored, duplicates collapse', () => {
@@ -84,6 +94,11 @@ describe('decide()', () => {
     [['beta-testers'], TENANT, 'no-known-group'],
     [['cafe', 'staff'], TENANT, 'conflicting-groups'],
     [['simulator', 'staff'], TENANT, 'conflicting-groups'],
+    // 模擬帳號不能同時是 staff（RSK-018）；操作員不能同時屬於租戶 / A simulator account is never staff; operators have no tenant.
+    [['simulator-roastery', 'staff'], undefined, 'conflicting-groups'],
+    [['simulator-roastery', 'simulator'], TENANT, 'conflicting-groups'],
+    [['simulator-roastery', 'cafe'], TENANT, 'conflicting-groups'],
+    [['cafe', 'simulator'], TENANT, 'conflicting-groups'],
     [['cafe'], undefined, 'missing-tenant-id'],
     [['cafe'], '', 'missing-tenant-id'],
     [['cafe'], 'acme-coffee', 'invalid-tenant-id'],
@@ -153,8 +168,14 @@ describe('handler', () => {
 
   test('staff: scopes but no claimsToAddOrOverride', async () => {
     const out = await handler(event(['staff']));
+    expect(out.response.claimsAndScopeOverrideDetails.accessTokenGeneration).toEqual({ scopesToAdd: STAFF_SCOPES });
+  });
+
+  test('simulator-roastery: synthetic claim without tenant_id', async () => {
+    const out = await handler(event(['simulator-roastery'], { 'custom:tenant_id': TENANT }, SIM_CLIENT));
     expect(out.response.claimsAndScopeOverrideDetails.accessTokenGeneration).toEqual({
-      scopesToAdd: [SCOPES.admin, SCOPES.catalogRead].sort(),
+      scopesToAdd: ROASTER_SCOPES,
+      claimsToAddOrOverride: { synthetic: 'true' },
     });
   });
 

@@ -88,8 +88,16 @@ export const OrderLineSchema = z.object({
   qty_kg: z.number().int(),
   price_per_kg: z.number().int(),
   line_total: z.number().int(),
+  /** S2（ADR-031 D5）：已分配到烘焙批次的公斤數與批次 ID / Kilograms allocated to roast batches, and their ids. */
+  allocated_kg: z.number().int().min(0).optional(),
+  roast_ids: z.array(z.string().regex(/^r_[0-9A-HJKMNP-TV-Z]{26}$/)).optional(),
 });
 export type OrderLine = z.infer<typeof OrderLineSchema>;
+
+/** 每個品項都已全數分配到烘焙批次（出貨可追溯的前提）/ Every line fully allocated to roast batches. */
+export function fullyAllocated(o: { items: readonly OrderLine[] }): boolean {
+  return o.items.every((l) => (l.allocated_kg ?? 0) === l.qty_kg);
+}
 
 export const OrderItemSchema = z.object({
   pk: z.string().startsWith(TENANT_PK_PREFIX),
@@ -170,6 +178,8 @@ export function toAdminOrder(o: OrderItem) {
     tenant_id: o.tenant_id,
     synthetic: o.synthetic === true,
     status_history: (o.status_history ?? []).map((h) => ({ from: h.from, to: h.to, at: h.at, by: h.by })),
+    // 分配狀況只給內部看 / Allocation details are internal only.
+    allocations: o.items.map((l) => ({ product_id: l.product_id, qty_kg: l.qty_kg, allocated_kg: l.allocated_kg ?? 0, roast_ids: l.roast_ids ?? [] })),
   };
 }
 

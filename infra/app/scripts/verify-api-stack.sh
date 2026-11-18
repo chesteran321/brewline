@@ -46,17 +46,24 @@ aws sts get-caller-identity --query Arn --output text
 # --- 路由與授權 / Routes and authorization ---
 routes=$(aws apigatewayv2 get-routes --api-id "$api_id" --region "$region" --output json)
 check "Routes" "$(jq -c '[.Items[].RouteKey] | sort' <<<"$routes")" \
-  '["DELETE /replenishments/{id}","GET /admin/orders","GET /admin/products/{id}/stock","GET /admin/tenants/{tenantId}/orders/{orderId}","GET /orders","GET /orders/{id}","GET /products","GET /products/{id}","GET /replenishments","GET /tenant/contact","PATCH /admin/tenants/{tenantId}/orders/{orderId}","POST /orders","POST /replenishments","PUT /tenant/contact"]'
+  '["DELETE /replenishments/{id}","GET /admin/orders","GET /admin/products/{id}/stock","GET /admin/tenants/{tenantId}/orders/{orderId}","GET /admin/trace","GET /orders","GET /orders/{id}","GET /products","GET /products/{id}","GET /replenishments","GET /tenant/contact","PATCH /admin/roasts/{id}","PATCH /admin/tenants/{tenantId}/orders/{orderId}","POST /admin/products/{id}/restock","POST /admin/roasts","POST /admin/roasts/{id}/recall","POST /orders","POST /replenishments","PUT /tenant/contact"]'
 check "Routes without JWT" "$(jq -r '[.Items[] | select(.AuthorizationType != "JWT")] | length' <<<"$routes")" "0"
 check "Routes without a scope" "$(jq -r '[.Items[] | select((.AuthorizationScopes // []) | length == 0)] | length' <<<"$routes")" "0"
 scope_of() { jq -c --arg k "$1" '.Items[] | select(.RouteKey == $k) | .AuthorizationScopes' <<<"$routes"; }
-check "Admin route scope" "$(scope_of 'GET /admin/products/{id}/stock')" '["brewline/admin"]'
+check "Stock route scope (staff or roastery)" "$(scope_of 'GET /admin/products/{id}/stock')" '["brewline/admin","brewline/roastery"]'
 check "POST /orders scope" "$(scope_of 'POST /orders')" '["brewline/orders.write"]'
 check "GET /orders scope" "$(scope_of 'GET /orders')" '["brewline/orders.read"]'
 check "GET /orders/{id} scope" "$(scope_of 'GET /orders/{id}')" '["brewline/orders.read"]'
-check "GET /admin/orders scope" "$(scope_of 'GET /admin/orders')" '["brewline/admin"]'
-check "GET admin order scope"   "$(scope_of 'GET /admin/tenants/{tenantId}/orders/{orderId}')" '["brewline/admin"]'
-check "PATCH admin order scope" "$(scope_of 'PATCH /admin/tenants/{tenantId}/orders/{orderId}')" '["brewline/admin"]'
+check "GET /admin/orders scope" "$(scope_of 'GET /admin/orders')" '["brewline/admin","brewline/roastery"]'
+check "GET admin order scope"   "$(scope_of 'GET /admin/tenants/{tenantId}/orders/{orderId}')" '["brewline/admin","brewline/roastery"]'
+check "PATCH admin order scope" "$(scope_of 'PATCH /admin/tenants/{tenantId}/orders/{orderId}')" '["brewline/admin","brewline/roastery"]'
+# S2a（ADR-031 D6）：烘焙廠作業只要 roastery；召回只有 admin（模擬烘焙廠沒有 admin）
+# Roastery operations need roastery; recall needs admin, which the simulated roastery never has.
+check "POST /admin/roasts scope"         "$(scope_of 'POST /admin/roasts')" '["brewline/roastery"]'
+check "PATCH /admin/roasts/{id} scope"   "$(scope_of 'PATCH /admin/roasts/{id}')" '["brewline/roastery"]'
+check "POST restock scope"               "$(scope_of 'POST /admin/products/{id}/restock')" '["brewline/roastery"]'
+check "POST recall scope (admin only)"   "$(scope_of 'POST /admin/roasts/{id}/recall')" '["brewline/admin"]'
+check "GET /admin/trace scope"           "$(scope_of 'GET /admin/trace')" '["brewline/admin","brewline/roastery"]'
 check "GET /tenant/contact scope" "$(scope_of 'GET /tenant/contact')" '["brewline/profile.read"]'
 check "PUT /tenant/contact scope" "$(scope_of 'PUT /tenant/contact')" '["brewline/profile.write"]'
 check "POST /replenishments scope" "$(scope_of 'POST /replenishments')" '["brewline/orders.write"]'
@@ -84,7 +91,7 @@ check "No CORS configured"   "$(aws apigatewayv2 get-api --api-id "$api_id" --re
 
 # --- Lambda ---
 IFS=',' read -r -a fns <<<"$(out FunctionNames)"
-check "API function count" "${#fns[@]}" "14"
+check "API function count" "${#fns[@]}" "19"
 for fn in "${fns[@]}"; do
   cfg=$(aws lambda get-function-configuration --function-name "$fn" --region "$region" --output json)
   short=${fn#brewline-${env_name}-ordering-}
@@ -100,6 +107,8 @@ done
 # --- 種子與 smoke test / Seed and smoke test ---
 seeded=$(out SeededProducts)
 check "Seeded products ≥ 8" "$([[ "${seeded:-0}" -ge 8 ]] && echo true || echo false)" "true"
+lots=$(out SeededLots)
+check "Seeded lots ≥ 8" "$([[ "${lots:-0}" -ge 8 ]] && echo true || echo false)" "true"
 smoke=$(out SmokeTestSummary)
 if [[ "$want_smoke" == true ]]; then
   smoke_result="${smoke:-missing}"
@@ -186,6 +195,10 @@ check "POST /orders with forged JWT"          "$(http_status POST /orders "Beare
 check "GET /admin/orders without token"       "$(http_status GET /admin/orders)" "401"
 check "PATCH admin order with forged admin JWT" \
   "$(http_status PATCH /admin/tenants/t_01AAAAAAAAAAAAAAAAAAAAAAAA/orders/o_01AAAAAAAAAAAAAAAAAAAAAAAA "Bearer ${forged}")" "401"
+check "POST /admin/roasts without token"       "$(http_status POST /admin/roasts)" "401"
+check "POST recall with forged admin JWT" \
+  "$(http_status POST /admin/roasts/r_01AAAAAAAAAAAAAAAAAAAAAAAA/recall "Bearer ${forged}")" "401"
+check "GET /admin/trace without token"        "$(http_status GET '/admin/trace?lot=L-2026-001')" "401"
 
 # --- 反向：唯讀角色讀不到資料內容（表層 CMK）/ Negative: read-only role cannot read item contents (CMK) ---
 table=$(aws ssm get-parameter --name "/brewline/${env_name}/data/table-name" --region "$region" --query Parameter.Value --output text)

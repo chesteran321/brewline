@@ -12,6 +12,7 @@ import { ReplenishmentRepo } from './replenishment-repo';
 import { ReplenishmentScheduler } from './replenishment-scheduler';
 import { OrderRepo } from './order-repo';
 import { TenantCredentials } from './tenant-credentials';
+import { TraceRepo } from './trace-repo';
 
 /** 冷啟動時建立一次，之後重複使用（連線、憑證快取）/ Created once per cold start and reused. */
 export const logger = new Logger();
@@ -164,4 +165,20 @@ export function replenishmentScheduler(): ReplenishmentScheduler {
 export function setReplenishmentDepsForTesting(r?: ReplenishmentRepo, s?: ReplenishmentScheduler): void {
   replenishments = r;
   scheduler = s;
+}
+
+let trace: TraceRepo | undefined;
+
+/** 烘焙批次、補貨、追溯（S2a）：函數自己的角色 / Roast, restock and trace with the function's own role. */
+export function traceRepo(): TraceRepo {
+  trace ??= new TraceRepo(
+    DynamoDBDocumentClient.from(tracer.captureAWSv3Client(new DynamoDBClient({})), { marshallOptions: { removeUndefinedValues: true } }),
+    requiredEnv('TABLE_NAME'),
+  );
+  return trace;
+}
+
+/** 測試用 / For tests. */
+export function setTraceRepoForTesting(r: TraceRepo | undefined): void {
+  trace = r;
 }

@@ -58,9 +58,10 @@ paths:
   /admin/products/{id}/stock:
     get:
       operationId: getProductStock
-      summary: 庫存明細（內部人員）/ Stock detail (staff only)
+      summary: 庫存明細（staff 或烘焙廠；補貨要用 version）/ Stock detail (staff or roastery; restock needs the version)
       security:
         - cognito: [brewline/admin]
+        - cognito: [brewline/roastery]
       parameters:
         - $ref: '#/components/parameters/ProductId'
       responses:
@@ -256,9 +257,10 @@ paths:
   /admin/orders:
     get:
       operationId: adminListOrders
-      summary: 各租戶指定狀態的訂單（staff）/ Orders of every tenant by status (staff)
+      summary: 各租戶指定狀態的訂單（staff；模擬烘焙廠只看到模擬訂單）/ Orders of every tenant by status
       security:
         - cognito: [brewline/admin]
+        - cognito: [brewline/roastery]
       parameters:
         - name: status
           in: query
@@ -295,9 +297,10 @@ paths:
         schema: { type: string, pattern: '^o_[0-9A-HJKMNP-TV-Z]{26}$' }
     get:
       operationId: adminGetOrder
-      summary: 訂單明細（含變更者）/ Order detail with who changed it (staff)
+      summary: 訂單明細（含變更者與烘焙分配）/ Order detail with who changed it and roast allocations
       security:
         - cognito: [brewline/admin]
+        - cognito: [brewline/roastery]
       responses:
         '200':
           description: OK
@@ -313,8 +316,12 @@ paths:
         允許的轉換 Allowed：CREATED→CONFIRMED→ROASTING_SCHEDULED→ROASTED→SHIPPED→COMPLETED；
         CREATED／CONFIRMED→CANCELLED。→SHIPPED 消耗預留（reserved −qty）；→CANCELLED 釋放（reserved −qty、available +qty）。
         訂單與庫存在同一個交易中更新。Order and stock change in one transaction.
+        →ROASTED 的前提（S2a）：每個品項都已全數分配到烘焙批次（`POST /admin/roasts`），且批次都已烘焙；否則 409
+        `not_fully_allocated`／`roast_not_roasted`。帶 `synthetic` 的呼叫者只能改模擬訂單（否則 403 `synthetic_only`）。
+        ROASTED requires every line fully allocated to roasted batches. Synthetic callers may change synthetic orders only.
       security:
         - cognito: [brewline/admin]
+        - cognito: [brewline/roastery]
       requestBody:
         required: true
         content:
@@ -334,11 +341,168 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: 不允許的轉換（`invalid_transition`，含 `current_status`、`allowed`）或同時被修改（`conflict`）
+          description: 不允許的轉換（`invalid_transition`，含 `current_status`、`allowed`）、同時被修改（`conflict`），或尚未全數分配到已烘焙批次（`not_fully_allocated`／`roast_not_roasted`，含 `refs`）
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         '503':
           description: 暫時忙碌，請重試 / Busy, retry
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  /admin/roasts:
+    post:
+      operationId: createRoastBatch
+      summary: 建立烘焙批次並分配給訂單（烘焙廠）/ Create a roast batch and allocate it to orders (roastery)
+      description: |
+        一個交易：批次＋每張訂單品項的分配（條件寫入）＋追溯的邊。訂單必須是 ROASTING_SCHEDULED；每批 ≤ 15 kg；
+        分配總和 ≤ 批次公斤數；每個品項的分配不超過訂購量。批次 ID 由 Idempotency-Key 決定：重送相同內容 → 200，內容不同 → 422。
+        模擬批次只能分配模擬訂單，反之亦然（403 `synthetic_only`）。
+        One transaction: batch + conditional order-line allocations + trace edges. The batch id derives from the Idempotency-Key.
+      security:
+        - cognito: [brewline/roastery]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[A-Za-z0-9_-]{16,64}$' }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateRoastRequest' } } }
+      responses:
+        '201': { description: 已建立 / Created, content: { application/json: { schema: { $ref: '#/components/schemas/RoastBatch' } } } }
+        '200': { description: 重送 / Replay, content: { application/json: { schema: { $ref: '#/components/schemas/RoastBatch' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`order_not_scheduled`、`product_mismatch`、`over_allocated`（含 `remaining_kg`）、`lot_not_found`、`conflict`'
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422':
+          description: Idempotency-Key 已用於不同內容 / Key reused with a different body
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  /admin/roasts/{id}:
+    patch:
+      operationId: markRoastBatchRoasted
+      summary: 標記已烘焙並產生 QR token（烘焙廠）/ Mark roasted and mint the QR token (roastery)
+      security:
+        - cognito: [brewline/roastery]
+      parameters:
+        - $ref: '#/components/parameters/RoastId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false, required: [status], properties: { status: { type: string, enum: [ROASTED] } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RoastBatch' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 已經烘焙過（token 只產生一次）/ Already roasted
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  /admin/roasts/{id}/recall:
+    post:
+      operationId: recallRoastBatch
+      summary: 召回（只有 staff）；公開溯源頁會顯示提醒 / Recall (staff only); the public trace page shows the notice
+      security:
+        - cognito: [brewline/admin]
+      parameters:
+        - $ref: '#/components/parameters/RoastId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [notice]
+              properties:
+                notice: { type: string, minLength: 5, maxLength: 200, pattern: '^[^<>]*$', description: 公開顯示，不得含個資 / Shown publicly; no personal data }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RoastBatch' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 已召回 / Already recalled
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  /admin/products/{id}/restock:
+    post:
+      operationId: restockProduct
+      summary: 補貨（烘焙廠；樂觀鎖）/ Restock (roastery; optimistic lock)
+      description: '`expected_version` 必須等於目前庫存版本，重送或過期 → 409 `version_conflict`（含 `current_version`），不會重複補貨。'
+      security:
+        - cognito: [brewline/roastery]
+      parameters:
+        - $ref: '#/components/parameters/ProductId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [kg, expected_version]
+              properties:
+                kg: { type: integer, minimum: 1, maximum: 500 }
+                expected_version: { type: integer, minimum: 1 }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AdminStock' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`version_conflict` 或 `over_cap`（可用庫存上限 2000 kg）'
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  /admin/trace:
+    get:
+      operationId: trace
+      summary: 雙向追溯（TRC-F-006）/ Bidirectional trace
+      description: |
+        擇一：`?lot=L-YYYY-NNN`（批次 → 烘焙批次）、`?roast=r_…`（烘焙批次 → 生豆批次＋訂單）、
+        `?tenant=t_…&order=o_…`（訂單 → 每個品項的烘焙批次 → 生豆批次）。模擬烘焙廠只看得到模擬資料。
+        Exactly one form. A synthetic caller sees synthetic data only.
+      security:
+        - cognito: [brewline/admin]
+        - cognito: [brewline/roastery]
+      parameters:
+        - { name: lot, in: query, schema: { type: string, pattern: '^L-\d{4}-\d{3}$' } }
+        - { name: roast, in: query, schema: { type: string, pattern: '^r_[0-9A-HJKMNP-TV-Z]{26}$' } }
+        - { name: tenant, in: query, schema: { type: string, pattern: '^t_[0-9A-HJKMNP-TV-Z]{26}$' } }
+        - { name: order, in: query, schema: { type: string, pattern: '^o_[0-9A-HJKMNP-TV-Z]{26}$' } }
+      responses:
+        '200':
+          description: 依查詢形式回傳 lot＋roasts、roast＋lot＋orders、或 order＋lines＋lots / Shape depends on the query form
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lot: { $ref: '#/components/schemas/Lot' }
+                  roasts: { type: array, items: { $ref: '#/components/schemas/RoastBatch' } }
+                  roast: { $ref: '#/components/schemas/RoastBatch' }
+                  orders:
+                    type: array
+                    items:
+                      type: object
+                      properties: { tenant_id: { type: string }, order_id: { type: string }, product_id: { type: string }, kg: { type: integer } }
+                  order: { $ref: '#/components/schemas/AdminOrder' }
+                  lines:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        product_id: { type: string }
+                        qty_kg: { type: integer }
+                        allocated_kg: { type: integer }
+                        roasts: { type: array, items: { $ref: '#/components/schemas/RoastBatch' } }
+                  lots: { type: array, items: { $ref: '#/components/schemas/Lot' } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 components:
   securitySchemes:
     cognito:
@@ -354,7 +518,13 @@ components:
             brewline/orders.write: 為自己租戶下單（cafe、simulator）
             brewline/profile.read: 讀自己租戶的聯絡人（只有 cafe）
             brewline/profile.write: 更新自己租戶的聯絡人（只有 cafe）
+            brewline/roastery: 烘焙廠作業：烘焙批次、推進訂單、補貨（staff、simulator-roastery；S2a）
   parameters:
+    RoastId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^r_[0-9A-HJKMNP-TV-Z]{26}$' }
     ProductId:
       name: id
       in: path
@@ -463,6 +633,64 @@ components:
             synthetic:
               type: boolean
               description: 模擬器建立的訂單（ADR-030 D6；依已驗證 token 的群組判定，咖啡廳的回應沒有此欄位）/ Created by the simulator
+            allocations:
+              type: array
+              description: 每個品項分配到的烘焙批次（S2a；咖啡廳的回應沒有）/ Roast allocations per line (internal)
+              items:
+                type: object
+                properties:
+                  product_id: { type: string }
+                  qty_kg: { type: integer }
+                  allocated_kg: { type: integer }
+                  roast_ids: { type: array, items: { type: string } }
+    CreateRoastRequest:
+      type: object
+      additionalProperties: false
+      required: [product_id, roast_date, kg, allocations]
+      properties:
+        product_id: { type: string, pattern: '^p-\d{4}$' }
+        roast_date: { type: string, format: date }
+        kg: { type: integer, minimum: 1, maximum: 15 }
+        allocations:
+          type: array
+          minItems: 1
+          maxItems: 15
+          items:
+            type: object
+            additionalProperties: false
+            required: [tenant_id, order_id, kg]
+            properties:
+              tenant_id: { type: string }
+              order_id: { type: string }
+              kg: { type: integer, minimum: 1, maximum: 15 }
+    RoastBatch:
+      type: object
+      required: [roast_id, product_id, lot_id, roast_date, roast_level, kg, status, synthetic]
+      properties:
+        roast_id: { type: string }
+        product_id: { type: string }
+        lot_id: { type: string }
+        roast_date: { type: string, format: date }
+        roast_level: { type: string }
+        kg: { type: integer }
+        status: { type: string, enum: [SCHEDULED, ROASTED] }
+        created_at: { type: string, format: date-time }
+        roasted_at: { type: string, format: date-time }
+        qr_token: { type: string, description: 128-bit，22 字元 base64url；ROASTED 時產生 / Minted when roasted }
+        recall: { type: object, properties: { at: { type: string }, notice: { type: string } } }
+        synthetic: { type: boolean }
+    Lot:
+      type: object
+      properties:
+        lot_id: { type: string }
+        producer_display_name: { type: string, description: 虛構 / Fictional }
+        origin_country: { type: string }
+        region: { type: string }
+        altitude_m: { type: integer }
+        variety: { type: string }
+        process: { type: string }
+        cup_score: { type: number }
+        harvest: { type: string }
     TenantContactInput:
       type: object
       additionalProperties: false

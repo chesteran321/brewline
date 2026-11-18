@@ -31,6 +31,16 @@ export function hasScope(event: APIGatewayProxyEventV2WithJWTAuthorizer, scope: 
   return scopes.includes(scope);
 }
 
+/** 任一 scope 即可（路由的 authorizationScopes 也是「任一」）/ Any of the scopes, matching the route's any-of semantics. */
+export function hasAnyScope(event: APIGatewayProxyEventV2WithJWTAuthorizer, scopes: readonly string[]): boolean {
+  return scopes.some((s) => hasScope(event, s));
+}
+
+/** token 帶 synthetic claim（模擬器帳號，由簽章保護）/ The token carries the synthetic claim (simulator accounts). */
+export function isSyntheticCaller(event: APIGatewayProxyEventV2WithJWTAuthorizer): boolean {
+  return claim(event, 'synthetic') === 'true';
+}
+
 /** 已驗證 JWT 中的 claim（字串）/ A string claim from the verified JWT. */
 export function claim(event: APIGatewayProxyEventV2WithJWTAuthorizer, name: string): string | undefined {
   const v = event.requestContext.authorizer?.jwt?.claims?.[name];

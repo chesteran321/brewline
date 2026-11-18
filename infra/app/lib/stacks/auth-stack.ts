@@ -17,6 +17,7 @@ export interface AuthStackProps extends StackProps {
 const GROUP_SETTINGS: Record<Group, { precedence: number; description: string }> = {
   staff: { precedence: 10, description: 'BrewLine internal staff: all tenants, /admin/* endpoints' },
   simulator: { precedence: 20, description: 'Simulator accounts acting as fictional cafés (ADR-011)' },
+  'simulator-roastery': { precedence: 25, description: 'Simulated roastery operator: synthetic roast batches and orders only (ADR-031)' },
   cafe: { precedence: 30, description: 'Café (tenant) users; must carry custom:tenant_id' },
 };
 

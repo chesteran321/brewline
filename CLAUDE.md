@@ -46,6 +46,7 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 授權 | pre token 觸發器 V2 把群組轉成 access token scope（`services/identity/src/scopes.ts`）；API 路由用 scope 授權 |
 | 租戶 | `custom:tenant_id`（`t_<ULID>`，任何 app client 都不能寫；**建立後不可刪除或改名**） |
 | 取得 ID | SSM `/brewline/<env>/auth/{user-pool-id,user-pool-arn,web-client-id,issuer,simulator-client-id}` |
+| 烘焙廠（ADR-031 D6） | scope `brewline/roastery`（staff 也有）；群組 `simulator-roastery`（無租戶、無 admin、`synthetic`）；操作員群組最多一個、不可與租戶群組並存 |
 | 模擬器 client（ADR-030） | `simulator`（`ADMIN_USER_PASSWORD_AUTH`，Dev／Prod）；經由它只有 `simulator` 群組拿得到 scope；`simulator` 群組的 token 有 `synthetic: "true"` claim。觸發器從 SSM 讀 client ID（**不要**改成環境變數：會循環依賴） |
 | Token | Access／ID **15 分鐘**、refresh 7 天（RSK-015） |
 | 租戶隔離 | 角色 `brewline-<env>-tenant-access`：訂單函數（角色名稱必須是 `brewline-<env>-orders-*`）以 session tag `tenant_id` 扮演；`LeadingKeys = TENANT#${aws:PrincipalTag/tenant_id}` **完全比對**；商品只能改庫存欄位（ADR-024） |
@@ -65,6 +66,7 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 逾時取消（ADR-028） | `OrderCreated` → Standard `brewline-<env>-order-lifecycle`：Wait（Dev 10 分／Prod 48 小時）→ 仍是 CREATED 就取消並釋放庫存（`system:timeout`）；冪等靠條件寫入，不靠執行名稱 |
 | 聯絡人（A4c） | `GET`／`PUT /tenant/contact`（`profile.read`／`profile.write`，**只有 cafe**）；`TENANT#<t>`／`CONTACT#primary`；`name`、`email`、`phone`、`address` 逐欄 KMS 加密，context `{tenant_id, field}`；租戶角色只能用自己的 `tenant_id` context（ADR-029 D2）；**日誌不得記錄聯絡人內容** |
 | 定期補貨（A4e） | `POST`／`GET /replenishments`、`DELETE /replenishments/{id}`（沿用 `orders.write`／`orders.read`）；`TENANT#<t>`／`REPL#<ULID>` 是正本，Scheduler 群組 `brewline-<env>-replenish`、排程 `<tenant_id>-<replenishment_id>`、台北 09:00；每租戶 ≤ 5；刪除＝軟刪除（租戶角色沒有 DeleteItem）；執行函數 `brewline-<env>-ordering-replenish`（角色 `orders-replenish`）重用下單程式，冪等鍵＝補貨 ID＋台北日期；庫存不足 → `ReplenishmentFailed` → 寄信、不重試 |
+| 溯源（ADR-031，S2a） | `LOT#<id>/META`（種子 `seed/lots.json`，產地欄位必須與商品一致）、`ROAST#<r_…>/META`、邊 `LOT#/ROAST#<日期>#<id>`、`ROAST#/ORDER#<t>#<o>`；**不要加 GSI2**；`POST /admin/roasts`（Idempotency-Key → 批次 ID）、`PATCH /admin/roasts/{id}`（ROASTED → QR token）、`POST …/recall`（**只有 admin**）、`POST /admin/products/{id}/restock`（`expected_version`）、`GET /admin/trace?lot=|roast=|tenant=&order=`；`→ROASTED` 需全數分配到已烘焙批次；synthetic 呼叫者只碰模擬資料 |
 | 測試商品 | Dev 專用 `p-9001`（併發）、`p-9002`（smoke），不設 `gsi1pk` → 不在目錄 |
 | 訂單測試 | Dev 手動：`infra/app/scripts/run-order-tests.sh`（冪等風暴、搶庫存、IAM 探測；函數 `brewline-dev-ordering-order-tests`）；其他模式 `timeout-setup`／`timeout-check`、`notify-setup`、`replenish-check`、`cleanup`（Email 只放 invoke payload） |
 | 模擬資料（ADR-030 D6） | 訂單的 `synthetic: true` 只依 JWT claim 寫入（body 帶此欄位 → 400）；staff DTO 與事件 detail 有，咖啡廳 DTO 沒有；API 位址在 SSM `/brewline/<env>/api/endpoint` |

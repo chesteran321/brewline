@@ -130,11 +130,11 @@ describe.each(['dev', 'prod'] as const)('AuthStack (%s)', (envName) => {
     expect(JSON.stringify(ssmSt[0].Resource)).not.toContain('*');
   });
 
-  test('groups cafe, staff, simulator', () => {
+  test('groups cafe, staff, simulator, simulator-roastery', () => {
     const groups = Object.values(template.findResources('AWS::Cognito::UserPoolGroup')).map(
       (g: any) => g.Properties.GroupName,
     );
-    expect(groups.sort()).toEqual(['cafe', 'simulator', 'staff']);
+    expect(groups.sort()).toEqual(['cafe', 'simulator', 'simulator-roastery', 'staff']);
   });
 
   test('pre token generation trigger uses event version V2_0 and only the pool may invoke it', () => {

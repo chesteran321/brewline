@@ -1,8 +1,9 @@
 import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { STOCK_SK, productPk } from './model';
 import { canTransition, stockEffect } from './order-lifecycle';
-import { OrderItem, OrderItemSchema, OrderStatus, orderSk, tenantPk } from './order-model';
+import { OrderItem, OrderItemSchema, OrderStatus, fullyAllocated, orderSk, tenantPk } from './order-model';
+import { RoastItemSchema, roastPk } from './trace-model';
 
 /**
  * staff 的跨租戶訂單操作（A3c，ADR-027）。用函數自己的角色（不扮演租戶角色）：
@@ -16,7 +17,14 @@ export type TransitionResult =
   | { readonly kind: 'invalid_transition'; readonly current: OrderStatus }
   /** 讀到之後狀態被別人改了（樂觀鎖）/ Someone changed the status after we read it. */
   | { readonly kind: 'conflict' }
-  | { readonly kind: 'busy' };
+  | { readonly kind: 'busy' }
+  /** synthetic 呼叫者只能改模擬訂單（ADR-031 D6）/ A synthetic caller may change synthetic orders only. */
+  | { readonly kind: 'forbidden' }
+  /**
+   * ROASTED 的前提：每個品項都已全數分配到烘焙批次，且那些批次都已烘焙（ADR-031 D5）。
+   * ROASTED requires every line fully allocated to roast batches that are themselves roasted.
+   */
+  | { readonly kind: 'not_ready'; readonly reason: 'not_fully_allocated' | 'roast_not_roasted'; readonly refs: string[] };
 
 export interface TransitionInput {
   readonly tenantId: string;
@@ -27,6 +35,8 @@ export interface TransitionInput {
   readonly now: Date;
   /** 只有在目前狀態是這些之一時才轉換（逾時取消用：只取消仍是 CREATED 的）/ Guard for automated callers. */
   readonly onlyFrom?: readonly OrderStatus[];
+  /** 呼叫者帶 synthetic claim → 目標訂單必須是模擬訂單 / The caller is synthetic, so the order must be too. */
+  readonly requireSynthetic?: boolean;
 }
 
 export interface AdminPage {
@@ -73,14 +83,45 @@ export class AdminOrderRepo {
   }
 
   /**
+   * 批次狀態只會往前（SCHEDULED → ROASTED，不會倒退），所以「先檢查、再轉換」是安全的，不需要放進同一個交易。
+   * Roast status only moves forward, so check-then-transition is safe without putting the checks in the transaction.
+   */
+  private async roastReadiness(order: OrderItem): Promise<TransitionResult | undefined> {
+    if (!fullyAllocated(order)) {
+      const refs = order.items.filter((l) => (l.allocated_kg ?? 0) !== l.qty_kg).map((l) => l.product_id);
+      return { kind: 'not_ready', reason: 'not_fully_allocated', refs };
+    }
+    const ids = [...new Set(order.items.flatMap((l) => l.roast_ids ?? []))];
+    const roasted = new Set<string>();
+    for (let i = 0; i < ids.length; i += 100) {
+      const out = await this.doc.send(
+        new BatchGetCommand({
+          RequestItems: { [this.tableName]: { Keys: ids.slice(i, i + 100).map((id) => ({ pk: roastPk(id), sk: 'META' })), ConsistentRead: true } },
+        }),
+      );
+      for (const raw of out.Responses?.[this.tableName] ?? []) {
+        const r = RoastItemSchema.safeParse(raw);
+        if (r.success && r.data.status === 'ROASTED') roasted.add(r.data.roast_id);
+      }
+    }
+    const pending = ids.filter((id) => !roasted.has(id));
+    return pending.length > 0 ? { kind: 'not_ready', reason: 'roast_not_roasted', refs: pending } : undefined;
+  }
+
+  /**
    * 一個交易：訂單狀態（條件：狀態仍是讀到的那個）＋ 每個商品的庫存調整。
    * One transaction: the order status (conditioned on the status we read) plus per-line stock changes.
    */
   async transition(input: TransitionInput): Promise<TransitionResult> {
     const order = await this.get(input.tenantId, input.orderId, true);
     if (!order) return { kind: 'not_found' };
+    if (input.requireSynthetic && order.synthetic !== true) return { kind: 'forbidden' };
     if (input.onlyFrom && !input.onlyFrom.includes(order.status)) return { kind: 'invalid_transition', current: order.status };
     if (!canTransition(order.status, input.to)) return { kind: 'invalid_transition', current: order.status };
+    if (input.to === 'ROASTED') {
+      const notReady = await this.roastReadiness(order);
+      if (notReady) return notReady;
+    }
 
     const at = input.now.toISOString();
     const effect = stockEffect(input.to);
