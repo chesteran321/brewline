@@ -803,7 +803,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 決定性的產生器讓驗收變簡單：不必比對每一筆訂單，只比對一個雜湊；本機（單元測試）與 Lambda 的結果相同，就代表計畫只由（種子、日期）決定。
 - Dependabot（#48、#55）：main 前進後 PR 的 `checks` 會過期，要 rebase 或 update branch 重跑。#48 把 aws-cdk-lib 升到 2.277.0，新版認得 `nodejs26.x`，cdk-nag `AwsSolutions-L1` 因此對 24 個函數報錯 → 先合併 #61（acknowledge，ADR-023 修訂），再更新 #48。依賴更新**一次只合併、部署一個**，出問題時容易判斷是哪個變更造成的。
 
-### 10.17 溯源 S2a：生豆批次、烘焙批次、烘焙廠角色 / Traceability S2a（P1，2026-11-18，ADR-031）
+### 10.17 溯源 S2a：生豆批次、烘焙批次、烘焙廠角色 / Traceability S2a（P1，2026-11-18，ADR-031，PR #65、#66）
 
 | 項目 | Dev | Prod |
 |---|---|---|
@@ -815,6 +815,11 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 函數（5 個，角色由 CloudFormation 命名，不扮演租戶角色） | `create-roast`：Get（PRODUCT／LOT／ROAST／TENANT）、Put 只在 `ROAST#`／`LOT#`、訂單 UpdateItem 只能動 `items`（`dynamodb:Attributes`）；`update-roast`／`recall-roast`：只有 `ROAST#`；`restock`：庫存欄位；`trace`：唯讀；全部明確 Deny Scan、沒有 Delete | 同左 |
 
 - 費用：每批次數個 WRU，約 0；沒有新的固定費用。
+已驗證（2026-11-18，commit `feda4c5`，Deploy run `44256253715`）：
+- **Dev smoke test 129/129**（新增 37 項）：模擬烘焙廠經由 simulator client 拿到 roastery、沒有 admin／租戶；改真實訂單 → 403 `synthetic_only`、讀真實訂單 → 404、列表只有模擬訂單、可確認模擬訂單；未分配就 ROASTED → 409 `not_fully_allocated`；建立批次 201（批次在商品的生豆批次上）、同 key 重送 200、內容不同 422、超量 409（`remaining_kg`）、> 15 kg 400、沒有 key 400；批次未烘焙時訂單 ROASTED → 409 `roast_not_roasted`；批次 ROASTED 產生 22 字元 token、再烘焙 409；訂單 ROASTED → SHIPPED（95/2）→ COMPLETED；雙向追溯（訂單 → 批次 → 生豆批次含生產者、批次 → 訂單、生豆批次 → 批次）；召回 admin only、拒絕 markup、只能一次；補貨 +5（102）、重送 409（不重複）、模擬烘焙廠 +1（103）；咖啡廳的訂單 DTO 沒有分配資訊。
+- **`dynamodb:Attributes` 在交易內更新巢狀欄位**（`items[i].allocated_kg`）比對頂層名稱 `items`：分配與後續 ROASTED 都成功，函數只能改訂單的 `items`。
+- CI：Dev ✅ 442、Prod ✅ 439、0 ❌；19 條路由與 scope（召回只有 admin）、19 個函數、HTTP 反向（無 token／偽造 admin JWT → 401）、`SeededLots` Dev 10／Prod 8；租戶角色讀 `ROAST#`、`LOT#` → `implicitDeny`。
+
 - 尚未包含（S2b–S2d）：公開溯源頁（S3 投影＋CloudFront Free 方案）、事件（`RoastBatchRoasted`／`Recalled`）、模擬烘焙廠的排程。
 
 教訓 / Lessons：
@@ -944,10 +949,13 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-17 | 模擬器決策 D1–D9 定案（docs/07 對照，見 ADR-030）；S0（RSK-017）bus 資源政策部署 Dev、Prod 並驗證，含真實憑證反向測試（§10.10，PR #52） |
 | ✅ 2026-11-17 | 模擬器 S1a（simulator client、`synthetic`）、S1b（stack、帳號 40、開關 `paused`、排程、探測）部署 Dev、Prod 並驗證，含 Dev 開關測試與 Prod 探測（§10.16，PR #54／#56／#57／#58） |
 | ✅ 2026-11-17 | 模擬器 S1c 產生器（§10.16，PR #60）部署 Dev、Prod；Dev 驗證 dry-run 雜湊與本機相同、手動一小時（建立／重播／事件 `synthetic`）、逾時取消帶 `synthetic`、排程 18 時下單、19 時 0 筆；Dev 留在 `running` |
-| P1 | 溯源 S2a（§10.17）：部署 Dev、Prod 並驗證（smoke 擴充、IAM 政策模擬）→ S2b（edge stack）→ S2c（公開頁）→ S2d（模擬烘焙廠） |
-| P1 | 模擬器 Dev 觀察期（至少到 2026-11-18：10、11、14 時共 4 筆、`run-errors` 告警沒有觸發、DLQ 0）→ S1d：Prod `state` 改 `running` 並驗證 |
+| ✅ 2026-11-18 | 溯源 S2a（§10.17，PR #65、#66）部署 Dev、Prod 並驗證；Dev smoke 129/129 |
+| ✅ 2026-11-18 | 模擬器 Dev 觀察期：11/17 17–19 時與 11/18 10、11、14 時全部照計畫（共 5 筆 created、0 violation、DLQ 0、無告警） |
+| ✅ 2026-11-18 | minimatch 警示（PR #63）部署 Dev、Prod：Lambda 程式不變（只有每次部署的 custom resource 更新） |
+| P1 | 模擬器 S1d：Prod `state` 改 `running` 並驗證 |
+| P1 | 溯源 S2b（us-east-1 edge stack）→ S2c（公開頁）→ S2d（模擬烘焙廠） |
 | ✅ 2026-11-18 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`），Developer 可在 Dev 切換模擬器開關（§3） |
-| 2026-11-18 | Dependabot 安全警示 2 筆（`minimatch` < 11.0.1，Moderate，只在測試／synth 工具鏈）：PR #63 以 npm `overrides` 升到 11.0.9；`aws-cdk-lib` 內部打包（bundleDependencies）的一份要等新版 |
+| ✅ 2026-11-18 | Dependabot 安全警示 2 筆（`minimatch` < 11.0.1，Moderate，只在測試／synth 工具鏈）：PR #63 以 npm `overrides` 升到 11.0.9；`aws-cdk-lib` 內部打包（bundleDependencies）的一份要等新版 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |
 | nodejs26.x GA 後（預計 2026-11 底） | 評估 Lambda 升級到 Node 26（本機、CI、`Runtime`），移除 `LATEST_RUNTIME_ACK`（ADR-023 修訂） |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
