@@ -817,6 +817,9 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 費用：每批次數個 WRU，約 0；沒有新的固定費用。
 - 尚未包含（S2b–S2d）：公開溯源頁（S3 投影＋CloudFront Free 方案）、事件（`RoastBatchRoasted`／`Recalled`）、模擬烘焙廠的排程。
 
+教訓 / Lessons：
+- （2026-11-18）**第一次部署被 Dev smoke test 擋下並 rollback（Prod 未部署）**：種子寫入的 `LOT#…/META` 帶 `updated_at`，但讀取用的 `LotItemSchema` 由 strict 的 `SeedLotSchema.extend()` 而來 → 每個批次都 parse 失敗、被當成不存在 → 所有 `POST /admin/roasts` 回 409 `lot_not_found`，後續 ROASTED／SHIPPED 檢查連鎖失敗。單元測試的假資料沒有 `updated_at`，所以沒抓到。修正：讀取 schema 不用 strict（種子檔維持 strict 擋打錯的欄位），並加回歸測試「`getLot` 讀得到 `seedLots()` 實際寫入的項目」（還原舊 schema 時此測試失敗）。原則：**寫入端與讀取端的測試要用同一份資料**，不要各自手寫假資料。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
