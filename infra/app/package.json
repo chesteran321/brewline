@@ -29,5 +29,8 @@
   "description": "BrewLine CDK application stacks",
   "engines": {
     "node": ">=24 <25"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
   }
 }
