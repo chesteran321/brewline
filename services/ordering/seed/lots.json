@@ -1,0 +1,90 @@
+[
+  {
+    "lot_id": "L-2026-001",
+    "producer_display_name": "Konga Terrace Smallholders (fictional)",
+    "origin_country": "ET",
+    "region": "Yirgacheffe",
+    "altitude_m": 2000,
+    "variety": "Ethiopian landrace",
+    "process": "washed",
+    "cup_score": 87.5,
+    "harvest": "2025/26"
+  },
+  {
+    "lot_id": "L-2026-002",
+    "producer_display_name": "Southern Ridge Growers Group (fictional)",
+    "origin_country": "ET",
+    "region": "Guji",
+    "altitude_m": 2100,
+    "variety": "Ethiopian landrace",
+    "process": "natural",
+    "cup_score": 88.0,
+    "harvest": "2025/26"
+  },
+  {
+    "lot_id": "L-2026-003",
+    "producer_display_name": "Mountain Shadow Farmers Society (fictional)",
+    "origin_country": "KE",
+    "region": "Nyeri",
+    "altitude_m": 1800,
+    "variety": "SL28",
+    "process": "washed",
+    "cup_score": 87.0,
+    "harvest": "2025/26"
+  },
+  {
+    "lot_id": "L-2026-004",
+    "producer_display_name": "Riverbend Family Farms (fictional)",
+    "origin_country": "CO",
+    "region": "Huila",
+    "altitude_m": 1700,
+    "variety": "Caturra",
+    "process": "honey",
+    "cup_score": 85.5,
+    "harvest": "2025/26"
+  },
+  {
+    "lot_id": "L-2026-005",
+    "producer_display_name": "Three Volcanoes Estate (fictional)",
+    "origin_country": "GT",
+    "region": "Antigua",
+    "altitude_m": 1600,
+    "variety": "Bourbon",
+    "process": "washed",
+    "cup_score": 84.5,
+    "harvest": "2025/26"
+  },
+  {
+    "lot_id": "L-2026-006",
+    "producer_display_name": "Cloud Line Estate (fictional)",
+    "origin_country": "PA",
+    "region": "Boquete",
+    "altitude_m": 1750,
+    "variety": "Geisha",
+    "process": "washed",
+    "cup_score": 90.0,
+    "harvest": "2025/26"
+  },
+  {
+    "lot_id": "L-2026-007",
+    "producer_display_name": "Highland Lake Cooperative (fictional)",
+    "origin_country": "ID",
+    "region": "Aceh",
+    "altitude_m": 1500,
+    "variety": "Typica",
+    "process": "wet-hulled",
+    "cup_score": 84.0,
+    "harvest": "2025/26"
+  },
+  {
+    "lot_id": "L-2026-008",
+    "producer_display_name": "Misty Slope Tea & Coffee Garden (fictional)",
+    "origin_country": "TW",
+    "region": "Alishan",
+    "altitude_m": 1200,
+    "variety": "Typica",
+    "process": "anaerobic",
+    "cup_score": 86.0,
+    "harvest": "2025/26"
+  }
+]

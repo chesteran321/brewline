@@ -77,6 +77,9 @@ sim "Reserve stock but read ALL_NEW"     implicitDeny dynamodb:UpdateItem    "$A
 sim "Create product (Put)"               implicitDeny dynamodb:PutItem       "$A" "PRODUCT#p-9999"
 sim "Delete own order"                   implicitDeny dynamodb:DeleteItem    "$A" "TENANT#$A"
 sim "Scan"                               explicitDeny dynamodb:Scan          "$A" ""
+# S2a（ADR-031 D5）：租戶讀不到溯源的邊（ROAST# → 訂單）/ Tenants cannot read trace edges (roast → orders).
+sim "Read roast batch edges (ROAST#)"    implicitDeny dynamodb:Query         "$A" "ROAST#r_01AAAAAAAAAAAAAAAAAAAAAAAA"
+sim "Read green lot (LOT#)"              implicitDeny dynamodb:GetItem       "$A" "LOT#L-2026-001"
 
 # --- KMS 欄位加密（A4c，ADR-029 D2）/ Contact field encryption ---
 # ksim <label> <expected> <action> <principal tag> <context tenant_id or ""> <context field or ""> [extra context key]

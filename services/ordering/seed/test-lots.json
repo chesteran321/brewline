@@ -1,0 +1,24 @@
+[
+  {
+    "lot_id": "L-9999-001",
+    "producer_display_name": "Test Producer (fictional)",
+    "origin_country": "BR",
+    "region": "Test Region",
+    "altitude_m": 1000,
+    "variety": "Test variety",
+    "process": "natural",
+    "cup_score": 80,
+    "harvest": "2025/26"
+  },
+  {
+    "lot_id": "L-9999-002",
+    "producer_display_name": "Test Producer (fictional)",
+    "origin_country": "BR",
+    "region": "Test Region",
+    "altitude_m": 1000,
+    "variety": "Test variety",
+    "process": "washed",
+    "cup_score": 80,
+    "harvest": "2025/26"
+  }
+]

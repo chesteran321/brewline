@@ -1,7 +1,7 @@
 import { Logger } from '@aws-lambda-powertools/logger';
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import type { PreTokenGenerationV2TriggerEvent } from 'aws-lambda';
-import { GROUP_SCOPES, GROUPS, Group, Scope, TENANT_GROUPS, TENANT_ID_PATTERN } from './scopes';
+import { GROUP_SCOPES, GROUPS, Group, OPERATOR_GROUPS, SIMULATOR_GROUPS, Scope, TENANT_GROUPS, TENANT_ID_PATTERN } from './scopes';
 
 /**
  * Cognito pre token generation 觸發器（事件版本 V2_0，需 Essentials 方案；ADR-022）。
@@ -28,7 +28,7 @@ const logger = new Logger({ serviceName: 'identity-pre-token' });
 export interface TokenDecision {
   readonly scopes: Scope[];
   readonly tenantId?: string;
-  /** 模擬器產生的資料（只有 simulator 群組）/ Synthetic data (simulator group only). */
+  /** 模擬器產生的資料（simulator、simulator-roastery 群組）/ Synthetic data (simulator groups only). */
   readonly synthetic?: true;
   /** 不授予 scope 的原因（記錄用）/ Why no scopes were granted (for logs). */
   readonly denyReason?:
@@ -54,15 +54,18 @@ export function decide(groupNames: readonly string[], rawTenantId: string | unde
   }
   // simulator client 只服務 simulator 群組：外洩的 cafe／staff 密碼無法透過這個 client（IAM 呼叫）取得 scope。
   // The simulator client serves only the simulator group, so leaked cafe/staff passwords get no scopes through it.
-  if (opts.viaSimulatorClient && groups.some((g) => g !== 'simulator')) {
+  if (opts.viaSimulatorClient && groups.some((g) => !SIMULATOR_GROUPS.includes(g))) {
     return { scopes: [], denyReason: 'client-not-allowed' };
   }
 
-  const isStaff = groups.includes('staff');
-  const isTenantMember = groups.some((g) => TENANT_GROUPS.includes(g));
-  // 內部人員與租戶身分不可同時存在：避免一個帳號同時拿到 admin 與租戶範圍。
-  // Staff and tenant membership are mutually exclusive.
-  if (isStaff && isTenantMember) {
+  const operators = groups.filter((g) => OPERATOR_GROUPS.includes(g));
+  const tenantGroups = groups.filter((g) => TENANT_GROUPS.includes(g));
+  const isTenantMember = tenantGroups.length > 0;
+  // 操作員（staff、模擬烘焙廠）與租戶身分不可同時存在，操作員也最多一種；一個帳號不會同時拿到 admin 與租戶範圍，
+  // 模擬帳號也不會同時是 staff（RSK-018 的不變條件）。
+  // Operators and tenant membership are mutually exclusive, and at most one operator group: no account gets both
+  // admin and tenant scope, and no simulator account is also staff (RSK-018 invariant).
+  if ((operators.length > 0 && isTenantMember) || operators.length > 1 || tenantGroups.length > 1) {
     return { scopes: [], denyReason: 'conflicting-groups' };
   }
 
@@ -76,10 +79,11 @@ export function decide(groupNames: readonly string[], rawTenantId: string | unde
   }
 
   const scopes = [...new Set(groups.flatMap((g) => GROUP_SCOPES[g]))].sort();
-  // staff 不屬於任何租戶：就算屬性被誤設，也不放進 token。
-  // Staff never carry a tenant claim, even if the attribute was set by mistake.
-  if (!isTenantMember) return { scopes };
-  return groups.includes('simulator') ? { scopes, tenantId: rawTenantId, synthetic: true } : { scopes, tenantId: rawTenantId };
+  const synthetic = groups.some((g) => SIMULATOR_GROUPS.includes(g)) ? ({ synthetic: true } as const) : {};
+  // 操作員不屬於任何租戶：就算屬性被誤設，也不放進 token。
+  // Operators never carry a tenant claim, even if the attribute was set by mistake.
+  if (!isTenantMember) return { scopes, ...synthetic };
+  return { scopes, tenantId: rawTenantId, ...synthetic };
 }
 
 const ssm = new SSMClient({});
@@ -137,10 +141,10 @@ export const handler = async (event: PreTokenGenerationV2TriggerEvent): Promise<
     claimsAndScopeOverrideDetails: {
       accessTokenGeneration: {
         scopesToAdd: decision.scopes,
-        ...(decision.tenantId
+        ...(decision.tenantId || decision.synthetic
           ? {
               claimsToAddOrOverride: {
-                tenant_id: decision.tenantId,
+                ...(decision.tenantId ? { tenant_id: decision.tenantId } : {}),
                 ...(decision.synthetic ? { synthetic: 'true' } : {}),
               },
             }

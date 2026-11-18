@@ -56,6 +56,8 @@ interface Config {
   readonly tableName: string;
   /** 定期補貨的 Scheduler 群組（A4e）/ Replenishment schedule group. */
   readonly scheduleGroup: string;
+  /** 測試商品的生豆批次（S2a，seed/test-lots.json）/ The test product's green lot. */
+  readonly orderLotId: string;
 }
 
 interface Tokens {
@@ -68,9 +70,11 @@ export interface SimClientTokens {
   readonly simulator: Tokens;
   readonly cafe: Tokens;
   readonly staff: Tokens;
+  /** 模擬烘焙廠（S2a，ADR-031 D6）/ Simulated roastery operator. */
+  readonly roaster: Tokens;
 }
 
-type Role = 'cafe' | 'cafeB' | 'staff' | 'simulator' | 'conflict';
+type Role = 'cafe' | 'cafeB' | 'staff' | 'simulator' | 'conflict' | 'roaster';
 
 function decodeClaims(jwt: string): Record<string, unknown> {
   const payload = jwt.split('.')[1] ?? '';
@@ -104,7 +108,7 @@ async function createUser(
   const attrs = [
     { Name: 'email', Value: username },
     { Name: 'email_verified', Value: 'true' },
-    ...(role === 'staff' ? [] : [{ Name: 'custom:tenant_id', Value: role === 'cafeB' ? TENANT_B_ID : TENANT_ID }]),
+    ...(role === 'staff' || role === 'roaster' ? [] : [{ Name: 'custom:tenant_id', Value: role === 'cafeB' ? TENANT_B_ID : TENANT_ID }]),
   ];
   await cognito.send(
     new AdminCreateUserCommand({ UserPoolId: cfg.userPoolId, Username: username, UserAttributes: attrs, MessageAction: 'SUPPRESS' }),
@@ -112,7 +116,8 @@ async function createUser(
   await cognito.send(
     new AdminSetUserPasswordCommand({ UserPoolId: cfg.userPoolId, Username: username, Password: password, Permanent: true }),
   );
-  const groups: string[] = role === 'conflict' ? ['cafe', 'staff'] : role === 'cafeB' ? ['cafe'] : [role];
+  const groups: string[] =
+    role === 'conflict' ? ['cafe', 'staff'] : role === 'cafeB' ? ['cafe'] : role === 'roaster' ? ['simulator-roastery'] : [role];
   for (const g of groups) {
     await cognito.send(new AdminAddUserToGroupCommand({ UserPoolId: cfg.userPoolId, Username: username, GroupName: g }));
   }
@@ -180,10 +185,23 @@ export async function simulatorClientChecks(cfg: Config, tokens: Record<Role, To
   expect('staff via simulator client: no brewline scopes', !String(st.scope).includes('brewline/'), String(st.scope));
   r = await call(cfg, `/admin/products/${cfg.productId}/stock`, sim.staff.access);
   expect('staff via simulator client GET /admin/... → 403', r.status === 403, `got ${r.status}`);
+
+  // S2a：模擬烘焙廠經由 simulator client：roastery scope、synthetic、沒有 admin、沒有租戶
+  // Simulated roastery through the simulator client: roastery scope, synthetic, no admin, no tenant.
+  const ro = decodeClaims(sim.roaster.access);
+  expect(
+    'roaster via simulator client: roastery scope, no admin, no tenant, synthetic',
+    String(ro.scope).includes('brewline/roastery') && !String(ro.scope).includes('brewline/admin') && ro.tenant_id === undefined && ro.synthetic === 'true',
+    String(ro.scope),
+  );
+  r = await call(cfg, `/admin/products/${cfg.productId}/stock`, sim.roaster.access);
+  expect('roaster GET /admin/products/{id}/stock → 200 (roastery scope)', r.status === 200, `got ${r.status}`);
+  r = await call(cfg, '/orders', sim.roaster.access);
+  expect('roaster GET /orders → 403 (not a tenant)', r.status === 403, `got ${r.status}`);
   return checks;
 }
 
-export async function runChecks(cfg: Config, tokens: Record<Role, Tokens>): Promise<Check[]> {
+export async function runChecks(cfg: Config, tokens: Record<Role, Tokens>, roaster: Tokens = tokens.roaster): Promise<Check[]> {
   const checks: Check[] = [];
   const expect = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
   const p = cfg.productId;
@@ -250,7 +268,7 @@ export async function runChecks(cfg: Config, tokens: Record<Role, Tokens>): Prom
   checks.push(...(await replenishmentChecks(cfg, tokens)));
   const orders = await orderChecks(cfg, tokens);
   checks.push(...orders.checks);
-  if (orders.orderId && orders.simOrderId) checks.push(...(await adminChecks(cfg, tokens, orders.orderId, orders.simOrderId)));
+  if (orders.orderId && orders.simOrderId) checks.push(...(await adminChecks(cfg, tokens, orders.orderId, orders.simOrderId, roaster)));
   else checks.push({ name: 'admin checks need both smoke orders', ok: false, detail: 'missing order ids' });
   return checks;
 }
@@ -459,7 +477,13 @@ export async function orderChecks(
  * 測試商品庫存 available 95／reserved 5。
  * Staff transitions. On entry: cafe order 3 kg and simulator order 2 kg, both CREATED; stock 95/5.
  */
-export async function adminChecks(cfg: Config, tokens: Record<Role, Tokens>, orderId: string, simOrderId: string): Promise<Check[]> {
+export async function adminChecks(
+  cfg: Config,
+  tokens: Record<Role, Tokens>,
+  orderId: string,
+  simOrderId: string,
+  roaster: Tokens,
+): Promise<Check[]> {
   const checks: Check[] = [];
   const expect = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
   const path = (id: string) => `/admin/tenants/${TENANT_ID}/orders/${id}`;
@@ -498,13 +522,33 @@ export async function adminChecks(cfg: Config, tokens: Record<Role, Tokens>, ord
   r = await call(cfg, '/admin/orders', tokens.cafe.access);
   expect('cafe GET /admin/orders → 403', r.status === 403, `got ${r.status}`);
 
-  // --- 正向：完整流程與庫存 / Positive: full lifecycle and stock ---
+  // --- S2a：模擬烘焙廠只碰模擬訂單 / The simulated roastery touches synthetic orders only ---
+  r = await patch(orderId, 'CONFIRMED', roaster.access);
+  expect('roaster PATCH real order → 403 synthetic_only', r.status === 403 && r.body?.error?.code === 'synthetic_only', `got ${r.status}`);
+  r = await call(cfg, path(orderId), roaster.access);
+  expect('roaster GET real order → 404', r.status === 404, `got ${r.status}`);
+  r = await call(cfg, '/admin/orders?status=CREATED&limit=50', roaster.access);
+  const roasterList = Array.isArray(r.body?.items) ? r.body.items : [];
+  expect(
+    'roaster list shows synthetic orders only',
+    r.status === 200 && roasterList.length > 0 && roasterList.every((o: any) => o.synthetic === true),
+    `items ${roasterList.length}`,
+  );
+  r = await patch(simOrderId, 'CONFIRMED', roaster.access);
+  expect('roaster PATCH synthetic order CREATED → CONFIRMED', r.status === 200 && r.body?.status === 'CONFIRMED', `got ${r.status}`);
+
+  // --- 正向：完整流程、烘焙批次與庫存 / Positive: lifecycle with a roast batch, and stock ---
   let ok = true;
-  for (const s of ['CONFIRMED', 'ROASTING_SCHEDULED', 'ROASTED']) {
+  for (const s of ['CONFIRMED', 'ROASTING_SCHEDULED']) {
     r = await patch(orderId, s);
     ok &&= r.status === 200 && r.body?.status === s;
   }
-  expect('CREATED → CONFIRMED → ROASTING_SCHEDULED → ROASTED', ok, `last ${r.status} ${r.body?.status}`);
+  expect('CREATED → CONFIRMED → ROASTING_SCHEDULED', ok, `last ${r.status} ${r.body?.status}`);
+  r = await patch(orderId, 'ROASTED');
+  expect('ROASTED before any allocation → 409 not_fully_allocated', r.status === 409 && r.body?.error?.code === 'not_fully_allocated', `got ${r.status}`);
+  const roast = await roastChecks(cfg, tokens, orderId, roaster, expect);
+  r = await patch(orderId, 'ROASTED');
+  expect('fully allocated to a roasted batch → ROASTED', r.status === 200 && r.body?.status === 'ROASTED', `got ${r.status}`);
   r = await patch(orderId, 'CANCELLED');
   expect('cancel after roasting is scheduled → 409', r.status === 409, `got ${r.status}`);
   r = await patch(orderId, 'SHIPPED');
@@ -534,7 +578,116 @@ export async function adminChecks(cfg: Config, tokens: Record<Role, Tokens>, ord
     r.status === 200 && (r.body?.status_history ?? []).every((h: any) => typeof h.by === 'string' && h.by.startsWith('staff:')),
     `got ${r.status}`,
   );
+  expect('cafe order DTO has no allocation details', !('allocations' in (await call(cfg, `/orders/${orderId}`, tokens.cafe.access)).body), '');
+  if (roast) await traceChecks(cfg, tokens, orderId, roast, roaster, expect);
+  await restockChecks(cfg, tokens, roaster, expect);
   return checks;
+}
+
+type Expect = (name: string, ok: boolean, detail: string) => void;
+
+/**
+ * S2a 烘焙批次（ADR-031 D5／D9）。進入時：smoke 訂單 3 kg 在 ROASTING_SCHEDULED。回傳批次 ID。
+ * Roast batch checks. On entry the 3 kg smoke order is ROASTING_SCHEDULED. Returns the roast id.
+ */
+async function roastChecks(cfg: Config, tokens: Record<Role, Tokens>, orderId: string, roaster: Tokens, expect: Expect): Promise<string | undefined> {
+  const key = `smoke-roast-${randomBytes(6).toString('hex')}`;
+  const body = (kg: number, alloc = 3) => ({
+    product_id: cfg.orderProductId,
+    roast_date: new Date().toISOString().slice(0, 10),
+    kg,
+    allocations: [{ tenant_id: TENANT_ID, order_id: orderId, kg: alloc }],
+  });
+  const post = (b: unknown, token: string, k?: string) => call(cfg, '/admin/roasts', token, { body: b, key: k });
+
+  // 反向 / Negative
+  let r = await post(body(5), tokens.cafe.access, key);
+  expect('cafe POST /admin/roasts → 403', r.status === 403, `got ${r.status}`);
+  r = await post(body(5), roaster.access, key);
+  expect('roaster allocates a real order → 403 synthetic_only', r.status === 403 && r.body?.error?.code === 'synthetic_only', `got ${r.status}`);
+  r = await post(body(5), tokens.staff.access);
+  expect('POST /admin/roasts without Idempotency-Key → 400', r.status === 400, `got ${r.status}`);
+  r = await post(body(16, 3), tokens.staff.access, `${key}-big`);
+  expect('batch > 15 kg → 400', r.status === 400, `got ${r.status}`);
+  r = await post(body(5, 4), tokens.staff.access, `${key}-over`);
+  expect('allocate 4 kg to a 3 kg line → 409 over_allocated', r.status === 409 && r.body?.error?.remaining_kg === 3, `got ${r.status}`);
+
+  // 正向 / Positive
+  r = await post(body(5), tokens.staff.access, key);
+  const roastId: string | undefined = r.body?.roast_id;
+  expect(
+    'staff POST /admin/roasts → 201 SCHEDULED on the product lot',
+    r.status === 201 && r.body?.status === 'SCHEDULED' && r.body?.lot_id === cfg.orderLotId && /^r_[0-9A-Z]{26}$/.test(roastId ?? ''),
+    `got ${r.status} ${r.body?.lot_id}`,
+  );
+  r = await post(body(5), tokens.staff.access, key);
+  expect('same key and body → 200 same batch (idempotent)', r.status === 200 && r.body?.roast_id === roastId, `got ${r.status}`);
+  r = await post(body(6), tokens.staff.access, key);
+  expect('same key, different body → 422', r.status === 422, `got ${r.status}`);
+  if (!roastId) return undefined;
+
+  r = await call(cfg, `/admin/tenants/${TENANT_ID}/orders/${orderId}`, undefined);
+  r = await call(cfg, `/admin/tenants/${TENANT_ID}/orders/${orderId}`, tokens.staff.access, { body: { status: 'ROASTED' }, method: 'PATCH' });
+  expect('order ROASTED while its batch is SCHEDULED → 409 roast_not_roasted', r.status === 409 && r.body?.error?.code === 'roast_not_roasted', `got ${r.status}`);
+  r = await call(cfg, `/admin/roasts/${roastId}`, roaster.access, { body: { status: 'ROASTED' }, method: 'PATCH' });
+  expect('roaster PATCH a real batch → 404', r.status === 404, `got ${r.status}`);
+  r = await call(cfg, `/admin/roasts/${roastId}`, tokens.staff.access, { body: { status: 'ROASTED' }, method: 'PATCH' });
+  expect('batch SCHEDULED → ROASTED mints a 22-char QR token', r.status === 200 && /^[A-Za-z0-9_-]{22}$/.test(r.body?.qr_token ?? ''), `got ${r.status}`);
+  r = await call(cfg, `/admin/roasts/${roastId}`, tokens.staff.access, { body: { status: 'ROASTED' }, method: 'PATCH' });
+  expect('roast twice → 409 (token minted once)', r.status === 409, `got ${r.status}`);
+  return roastId;
+}
+
+/** S2a 雙向追溯與召回（TRC-F-006／008）/ Bidirectional trace and recall. */
+async function traceChecks(cfg: Config, tokens: Record<Role, Tokens>, orderId: string, roastId: string, roaster: Tokens, expect: Expect): Promise<void> {
+  let r = await call(cfg, `/admin/trace?tenant=${TENANT_ID}&order=${orderId}`, tokens.staff.access);
+  expect(
+    'trace order → roast batch → lot (back to the farm)',
+    r.status === 200 && r.body?.lines?.[0]?.roasts?.[0]?.roast_id === roastId && r.body?.lots?.[0]?.lot_id === cfg.orderLotId &&
+      typeof r.body?.lots?.[0]?.producer_display_name === 'string',
+    `got ${r.status}`,
+  );
+  r = await call(cfg, `/admin/trace?roast=${roastId}`, tokens.staff.access);
+  expect(
+    'trace roast batch → orders and lot',
+    r.status === 200 && r.body?.orders?.some((o: any) => o.order_id === orderId && o.kg === 3) && r.body?.lot?.lot_id === cfg.orderLotId,
+    `got ${r.status}`,
+  );
+  r = await call(cfg, `/admin/trace?lot=${cfg.orderLotId}`, tokens.staff.access);
+  expect('trace lot → roast batches', r.status === 200 && r.body?.roasts?.some((x: any) => x.roast_id === roastId), `got ${r.status}`);
+  r = await call(cfg, `/admin/trace?lot=${cfg.orderLotId}`, tokens.cafe.access);
+  expect('cafe GET /admin/trace → 403', r.status === 403, `got ${r.status}`);
+  r = await call(cfg, `/admin/trace?roast=${roastId}`, roaster.access);
+  expect('roaster traces a real batch → 404', r.status === 404, `got ${r.status}`);
+  r = await call(cfg, `/admin/trace?lot=${cfg.orderLotId}&roast=${roastId}`, tokens.staff.access);
+  expect('trace with two query forms → 400', r.status === 400, `got ${r.status}`);
+
+  const notice = { notice: 'Smoke test recall notice: do not consume.' };
+  r = await call(cfg, `/admin/roasts/${roastId}/recall`, roaster.access, { body: notice });
+  expect('roaster recall → 403 (admin only)', r.status === 403, `got ${r.status}`);
+  r = await call(cfg, `/admin/roasts/${roastId}/recall`, tokens.staff.access, { body: { notice: '<b>x</b> injected' } });
+  expect('recall notice with markup → 400', r.status === 400, `got ${r.status}`);
+  r = await call(cfg, `/admin/roasts/${roastId}/recall`, tokens.staff.access, { body: notice });
+  expect('staff recall → 200 with notice', r.status === 200 && r.body?.recall?.notice === notice.notice, `got ${r.status}`);
+  r = await call(cfg, `/admin/roasts/${roastId}/recall`, tokens.staff.access, { body: notice });
+  expect('recall twice → 409', r.status === 409, `got ${r.status}`);
+}
+
+/** S2a 補貨（ADR-031 D7）。進入時測試商品 97／0 / Restock; stock is 97/0 on entry. */
+async function restockChecks(cfg: Config, tokens: Record<Role, Tokens>, roaster: Tokens, expect: Expect): Promise<void> {
+  const url = `/admin/products/${cfg.orderProductId}/restock`;
+  const before = (await call(cfg, `/admin/products/${cfg.orderProductId}/stock`, tokens.staff.access)).body;
+  const v = before?.version;
+  let r = await call(cfg, url, tokens.cafe.access, { body: { kg: 5, expected_version: v } });
+  expect('cafe restock → 403', r.status === 403, `got ${r.status}`);
+  r = await call(cfg, url, tokens.staff.access, { body: { kg: 0, expected_version: v } });
+  expect('restock 0 kg → 400', r.status === 400, `got ${r.status}`);
+  r = await call(cfg, url, tokens.staff.access, { body: { kg: 5, expected_version: v } });
+  expect('staff restock +5 kg → 102 available, version +1', r.status === 200 && r.body?.available_kg === 102 && r.body?.version === v + 1, `got ${r.status} ${r.body?.available_kg}`);
+  r = await call(cfg, url, tokens.staff.access, { body: { kg: 5, expected_version: v } });
+  expect('replayed restock (stale version) → 409, no double add', r.status === 409 && r.body?.error?.current_version === v + 1, `got ${r.status}`);
+  r = await call(cfg, url, roaster.access, { body: { kg: 1, expected_version: v + 1 } });
+  expect('roaster restock +1 kg → 103', r.status === 200 && r.body?.available_kg === 103, `got ${r.status} ${r.body?.available_kg}`);
 }
 
 /** 測試商品庫存重設（只有 Dev 測試商品，IAM 限定 key）/ Reset the test product's stock. */
@@ -585,6 +738,34 @@ async function cleanTenants(tableName: string, scheduleGroup?: string): Promise<
   return deleted;
 }
 
+/**
+ * 刪除 smoke 的烘焙批次：測試批次的邊 → 每個 ROAST#<id> 的所有項目 → 邊本身（IAM 只限測試批次與 ROAST#）。
+ * Delete smoke roast batches via the test lot's edges (IAM: the test lot and ROAST# only).
+ */
+async function cleanRoasts(tableName: string, lotId: string): Promise<number> {
+  let deleted = 0;
+  const all = async (pk: string, prefix?: string) =>
+    (
+      await doc.send(
+        new QueryCommand({
+          TableName: tableName,
+          KeyConditionExpression: prefix ? 'pk = :pk AND begins_with(sk, :p)' : 'pk = :pk',
+          ExpressionAttributeValues: { ':pk': pk, ...(prefix ? { ':p': prefix } : {}) },
+          ProjectionExpression: 'pk, sk, roast_id',
+        }),
+      )
+    ).Items ?? [];
+  for (const edge of await all(`LOT#${lotId}`, 'ROAST#')) {
+    for (const item of await all(`ROAST#${String(edge.roast_id)}`)) {
+      await doc.send(new DeleteCommand({ TableName: tableName, Key: { pk: item.pk, sk: item.sk } }));
+      deleted++;
+    }
+    await doc.send(new DeleteCommand({ TableName: tableName, Key: { pk: edge.pk, sk: edge.sk } }));
+    deleted++;
+  }
+  return deleted;
+}
+
 async function deleteUsers(userPoolId: string, usernames: string[]): Promise<void> {
   for (const username of usernames) {
     try {
@@ -615,6 +796,7 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
     orderProductId: String(props.OrderProductId),
     tableName: String(props.TableName),
     scheduleGroup: String(props.ScheduleGroup),
+    orderLotId: String(props.OrderLotId),
   };
   if (event.RequestType === 'Delete') {
     await deleteLeftovers(cfg.userPoolId).catch(() => undefined);
@@ -623,6 +805,7 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
 
   await deleteLeftovers(cfg.userPoolId);
   await cleanTenants(cfg.tableName, cfg.scheduleGroup);
+  await cleanRoasts(cfg.tableName, cfg.orderLotId);
   await resetStock(cfg.tableName, cfg.orderProductId);
   const runId = randomBytes(4).toString('hex');
   const created: string[] = [];
@@ -630,24 +813,34 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
   try {
     const tokens = {} as Record<Role, Tokens>;
     const users = {} as Record<Role, { username: string; password: string }>;
-    for (const role of ['cafe', 'cafeB', 'staff', 'simulator', 'conflict'] as const) {
+    for (const role of ['cafe', 'cafeB', 'staff', 'simulator', 'conflict', 'roaster'] as const) {
       const u = await createUser(cfg, runId, role);
       created.push(u.username);
       tokens[role] = u.tokens;
       users[role] = u;
     }
     // 同一批使用者再經由 simulator client 登入（密碼只在記憶體）/ Same users through the simulator client.
-    const viaSim = (role: 'simulator' | 'cafe' | 'staff') =>
+    const viaSim = (role: 'simulator' | 'cafe' | 'staff' | 'roaster') =>
       login(cfg.userPoolId, cfg.simulatorClientId, users[role].username, users[role].password, `${role} via simulator client`);
-    const sim: SimClientTokens = { simulator: await viaSim('simulator'), cafe: await viaSim('cafe'), staff: await viaSim('staff') };
-    checks = [...(await simulatorClientChecks(cfg, tokens, sim)), ...(await runChecks(cfg, tokens))];
+    const sim: SimClientTokens = {
+      simulator: await viaSim('simulator'),
+      cafe: await viaSim('cafe'),
+      staff: await viaSim('staff'),
+      roaster: await viaSim('roaster'),
+    };
+    // 模擬烘焙廠一律經由 simulator client（與正式運作相同）/ The roaster always goes through the simulator client, as in production.
+    checks = [...(await simulatorClientChecks(cfg, tokens, sim)), ...(await runChecks(cfg, tokens, sim.roaster))];
   } finally {
     await deleteUsers(cfg.userPoolId, created);
     const deleted = await cleanTenants(cfg.tableName, cfg.scheduleGroup).catch((err: Error) => {
       logger.warn('Could not clean test tenants', { error: err.name });
       return -1;
     });
-    logger.info('Test tenant items deleted', { deleted });
+    const roastsDeleted = await cleanRoasts(cfg.tableName, cfg.orderLotId).catch((err: Error) => {
+      logger.warn('Could not clean smoke roasts', { error: err.name });
+      return -1;
+    });
+    logger.info('Test tenant items deleted', { deleted, roastsDeleted });
   }
 
   const failed = checks.filter((c) => !c.ok);

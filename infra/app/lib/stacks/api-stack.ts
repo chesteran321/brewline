@@ -35,6 +35,8 @@ export interface ApiStackProps extends StackProps {
 const SMOKE_PRODUCT_ID = 'p-0001';
 /** Smoke test 下單用的 Dev 測試商品（seed/test-products.json）/ Dev test product the smoke test orders. */
 const SMOKE_ORDER_PRODUCT_ID = 'p-9002';
+/** p-9002 的生豆批次（seed/test-lots.json）/ The test product's green lot. */
+const SMOKE_ORDER_LOT_ID = 'L-9999-002';
 /** Smoke test 的固定測試租戶（services/ordering/src/custom-resources/smoke-test.ts）/ Fixed smoke-test tenants. */
 const SMOKE_TENANTS = ['t_01SMKTEST000000000000000A1', 't_01SMKTEST000000000000000B1'];
 /** 訂單測試（A2b-2）的商品與租戶（services/ordering/src/order-tests/run.ts）/ Order-test fixtures. */
@@ -187,6 +189,8 @@ export class ApiStack extends Stack {
     // Cross-tenant, but they never assume the tenant role (generated role names do not match orders-*).
     const tenantKeys = { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['TENANT#*'] } };
     const statusIndexOnly = { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['STATUS#*'] } };
+    const roastKeys = { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['ROAST#*'] } };
+    const roastOrLotKeys = { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['ROAST#*', 'LOT#*'] } };
     const adminList = fn('AdminListOrders', 'admin-list-orders', 'ordering/src/handlers/admin-list-orders.ts',
       'GET /admin/orders?status=: all tenants, by status (GSI1)', [
         new iam.PolicyStatement({ sid: 'QueryStatusIndex', actions: ['dynamodb:Query'], resources: [gsi1Arn], conditions: statusIndexOnly }),
@@ -217,6 +221,68 @@ export class ApiStack extends Stack {
           },
         }),
         kmsViaDynamo(['kms:Encrypt', 'kms:GenerateDataKey']),
+        // S2a：轉成 ROASTED 前確認分配的烘焙批次都已烘焙 / Check allocated batches are roasted before ROASTED.
+        new iam.PolicyStatement({ sid: 'ReadRoastBatches', actions: ['dynamodb:BatchGetItem'], resources: [tableArn], conditions: roastKeys }),
+      ]);
+
+    // --- 3d) 溯源與烘焙廠（S2a，ADR-031）/ Traceability and roastery ---
+    // 跨租戶、不扮演租戶角色；訂單只能更新品項分配（dynamodb:Attributes），批次與邊只在 ROAST#／LOT#。
+    // Cross-tenant without the tenant role; orders only get line allocations, batches and edges live under ROAST#/LOT#.
+    const createRoast = fn('CreateRoast', 'create-roast', 'ordering/src/handlers/create-roast.ts',
+      'POST /admin/roasts: roast batch + order-line allocations in one transaction (roastery)', [
+        new iam.PolicyStatement({
+          sid: 'ReadForAllocation',
+          actions: ['dynamodb:GetItem'],
+          resources: [tableArn],
+          conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['PRODUCT#*', 'LOT#*', 'ROAST#*', 'TENANT#*'] } },
+        }),
+        new iam.PolicyStatement({ sid: 'PutBatchAndEdges', actions: ['dynamodb:PutItem'], resources: [tableArn], conditions: roastOrLotKeys }),
+        new iam.PolicyStatement({
+          sid: 'AllocateOrderLinesOnly',
+          actions: ['dynamodb:UpdateItem'],
+          resources: [tableArn],
+          conditions: {
+            ...tenantKeys,
+            'ForAllValues:StringEquals': { 'dynamodb:Attributes': ['pk', 'sk', 'items', 'status', 'updated_at', 'synthetic'] },
+            StringEqualsIfExists: { 'dynamodb:ReturnValues': ['NONE'] },
+          },
+        }),
+        kmsViaDynamo(['kms:Encrypt', 'kms:GenerateDataKey']),
+      ]);
+    const updateRoast = fn('UpdateRoast', 'update-roast', 'ordering/src/handlers/update-roast.ts',
+      'PATCH /admin/roasts/{id}: SCHEDULED → ROASTED, mints the QR token (roastery)', [
+        new iam.PolicyStatement({ sid: 'UpdateRoastBatch', actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'], resources: [tableArn], conditions: roastKeys }),
+        kmsViaDynamo(['kms:Encrypt', 'kms:GenerateDataKey']),
+      ]);
+    const recallRoast = fn('RecallRoast', 'recall-roast', 'ordering/src/handlers/recall-roast.ts',
+      'POST /admin/roasts/{id}/recall: recall notice for the public trace page (admin)', [
+        new iam.PolicyStatement({ sid: 'RecallRoastBatch', actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'], resources: [tableArn], conditions: roastKeys }),
+        kmsViaDynamo(['kms:Encrypt', 'kms:GenerateDataKey']),
+      ]);
+    const restock = fn('Restock', 'restock', 'ordering/src/handlers/restock.ts',
+      'POST /admin/products/{id}/restock: add available stock with an optimistic lock (roastery)', [
+        new iam.PolicyStatement({ sid: 'ReadStock', actions: ['dynamodb:GetItem'], resources: [tableArn], conditions: productKeysOnly }),
+        new iam.PolicyStatement({
+          sid: 'AdjustStockOnly',
+          actions: ['dynamodb:UpdateItem'],
+          resources: [tableArn],
+          conditions: {
+            ...productKeysOnly,
+            'ForAllValues:StringEquals': { 'dynamodb:Attributes': ['pk', 'sk', 'available_kg', 'version', 'updated_at'] },
+            StringEqualsIfExists: { 'dynamodb:ReturnValues': ['NONE'] },
+          },
+        }),
+        kmsViaDynamo(['kms:Encrypt', 'kms:GenerateDataKey']),
+      ]);
+    const trace = fn('Trace', 'trace', 'ordering/src/handlers/trace.ts',
+      'GET /admin/trace: lot ↔ roast batch ↔ order (staff and roastery)', [
+        new iam.PolicyStatement({
+          sid: 'ReadTrace',
+          actions: ['dynamodb:GetItem'],
+          resources: [tableArn],
+          conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['LOT#*', 'ROAST#*', 'TENANT#*'] } },
+        }),
+        new iam.PolicyStatement({ sid: 'QueryEdges', actions: ['dynamodb:Query', 'dynamodb:BatchGetItem'], resources: [tableArn], conditions: roastOrLotKeys }),
       ]);
 
     // --- 4) HTTP API ---
@@ -265,10 +331,12 @@ export class ApiStack extends Stack {
       identitySource: ['$request.header.Authorization'],
     });
 
-    const routes: Array<[apigwv2.HttpMethod, string, BrewlineFunction, string]> = [
+    // 多個 scope = 任一即可（S2：staff 或烘焙廠）/ Several scopes mean any of them (S2: staff or roastery).
+    const staffOrRoastery = [SCOPES.admin, SCOPES.roastery];
+    const routes: Array<[apigwv2.HttpMethod, string, BrewlineFunction, string | string[]]> = [
       [apigwv2.HttpMethod.GET, '/products', listProducts, SCOPES.catalogRead],
       [apigwv2.HttpMethod.GET, '/products/{id}', getProduct, SCOPES.catalogRead],
-      [apigwv2.HttpMethod.GET, '/admin/products/{id}/stock', getStock, SCOPES.admin],
+      [apigwv2.HttpMethod.GET, '/admin/products/{id}/stock', getStock, staffOrRoastery],
       [apigwv2.HttpMethod.POST, '/orders', createOrder, SCOPES.ordersWrite],
       [apigwv2.HttpMethod.GET, '/orders', listOrders, SCOPES.ordersRead],
       [apigwv2.HttpMethod.GET, '/orders/{id}', getOrder, SCOPES.ordersRead],
@@ -277,9 +345,15 @@ export class ApiStack extends Stack {
       [apigwv2.HttpMethod.POST, '/replenishments', replenishment.createFn, SCOPES.ordersWrite],
       [apigwv2.HttpMethod.GET, '/replenishments', replenishment.listFn, SCOPES.ordersRead],
       [apigwv2.HttpMethod.DELETE, '/replenishments/{id}', replenishment.deleteFn, SCOPES.ordersWrite],
-      [apigwv2.HttpMethod.GET, '/admin/orders', adminList, SCOPES.admin],
-      [apigwv2.HttpMethod.GET, '/admin/tenants/{tenantId}/orders/{orderId}', adminGet, SCOPES.admin],
-      [apigwv2.HttpMethod.PATCH, '/admin/tenants/{tenantId}/orders/{orderId}', adminUpdate, SCOPES.admin],
+      [apigwv2.HttpMethod.GET, '/admin/orders', adminList, staffOrRoastery],
+      [apigwv2.HttpMethod.GET, '/admin/tenants/{tenantId}/orders/{orderId}', adminGet, staffOrRoastery],
+      [apigwv2.HttpMethod.PATCH, '/admin/tenants/{tenantId}/orders/{orderId}', adminUpdate, staffOrRoastery],
+      [apigwv2.HttpMethod.POST, '/admin/roasts', createRoast, SCOPES.roastery],
+      [apigwv2.HttpMethod.PATCH, '/admin/roasts/{id}', updateRoast, SCOPES.roastery],
+      // 召回只有 staff / Recall is staff-only.
+      [apigwv2.HttpMethod.POST, '/admin/roasts/{id}/recall', recallRoast, SCOPES.admin],
+      [apigwv2.HttpMethod.POST, '/admin/products/{id}/restock', restock, SCOPES.roastery],
+      [apigwv2.HttpMethod.GET, '/admin/trace', trace, staffOrRoastery],
     ];
     const routeConstructs: Construct[] = [];
     for (const [method, routePath, f, scope] of routes) {
@@ -289,7 +363,7 @@ export class ApiStack extends Stack {
           methods: [method],
           integration: new HttpLambdaIntegration(`${f.node.id}Integration`, f.function),
           authorizer,
-          authorizationScopes: [scope],
+          authorizationScopes: Array.isArray(scope) ? scope : [scope],
         }),
       );
     }
@@ -320,11 +394,17 @@ export class ApiStack extends Stack {
       environment: { POWERTOOLS_SERVICE_NAME: 'ordering-seed-catalog' },
     });
     seedFn.role.addToPolicy(
-      new iam.PolicyStatement({ sid: 'PutCatalogItems', actions: ['dynamodb:PutItem'], resources: [tableArn], conditions: productKeysOnly }),
+      new iam.PolicyStatement({
+        sid: 'PutCatalogItems',
+        actions: ['dynamodb:PutItem'],
+        resources: [tableArn],
+        // S2a：生豆批次 LOT#<id>/META 也由種子寫入 / Green lots are seeded too.
+        conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['PRODUCT#*', 'LOT#*'] } },
+      }),
     );
     seedFn.role.addToPolicy(denyScan);
     seedFn.role.addToPolicy(kmsViaDynamo(['kms:Decrypt', 'kms:Encrypt', 'kms:GenerateDataKey']));
-    const seedFile = readFileSync(path.join(SERVICES_ROOT, 'ordering', 'seed', 'products.json'));
+    const seedFile = Buffer.concat(['products.json', 'lots.json'].map((f) => readFileSync(path.join(SERVICES_ROOT, 'ordering', 'seed', f))));
     const seed = new CustomResource(this, 'CatalogSeed', {
       serviceToken: this.provider('SeedProvider', seedFn).serviceToken,
       resourceType: 'Custom::BrewlineCatalogSeed',
@@ -336,10 +416,12 @@ export class ApiStack extends Stack {
         SeedHash: createHash('sha256')
           .update(seedFile)
           .update(props.api.testProducts ? readFileSync(path.join(SERVICES_ROOT, 'ordering', 'seed', 'test-products.json')) : '')
+          .update(props.api.testProducts ? readFileSync(path.join(SERVICES_ROOT, 'ordering', 'seed', 'test-lots.json')) : '')
           .digest('hex'),
       },
     });
     new CfnOutput(this, 'SeededProducts', { value: seed.getAttString('Products') });
+    new CfnOutput(this, 'SeededLots', { value: seed.getAttString('Lots') });
 
     // --- 6) Dev smoke test ---
     if (props.api.smokeTest && smokeClientId) {
@@ -397,6 +479,16 @@ export class ApiStack extends Stack {
         id: `AwsSolutions-IAM5[Resource::arn:aws:scheduler:${this.region}:${this.account}:schedule/${Replenishment.groupName(envName)}/*]`,
         reason: 'Smoke test checks and cleans up throwaway replenishment schedules in the replenish group only.',
       });
+      // S2a：清掉 smoke 建立的烘焙批次（測試批次 L-9999-002 的邊 → ROAST#<id> 的項目；Dev 才有 smoke test）
+      // Clean up smoke roast batches: edges of the test lot lead to the ROAST#<id> items (Dev only).
+      smokeFn.role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'CleanSmokeRoasts',
+          actions: ['dynamodb:Query', 'dynamodb:DeleteItem'],
+          resources: [tableArn],
+          conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': [`LOT#${SMOKE_ORDER_LOT_ID}`, 'ROAST#*'] } },
+        }),
+      );
       smokeFn.role.addToPolicy(denyScan);
       smokeFn.role.addToPolicy(kmsViaDynamo(['kms:Decrypt', 'kms:Encrypt', 'kms:GenerateDataKey']));
       const smoke = new CustomResource(this, 'SmokeTestRun', {
@@ -409,6 +501,7 @@ export class ApiStack extends Stack {
           SimulatorClientId: simulatorClientId,
           ProductId: SMOKE_PRODUCT_ID,
           OrderProductId: SMOKE_ORDER_PRODUCT_ID,
+          OrderLotId: SMOKE_ORDER_LOT_ID,
           ScheduleGroup: Replenishment.groupName(envName),
           TableName: tableName,
           Commit: props.commitSha, // 每次部署都不同 → 每次都執行 / changes every deploy → always runs
@@ -510,7 +603,8 @@ export class ApiStack extends Stack {
     new CfnOutput(this, 'ApiId', { value: this.httpApi.apiId });
     new CfnOutput(this, 'FunctionNames', {
       value: [listProducts, getProduct, getStock, createOrder, listOrders, getOrder, getContact, putContact,
-        replenishment.createFn, replenishment.listFn, replenishment.deleteFn, adminList, adminGet, adminUpdate]
+        replenishment.createFn, replenishment.listFn, replenishment.deleteFn, adminList, adminGet, adminUpdate,
+        createRoast, updateRoast, recallRoast, restock, trace]
         .map((f) => f.function.functionName)
         .join(','),
     });

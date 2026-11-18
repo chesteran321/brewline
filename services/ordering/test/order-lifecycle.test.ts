@@ -1,5 +1,5 @@
 import { DynamoDBClient, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
 import { mockClient } from 'aws-sdk-client-mock';
 import { getHandler, listHandler, patchHandler } from '../src/handlers/admin-orders';
@@ -114,6 +114,53 @@ describe('AdminOrderRepo.transition', () => {
     ddb.on(TransactWriteCommand).rejects(cancel('None', 'ConditionalCheckFailed', 'None'));
     await expect(repo.transition({ tenantId: T, orderId: OID, to: 'CANCELLED', actor: 'x', now })).rejects.toThrow('Stock adjustment failed');
   });
+  // S2a（ADR-031 D5）：ROASTED 需要全數分配到已烘焙的批次 / ROASTED needs every line allocated to roasted batches.
+  const R1 = `r_${'A'.repeat(26)}`;
+  const R2 = `r_${'B'.repeat(26)}`;
+  const roastMeta = (id: string, status: string) => ({
+    pk: `ROAST#${id}`, sk: 'META', entity: 'RoastBatch', roast_id: id, product_id: 'p-0001', lot_id: 'L-2026-001',
+    roast_date: '2026-11-18', roast_level: 'light', kg: 5, status, request_hash: 'h', created_by: 'staff:s', created_at: 'x',
+  });
+  const allocated = (extra: object = {}) =>
+    order('ROASTING_SCHEDULED', {
+      items: [
+        { product_id: 'p-0001', name: 'A', qty_kg: 3, price_per_kg: 100, line_total: 300, allocated_kg: 3, roast_ids: [R1] },
+        { product_id: 'p-0002', name: 'B', qty_kg: 2, price_per_kg: 100, line_total: 200, allocated_kg: 2, roast_ids: [R2] },
+      ],
+      ...extra,
+    });
+
+  test('→ ROASTED refused while a line is not fully allocated (no write)', async () => {
+    ddb.on(GetCommand).resolves({ Item: order('ROASTING_SCHEDULED') });
+    const r = await repo.transition({ tenantId: T, orderId: OID, to: 'ROASTED', actor: 'staff:s1', now });
+    expect(r).toEqual({ kind: 'not_ready', reason: 'not_fully_allocated', refs: ['p-0001', 'p-0002'] });
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  test('→ ROASTED refused while an allocated batch is not roasted yet', async () => {
+    ddb.on(GetCommand).resolves({ Item: allocated() });
+    ddb.on(BatchGetCommand).resolves({ Responses: { tbl: [roastMeta(R1, 'ROASTED'), roastMeta(R2, 'SCHEDULED')] } });
+    const r = await repo.transition({ tenantId: T, orderId: OID, to: 'ROASTED', actor: 'staff:s1', now });
+    expect(r).toEqual({ kind: 'not_ready', reason: 'roast_not_roasted', refs: [R2] });
+    expect(ddb.commandCalls(BatchGetCommand)[0]!.args[0].input.RequestItems!.tbl!.ConsistentRead).toBe(true);
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  test('→ ROASTED when every line is allocated to roasted batches', async () => {
+    ddb.on(GetCommand).resolves({ Item: allocated() });
+    ddb.on(BatchGetCommand).resolves({ Responses: { tbl: [roastMeta(R1, 'ROASTED'), roastMeta(R2, 'ROASTED')] } });
+    ddb.on(TransactWriteCommand).resolves({});
+    expect(await repo.transition({ tenantId: T, orderId: OID, to: 'ROASTED', actor: 'staff:s1', now })).toMatchObject({ kind: 'updated' });
+  });
+
+  test('requireSynthetic: a synthetic caller cannot change a real order', async () => {
+    ddb.on(GetCommand).resolves({ Item: order('CREATED') });
+    expect(await repo.transition({ tenantId: T, orderId: OID, to: 'CONFIRMED', actor: 'roastery:s', now, requireSynthetic: true })).toEqual({ kind: 'forbidden' });
+    ddb.on(GetCommand).resolves({ Item: order('CREATED', { synthetic: true }) });
+    ddb.on(TransactWriteCommand).resolves({});
+    expect(await repo.transition({ tenantId: T, orderId: OID, to: 'CONFIRMED', actor: 'roastery:s', now, requireSynthetic: true })).toMatchObject({ kind: 'updated' });
+  });
+
   test('listByStatus queries GSI1 STATUS#<status>, newest first', async () => {
     ddb.on(QueryCommand).resolves({ Items: [order('CREATED'), { junk: 1 }] });
     expect((await repo.listByStatus('CREATED', 10)).orders).toHaveLength(1);
@@ -188,6 +235,31 @@ describe('admin handlers', () => {
     expect((await patchHandler(ev({ body: { status: 'CONFIRMED', tenant_id: 'x' } }))).statusCode).toBe(400);
     expect(calls).toHaveLength(0);
   });
+  test.each([
+    [{ kind: 'forbidden' }, 403],
+    [{ kind: 'not_ready', reason: 'not_fully_allocated', refs: ['p-0001'] }, 409],
+  ])('PATCH result %o → %i (S2a)', async (res, code) => {
+    result = res;
+    expect((await patchHandler(ev())).statusCode).toBe(code);
+  });
+
+  // S2a：roastery scope；synthetic 呼叫者只碰模擬訂單 / Roastery scope; synthetic callers touch synthetic orders only.
+  const roaster = (o: Parameters<typeof ev>[0] = {}) => {
+    const e = ev({ scopes: ['brewline/roastery', 'brewline/catalog.read'], ...o }) as any;
+    e.requestContext.authorizer.jwt.claims.synthetic = 'true';
+    return e as APIGatewayProxyEventV2WithJWTAuthorizer;
+  };
+  test('roastery: PATCH passes requireSynthetic and a roastery actor; staff never requireSynthetic', async () => {
+    expect((await patchHandler(roaster())).statusCode).toBe(200);
+    expect(calls[0]).toMatchObject({ actor: 'roastery:staff-sub', requireSynthetic: true });
+    await patchHandler(ev());
+    expect(calls[1]).toMatchObject({ actor: 'staff:staff-sub', requireSynthetic: false });
+  });
+  test('roastery (synthetic): real orders are hidden from GET (404) and list', async () => {
+    expect((await getHandler(roaster())).statusCode).toBe(404);
+    expect(JSON.parse((await listHandler(roaster({ query: { status: 'CREATED' } }))).body!).items).toEqual([]);
+  });
+
   test('GET one / list', async () => {
     expect((await getHandler(ev())).statusCode).toBe(200);
     expect((await getHandler(ev({ tenantId: 't_01BBBBBBBBBBBBBBBBBBBBBBBB' }))).statusCode).toBe(404);

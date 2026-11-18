@@ -46,7 +46,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   const { app, stack, template } = buildApp(envName);
   const cfg = ENVIRONMENTS[envName];
 
-  test('HTTP API with fourteen routes, all JWT + scope', () => {
+  test('HTTP API with nineteen routes, all JWT + scope', () => {
     template.resourceCountIs('AWS::ApiGatewayV2::Api', 1);
     const routes = Object.fromEntries(resources(template, 'AWS::ApiGatewayV2::Route').map(([, r]) => [r.Properties.RouteKey, r.Properties]));
     expect(Object.keys(routes).sort()).toEqual([
@@ -54,23 +54,28 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
       'GET /orders', 'GET /orders/{id}', 'GET /products', 'GET /products/{id}',
       'DELETE /replenishments/{id}', 'GET /replenishments', 'GET /tenant/contact', 'PATCH /admin/tenants/{tenantId}/orders/{orderId}',
       'POST /orders', 'POST /replenishments', 'PUT /tenant/contact',
+      'POST /admin/roasts', 'PATCH /admin/roasts/{id}', 'POST /admin/roasts/{id}/recall', 'POST /admin/products/{id}/restock', 'GET /admin/trace',
     ].sort());
     expect(routes['POST /replenishments']).toMatchObject({ AuthorizationScopes: ['brewline/orders.write'] });
     expect(routes['GET /replenishments']).toMatchObject({ AuthorizationScopes: ['brewline/orders.read'] });
     expect(routes['DELETE /replenishments/{id}']).toMatchObject({ AuthorizationScopes: ['brewline/orders.write'] });
     expect(routes['GET /tenant/contact']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/profile.read'] });
     expect(routes['PUT /tenant/contact']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/profile.write'] });
-    // staff 端點只接受 admin scope / Staff endpoints need the admin scope.
-    for (const k of ['GET /admin/orders', 'GET /admin/tenants/{tenantId}/orders/{orderId}', 'PATCH /admin/tenants/{tenantId}/orders/{orderId}']) {
-      expect(routes[k]).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/admin'] });
+    // staff 訂單端點：admin 或 roastery（S2a）/ Staff order endpoints: admin or roastery.
+    for (const k of ['GET /admin/orders', 'GET /admin/tenants/{tenantId}/orders/{orderId}', 'PATCH /admin/tenants/{tenantId}/orders/{orderId}',
+      'GET /admin/products/{id}/stock', 'GET /admin/trace']) {
+      expect(routes[k]).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/admin', 'brewline/roastery'] });
     }
+    for (const k of ['POST /admin/roasts', 'PATCH /admin/roasts/{id}', 'POST /admin/products/{id}/restock']) {
+      expect(routes[k]).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/roastery'] });
+    }
+    // 反向：召回只有 admin（模擬烘焙廠沒有 admin）/ Negative: recall needs admin, which the simulated roastery lacks.
+    expect(routes['POST /admin/roasts/{id}/recall']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/admin'] });
     expect(routes['POST /orders']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/orders.write'] });
     expect(routes['GET /orders']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/orders.read'] });
     expect(routes['GET /orders/{id}']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/orders.read'] });
     expect(routes['GET /products']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/catalog.read'] });
     expect(routes['GET /products/{id}']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/catalog.read'] });
-    // 反向：admin 路由只接受 admin scope（cafe 只有 catalog.read）/ Negative: admin needs the admin scope.
-    expect(routes['GET /admin/products/{id}/stock']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/admin'] });
   });
 
   test('JWT authorizer reads issuer and audience from SSM; simulator client in both envs, smoke client only in Dev', () => {
@@ -226,9 +231,48 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
     expect(upd.find((x) => x.Sid === 'AdjustStockOnly').Condition['ForAllValues:StringEquals']['dynamodb:Attributes']).toEqual([
       'pk', 'sk', 'available_kg', 'reserved_kg', 'version', 'updated_at',
     ]);
-    // 反向：沒有 Put／Delete／Batch（建不了、刪不了訂單）/ Negative: cannot create or delete items.
+    // S2a：只能批次讀 ROAST#（確認批次已烘焙）/ Batch reads only on ROAST# (roasted-batch check).
+    expect(upd.find((x) => x.Sid === 'ReadRoastBatches')).toMatchObject({
+      Action: 'dynamodb:BatchGetItem',
+      Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['ROAST#*'] } },
+    });
+    // 反向：沒有 Put／Delete／BatchWrite（建不了、刪不了訂單）/ Negative: cannot create or delete items.
     const acts = upd.filter((x) => x.Effect === 'Allow').flatMap((x) => [].concat(x.Action)) as string[];
-    expect(acts.filter((a) => /dynamodb:(Put|Delete|Batch)/.test(a))).toEqual([]);
+    expect(acts.filter((a) => /dynamodb:(Put|Delete|BatchWrite)/.test(a))).toEqual([]);
+  });
+
+  test('roastery functions (S2a): never orders-* roles; orders get line allocations only; no Delete, no Scan', () => {
+    const fnNames = ['create-roast', 'update-roast', 'recall-roast', 'restock', 'trace'].map((n) => `brewline-${envName}-ordering-${n}`);
+    for (const fnName of fnNames) {
+      const [[, fn]] = resources(template, 'AWS::Lambda::Function').filter(([, r]) => r.Properties.FunctionName === fnName) as [[string, Res]];
+      expect(template.toJSON().Resources[fn.Properties.Role['Fn::GetAtt'][0]].Properties.RoleName).toBeUndefined();
+      const st = statementsFor(template, fnName);
+      expect(st).toContainEqual(expect.objectContaining({ Sid: 'DenyScan', Effect: 'Deny' }));
+      const acts = st.filter((x) => x.Effect === 'Allow').flatMap((x) => [].concat(x.Action)) as string[];
+      expect(acts.filter((a) => /dynamodb:(Delete|Scan|BatchWrite)|sts:/.test(a))).toEqual([]);
+    }
+    const create = statementsFor(template, fnNames[0]!);
+    expect(create.find((x) => x.Sid === 'AllocateOrderLinesOnly')).toMatchObject({
+      Action: 'dynamodb:UpdateItem',
+      Condition: {
+        'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['TENANT#*'] },
+        'ForAllValues:StringEquals': { 'dynamodb:Attributes': ['pk', 'sk', 'items', 'status', 'updated_at', 'synthetic'] },
+      },
+    });
+    // 反向：Put 只在 ROAST#／LOT#（不能在租戶分割區建立項目）/ Negative: Put only under ROAST#/LOT#, never in a tenant partition.
+    expect(create.find((x) => x.Sid === 'PutBatchAndEdges')).toMatchObject({
+      Action: 'dynamodb:PutItem',
+      Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['ROAST#*', 'LOT#*'] } },
+    });
+    const restock = statementsFor(template, fnNames[3]!);
+    expect(restock.find((x) => x.Sid === 'AdjustStockOnly').Condition['ForAllValues:StringEquals']['dynamodb:Attributes']).toEqual([
+      'pk', 'sk', 'available_kg', 'version', 'updated_at',
+    ]);
+    // 反向：recall／update 只碰 ROAST# / Negative: recall and update touch ROAST# only.
+    for (const n of [fnNames[1]!, fnNames[2]!]) {
+      const ddb = statementsFor(template, n).filter((x) => x.Effect === 'Allow' && [].concat(x.Action).some((a: string) => a.startsWith('dynamodb:')));
+      expect(ddb.map((x) => x.Condition['ForAllValues:StringLike']['dynamodb:LeadingKeys'])).toEqual([['ROAST#*']]);
+    }
   });
 
   test('order timeout workflow (A3d): Standard, wait = config, retries, logging ALL, tracing', () => {
@@ -308,11 +352,11 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
     expect(st.find((x) => [].concat(x.Action).includes('sts:AssumeRole' as never))).toBeDefined();
   });
 
-  test('seed: PutItem on PRODUCT# keys only, never updates STOCK by property', () => {
+  test('seed: PutItem on PRODUCT# and LOT# keys only, never updates STOCK by property', () => {
     const st = statementsFor(template, `brewline-${envName}-ordering-seed-catalog`);
     const ddb = st.filter((s) => s.Effect === 'Allow' && [].concat(s.Action).some((a: string) => a.startsWith('dynamodb:')));
     expect(ddb).toHaveLength(1);
-    expect(ddb[0]).toMatchObject({ Action: 'dynamodb:PutItem', Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['PRODUCT#*'] } } });
+    expect(ddb[0]).toMatchObject({ Action: 'dynamodb:PutItem', Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['PRODUCT#*', 'LOT#*'] } } });
     template.hasResourceProperties('Custom::BrewlineCatalogSeed', {
       SeedHash: Match.stringLikeRegexp('^[0-9a-f]{64}$'),
       IncludeTestProducts: String(cfg.api.testProducts), // 只有 Dev 寫入 p-9xxx / test products only in Dev
@@ -330,7 +374,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
       expect(JSON.stringify(s.Properties.SimulatorClientId)).toContain('simulatorclientid');
       expect(s.DependsOn).toEqual(expect.arrayContaining(['CatalogSeed']));
       expect(s.DependsOn!.some((d) => d.startsWith('DefaultStage'))).toBe(true);
-      expect(s.DependsOn!.filter((d) => /^HttpApi(GET|POST|PUT|PATCH|DELETE)/.test(d) && !d.includes('Integration'))).toHaveLength(14);
+      expect(s.DependsOn!.filter((d) => /^HttpApi(GET|POST|PUT|PATCH|DELETE)/.test(d) && !d.includes('Integration'))).toHaveLength(19);
       // 只能管理這個 pool 的使用者 / User management limited to this pool.
       const st = statementsFor(template, `brewline-${envName}-ordering-smoke-a1`);
       const cognito = st.find((x) => x.Sid === 'ManageThrowawayUsers');
@@ -355,7 +399,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   test('all first-party Lambdas follow the standard; provider framework functions are explicitly exempt', () => {
     const fns = resources(template, 'AWS::Lambda::Function');
     const ours = fns.filter(([, r]) => String(r.Properties.FunctionName ?? '').startsWith(`brewline-${envName}-`));
-    expect(ours).toHaveLength(17 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
+    expect(ours).toHaveLength(22 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
     for (const [, r] of ours) {
       expect(r.Properties).toMatchObject({ Runtime: 'nodejs24.x', Architectures: ['arm64'], TracingConfig: { Mode: 'Active' } });
     }

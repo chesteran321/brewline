@@ -3,8 +3,11 @@ import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { Logger } from '@aws-lambda-powertools/logger';
 import type { CloudFormationCustomResourceEvent } from 'aws-lambda';
 import rawProducts from '../../seed/products.json';
+import rawLots from '../../seed/lots.json';
+import rawTestLots from '../../seed/test-lots.json';
 import rawTestProducts from '../../seed/test-products.json';
 import { CATALOG_GSI_PK, META_SK, PRODUCT_PK_PREFIX, STOCK_SK, SeedProduct, SeedProductSchema, productPk } from '../lib/model';
+import { SeedLot, SeedLotSchema, lotPk } from '../lib/trace-model';
 
 /**
  * 商品目錄種子（CloudFormation custom resource，經 CDK Provider framework）。
@@ -17,6 +20,8 @@ import { CATALOG_GSI_PK, META_SK, PRODUCT_PK_PREFIX, STOCK_SK, SeedProduct, Seed
  * - 測試商品（seed/test-products.json，只在 Dev，`IncludeTestProducts=true`）：**不寫 gsi1pk** → 不在目錄
  *   （稀疏索引），但可以用 ID 讀取與下單；給 smoke test 與併發測試用（ADR-025）。
  *   Test products (Dev only) get no gsi1pk, so they stay out of the catalog (sparse index) yet can be ordered by id.
+ * - 生豆批次（S2a，seed/lots.json）：LOT#<id>/META 每次覆寫；每個商品的 lot_id 必須有對應批次，產地欄位必須一致。
+ *   Green lots (LOT#<id>/META) are upserted every time; every product's lot_id must exist with matching origin fields.
  * - Delete：什麼都不做（資料表本身由 data stack 管理）/ Delete is a no-op.
  */
 
@@ -43,6 +48,37 @@ export function loadTestSeed(raw: unknown = rawTestProducts): SeedProduct[] {
   const bad = products.filter((p) => !/^p-9\d{3}$/.test(p.id));
   if (bad.length > 0) throw new Error(`Test product ids must be p-9xxx: ${bad.map((p) => p.id).join(',')}`);
   return products;
+}
+
+/** 產地欄位必須與商品一致，避免目錄與溯源頁說法不同 / Origin fields must match the product. */
+const SHARED_FIELDS = ['origin_country', 'region', 'altitude_m', 'variety', 'process', 'cup_score'] as const;
+
+export function loadLots(products: SeedProduct[], raw: unknown = rawLots): SeedLot[] {
+  const lots = SeedLotSchema.array().min(1).parse(raw);
+  const byId = new Map(lots.map((l) => [l.lot_id, l]));
+  if (byId.size !== lots.length) throw new Error('Duplicate lot id in the lot seed');
+  for (const p of products) {
+    const lot = byId.get(p.lot_id);
+    if (!lot) throw new Error(`Product ${p.id} references unknown lot ${p.lot_id}`);
+    const diff = SHARED_FIELDS.filter((f) => lot[f] !== p[f]);
+    if (diff.length > 0) throw new Error(`Lot ${lot.lot_id} disagrees with product ${p.id} on ${diff.join(',')}`);
+  }
+  return lots;
+}
+
+export function loadTestLots(products: SeedProduct[] = loadTestSeed(), raw: unknown = rawTestLots): SeedLot[] {
+  const lots = loadLots(products, raw);
+  const bad = lots.filter((l) => !l.lot_id.startsWith('L-9999-'));
+  if (bad.length > 0) throw new Error(`Test lot ids must be L-9999-xxx: ${bad.map((l) => l.lot_id).join(',')}`);
+  return lots;
+}
+
+export async function seedLots(client: DynamoDBDocumentClient, tableName: string, lots: SeedLot[]): Promise<number> {
+  const now = new Date().toISOString();
+  for (const l of lots) {
+    await client.send(new PutCommand({ TableName: tableName, Item: { pk: lotPk(l.lot_id), sk: META_SK, entity: 'Lot', ...l, updated_at: now } }));
+  }
+  return lots.length;
 }
 
 export async function seed(
@@ -107,12 +143,16 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
   }
   const tableName = String(event.ResourceProperties.TableName ?? '');
   if (!tableName) throw new Error('TableName property is required');
-  const result = await seed(doc, tableName, loadSeed());
+  const products = loadSeed();
+  const result = await seed(doc, tableName, products);
+  let lots = await seedLots(doc, tableName, loadLots(products));
   let testProducts = 0;
   if (String(event.ResourceProperties.IncludeTestProducts) === 'true') {
-    testProducts = (await seed(doc, tableName, loadTestSeed(), { inCatalog: false })).products;
+    const tests = loadTestSeed();
+    testProducts = (await seed(doc, tableName, tests, { inCatalog: false })).products;
+    lots += await seedLots(doc, tableName, loadTestLots(tests));
   }
-  logger.info('Catalog seeded', { ...result, testProducts, requestType: event.RequestType });
+  logger.info('Catalog seeded', { ...result, lots, testProducts, requestType: event.RequestType });
   return {
     PhysicalResourceId: physicalResourceId,
     Data: {
@@ -120,6 +160,7 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
       StockCreated: String(result.stockCreated),
       StockKept: String(result.stockKept),
       TestProducts: String(testProducts),
+      Lots: String(lots),
     },
   };
 };

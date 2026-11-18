@@ -57,7 +57,7 @@ mfa=$(aws cognito-idp get-user-pool-mfa-config --user-pool-id "$pool_id" --regio
 check "TOTP enabled"                 "$(jq -r '.SoftwareTokenMfaConfiguration.Enabled' <<<"$mfa")" "true"
 
 check "Groups" "$(aws cognito-idp list-groups --user-pool-id "$pool_id" --region "$region" \
-  --query 'sort(Groups[].GroupName)' --output json | jq -c .)" '["cafe","simulator","staff"]'
+  --query 'sort(Groups[].GroupName)' --output json | jq -c .)" '["cafe","simulator","simulator-roastery","staff"]'
 
 # --- App clients ---
 web=$(aws cognito-idp describe-user-pool-client --user-pool-id "$pool_id" --client-id "$web_client" --region "$region" --output json)
