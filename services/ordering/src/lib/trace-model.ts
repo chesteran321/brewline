@@ -81,10 +81,18 @@ export const SeedLotSchema = z.strictObject({
 });
 export type SeedLot = z.infer<typeof SeedLotSchema>;
 
-export const LotItemSchema = SeedLotSchema.extend({
+/**
+ * 資料表中的生豆批次。種子檔是 strict（擋打錯的欄位），讀取不能 strict：項目另有 updated_at 等欄位，
+ * strict 會讓每個批次都讀成「不存在」（2026-11-18 Dev smoke test 擋下）。
+ * Stored lot. The seed file is strict to catch typos; reads are not, because stored items carry extra
+ * fields such as updated_at (a strict read made every lot look missing — caught by the Dev smoke test).
+ */
+export const LotItemSchema = z.object({
+  ...SeedLotSchema.shape,
   pk: z.string().startsWith(LOT_PK_PREFIX),
   sk: z.literal('META'),
   entity: z.literal('Lot'),
+  updated_at: z.string().optional(),
 });
 export type LotItem = z.infer<typeof LotItemSchema>;
 

@@ -1,8 +1,8 @@
 import { ConditionalCheckFailedException, DynamoDBClient, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
-import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2WithJWTAuthorizer } from 'aws-lambda';
 import { mockClient } from 'aws-sdk-client-mock';
-import { loadLots, loadSeed, loadTestLots } from '../src/custom-resources/seed-catalog';
+import { loadLots, loadSeed, loadTestLots, seedLots } from '../src/custom-resources/seed-catalog';
 import { handler as restockHandler } from '../src/handlers/restock';
 import { createHandler, patchHandler, recallHandler } from '../src/handlers/roasts';
 import { handler as traceHandler } from '../src/handlers/trace';
@@ -93,6 +93,26 @@ describe('lot seed', () => {
     expect(() => loadLots(products, lots.slice(1))).toThrow('unknown lot');
     expect(() => loadLots(products, [{ ...lots[0], region: 'Elsewhere' }, ...lots.slice(1)])).toThrow('disagrees');
     expect(() => loadLots(products, [...lots, lots[0]])).toThrow('Duplicate');
+  });
+});
+
+describe('TraceRepo reads what the seed writes (regression 2026-11-18)', () => {
+  const ddb = mockClient(DynamoDBDocumentClient);
+  const repo = new TraceRepo(DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'ap-east-2' })), 'tbl');
+  beforeEach(() => ddb.reset());
+
+  test('getLot accepts the exact item seedLots() puts (with updated_at)', async () => {
+    ddb.on(PutCommand).resolves({});
+    await seedLots(DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'ap-east-2' })), 'tbl', loadLots(loadSeed()).slice(0, 1));
+    const stored = ddb.commandCalls(PutCommand)[0]!.args[0].input.Item!;
+    expect(stored).toHaveProperty('updated_at');
+    ddb.on(GetCommand).resolves({ Item: stored });
+    expect(await repo.getLot(String(stored.lot_id))).toMatchObject({ lot_id: stored.lot_id });
+  });
+
+  test('negative: an item that is not a lot is still rejected', async () => {
+    ddb.on(GetCommand).resolves({ Item: { ...lot, entity: 'Product' } });
+    expect(await repo.getLot('L-2026-001')).toBeUndefined();
   });
 });
 
