@@ -149,6 +149,24 @@ export interface ApiSettings {
   readonly orderTimeoutSeconds: number;
 }
 
+/**
+ * 公開溯源頁（S2，ADR-031 D3／D4）。CloudFront 需要的憑證與 web ACL 只能在 us-east-1，所以分兩階段：
+ * S2b 部署 us-east-1 的 edge stack → 把輸出的兩個 ARN 填進 `edge` → S2c 的台北 trace stack 才會建立 distribution。
+ * Public trace page. CloudFront's certificate and web ACL live in us-east-1, so deploy the edge stack first,
+ * copy its two ARNs into `edge`, then the Taipei trace stack creates the distribution (S2c).
+ */
+export interface TraceSettings {
+  /** 公開頁網域 / Public page domain. */
+  readonly domain: string;
+  /** 驗證憑證用的 hosted zone（Prod：網域註冊時建立；Dev：notify stack 建立的 dev. 子網域）/ Zone for DNS validation. */
+  readonly hostedZoneId: string;
+  readonly hostedZoneName: string;
+  /** 每個 IP 每 5 分鐘的請求上限（WAF 速率規則，防止列舉 token）/ Per-IP requests per 5 minutes. */
+  readonly rateLimitPer5Min: number;
+  /** S2b 部署後填入（非機密：ARN 只含帳號 ID）/ Filled in after S2b (not secret). */
+  readonly edge?: { readonly certificateArn: string; readonly webAclArn: string };
+}
+
 export interface BrewlineEnv {
   readonly name: EnvName;
   readonly account: string;
@@ -159,7 +177,11 @@ export interface BrewlineEnv {
   readonly api: ApiSettings;
   readonly mail: MailSettings;
   readonly simulator: SimulatorSettings;
+  readonly trace: TraceSettings;
 }
+
+/** CloudFront 的憑證與 web ACL 只能在這裡 / CloudFront certificates and web ACLs live here only. */
+export const EDGE_REGION = 'us-east-1';
 
 /** Lambda 標準 runtime（ADR-023）/ Standard Lambda runtime. */
 export const LAMBDA_RUNTIME = 'nodejs24.x';
@@ -215,6 +237,13 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       fromLocalPart: 'orders',
       fromName: 'BrewLine (Demo)',
       delegations: [],
+    },
+    trace: {
+      domain: 'trace.dev.brewline-demo.click',
+      // notify stack 建立的 dev. 子網域 zone（Retain，2026-11-16）/ The dev. subdomain zone created by the notify stack.
+      hostedZoneId: 'Z00697733VLK1TK9WUYKL',
+      hostedZoneName: 'dev.brewline-demo.click',
+      rateLimitPer5Min: 300,
     },
   },
   prod: {
@@ -273,6 +302,12 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
           nameServers: ['ns-406.awsdns-50.com', 'ns-1983.awsdns-55.co.uk', 'ns-1160.awsdns-17.org', 'ns-970.awsdns-57.net'],
         },
       ],
+    },
+    trace: {
+      domain: 'trace.brewline-demo.click',
+      hostedZoneId: 'Z039360620HRFCTYO5R5J',
+      hostedZoneName: 'brewline-demo.click',
+      rateLimitPer5Min: 300,
     },
   },
 };
