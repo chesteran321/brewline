@@ -83,6 +83,10 @@
   - 內嵌政策明確 Deny：DynamoDB `DeleteTable`／`UpdateTable`／`UpdateContinuousBackups`／`UpdateTimeToLive`／`DeleteBackup`；KMS `ScheduleKeyDeletion`／`DisableKey`／`DisableKeyRotation`／`PutKeyPolicy`／`CreateGrant`／`RevokeGrant`；IAM 寫入類（`Create*`、`Delete*`、`Put*`、`Attach*`、`Detach*`、`Update*`、`Add*`、`Remove*`、`PassRole`、`Tag*`、`Untag*`、`Set*`）；CloudFormation 建立／更新／刪除／change set／終止保護；Lambda 更新程式碼與設定、刪除。
   - `AWSCloudShellFullAccess`：ViewOnlyAccess 不含 CloudShell，缺少時無法建立環境。取捨：可上傳／下載檔案；Dev 只有模擬資料，可接受。
   - IAM 角色：`arn:aws:iam::610935435571:role/aws-reserved/sso.amazonaws.com/ap-east-2/AWSReservedSSO_Developer_fa10c9f9b63adad3`
+  - **2026-11-18 補權限**（管理帳號 Admin：備份 → `jq` 只新增敘述 → `diff` 只有新增 → `put-inline-policy-to-permission-set` → 讀回比對 → provision 到 Dev）：
+    - `SimulatorSwitch`：`ssm:PutParameter` **只限** `/brewline/dev/simulator/state`（ARN 完全比對，ADR-030 D7）。
+    - `OpsReadOnly`：Scheduler、EventBridge、Step Functions、SQS 的 `Get`／`List`／`Describe`（不含 `sqs:ReceiveMessage`）、`cloudformation:DescribeType`；`aws:RequestedRegion = ap-east-2`。
+    - 已驗證（Developer 真實憑證）：正向寫 `state`（同值）、`get-schedule`、`list-rules`、DLQ 屬性、`list-state-machines`、台北 `describe-type` = `LIVE`；反向寫 `state2`、us-east-1 `describe-type` → `no identity-based policy allows`（完全比對、區域條件生效）。政策模擬（Dev Admin，`aws:RequestedRegion` context）：寫 `state` = `allowed`；寫 `config`／`credentials`、刪 `state`、`ReceiveMessage`、`PurgeQueue`、`UpdateSchedule`、`DeleteSchedule`、`PutEvents` = `implicitDeny`。
   - 已驗證：正向 SSM 讀取、DynamoDB put／get／delete item（KMS 經 DynamoDB 自動解密）；反向 `delete-table`、`iam create-user` 皆 `explicit deny in an identity-based policy`；KMS 以政策模擬器驗證（Dev Admin 執行 `simulate-principal-policy`）：`DisableKey`、`ScheduleKeyDeletion`、`PutKeyPolicy`、`DisableKeyRotation` 為 `explicitDeny`，直接 `kms:Decrypt` 為 `implicitDeny`（`kms:ViaService` 生效）；brewline-prod 無此許可集。
 - **ReadOnly 許可集加上 `SecurityAudit`**（2026-11-11，重新佈建 4 個帳號）：「稽核員」組合，可讀 Config、Security Hub CSPM、IAM／S3／KMS 等安全設定，**不能讀資料內容**；不含 CloudShell（只用主控台）。
   - 已驗證（Prod ReadOnly 主控台）：正向 Config 資源清單看到 `brewline-prod-core`（合規）、Security Hub CSPM `DynamoDB.2` 通過；反向 DynamoDB 探索項目 `dynamodb:Scan` 被拒（`no identity-based policy allows the action`）。
@@ -908,20 +912,21 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-13 | 訂貨 A2b-2：Dev 訂單測試（冪等風暴、搶庫存、IAM 探測）17/17（§10.9，PR #25）；**A2 完成** |
 | ✅ 2026-11-13 | A3 決策：D1 Streams → Lambda → EventBridge；D2 狀態以 DynamoDB 為準、Step Functions 只做逾時取消；D5 逾時 Dev 10 分／Prod 48 小時；D6 咖啡廳自行取消延後；D7 先建告警、通知待 A4 |
 | ✅ 2026-11-13 | 訂貨 A3a Streams（§10.5，PR #27）、A3b 事件層（§10.10，PR #28、#29）部署 Dev、Prod 並驗證 |
-| 有空時 | Developer 權限集加上 EventBridge、Step Functions、SQS 唯讀（目前 `events:ListEventBuses` 被拒），以及 `cloudformation:DescribeType`（新區域資源類型檢查） |
+| ✅ 2026-11-18 | Developer 許可集加上 EventBridge、Step Functions、SQS、Scheduler 唯讀與 `cloudformation:DescribeType`（台北限定），正向＋反向＋政策模擬驗證（§3） |
 | ✅ 2026-11-13 | 訂貨 A3c：staff 端點＋狀態機部署 Dev、Prod 並驗證（§10.9，PR #31） |
 | ✅ 2026-11-16 | 訂貨 A3d：逾時取消工作流部署 Dev、Prod；Dev 端到端通過（§10.11，PR #33、#34）；**A3 完成** |
 | ✅ 2026-11-16 | A4 決策 D1–D7（ADR-029）；A4a key policy（PR #36）、A4b 維運通知（§10.12，PR #37）部署 Dev、Prod；Dev 端到端通過；Dev／Prod Email 訂閱已確認 |
 | ✅ 2026-11-16 | A4c 聯絡人＋欄位層級加密（§10.13，PR #39）部署 Dev、Prod；Dev smoke 68/68、訂單測試 25/25 |
 | ✅ 2026-11-16 | 網域 `brewline-demo.click` 註冊完成（ACTIVE、隱私保護、自動續約）；A4d 訂單通知信（§10.14，PR #41–#43）部署 Dev、Prod；Dev 端到端 4 封信＋逾時 4/4 |
-| 2026-12-01 前 | 確認網域聯絡人驗證信已點擊（ICANN 15 天期限，否則網域停用） |
+| ✅ 2026-11-18 | 網域聯絡人驗證：`get-contact-reachability-status` = `DONE`（Prod Admin，us-east-1） |
 | ✅ 2026-11-16 | A4e 定期補貨（§10.15，PR #46、#47）部署 Dev、Prod；Dev smoke 78/78、`replenish-check` 10/10；**訂貨模組 A1–A4 完成** |
 | P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
 | ✅ 2026-11-17 | 模擬器決策 D1–D9 定案（docs/07 對照，見 ADR-030）；S0（RSK-017）bus 資源政策部署 Dev、Prod 並驗證，含真實憑證反向測試（§10.10，PR #52） |
 | ✅ 2026-11-17 | 模擬器 S1a（simulator client、`synthetic`）、S1b（stack、帳號 40、開關 `paused`、排程、探測）部署 Dev、Prod 並驗證，含 Dev 開關測試與 Prod 探測（§10.16，PR #54／#56／#57／#58） |
 | ✅ 2026-11-17 | 模擬器 S1c 產生器（§10.16，PR #60）部署 Dev、Prod；Dev 驗證 dry-run 雜湊與本機相同、手動一小時（建立／重播／事件 `synthetic`）、逾時取消帶 `synthetic`、排程 18 時下單、19 時 0 筆；Dev 留在 `running` |
 | P1 | 模擬器 Dev 觀察期（至少到 2026-11-18：10、11、14 時共 4 筆、`run-errors` 告警沒有觸發、DLQ 0）→ S1d：Prod `state` 改 `running` 並驗證 |
-| 有空時 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`）與 `scheduler:GetSchedule`／`ListSchedules`，讓 Developer 在 Dev 切換模擬器開關 |
+| ✅ 2026-11-18 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`），Developer 可在 Dev 切換模擬器開關（§3） |
+| 2026-11-18 | Dependabot 安全警示 2 筆（`minimatch` < 11.0.1，Moderate，只在測試／synth 工具鏈）：PR #63 以 npm `overrides` 升到 11.0.9；`aws-cdk-lib` 內部打包（bundleDependencies）的一份要等新版 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |
 | nodejs26.x GA 後（預計 2026-11 底） | 評估 Lambda 升級到 Node 26（本機、CI、`Runtime`），移除 `LATEST_RUNTIME_ACK`（ADR-023 修訂） |
 | P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
@@ -941,6 +946,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 反向測試用「不存在的資源」只適用於**先授權、後查資源**的服務（DynamoDB、IAM 是）。**KMS 會先找金鑰（要評估 key policy）**，不存在就回 `NotFoundException`，測不到 IAM Deny；這類情況改用 `aws iam simulate-principal-policy`（只計算 IAM 政策，不執行動作，不含 SCP／RCP／key policy）。
 - Identity Center 建立的角色路徑含區域：`/aws-reserved/sso.amazonaws.com/ap-east-2/`；查 ARN 用 `aws iam list-roles --path-prefix /aws-reserved/`，不要手打。
 - 許可集要能用 CloudShell，需另加 `AWSCloudShellFullAccess`（ViewOnlyAccess 不含）。
+- 改許可集內嵌政策：CLI 是 `put-inline-policy-**to**-permission-set`（讀取是 `get-…-for-…`、刪除是 `delete-…-from-…`）；寫入後**讀回比對**，再 provision，最後一次 provision 必須在最後一次寫入之後（provision 冪等）；使用者要重新登入才拿到新權限。
 - CloudShell 一開始先 `export AWS_PAGER=""`：否則長輸出會進入 `less`，之後貼上的指令會被當成分頁器按鍵。
 - CloudShell 閒置約 20 分鐘會斷線，**重新連線後 shell 變數全部消失**（2026-11-17：`$F` 變空 → log group 變成 `/aws/lambda/` → `ResourceNotFoundException`）。之後要再跑的驗證指令寫成自足的形式（名稱寫死），時間範圍用固定時刻（`date -d '2026-11-17 17:30 +0800' +%s`），不要用「最近 N 分鐘」。
 - 查 Powertools 的 JSON 日誌用 JSON filter pattern（`{ $.message = "simulated hour" }`、`{ $.detail.synthetic IS TRUE }`），比全文搜尋精準。
