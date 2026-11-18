@@ -32,7 +32,14 @@ check "Certificate names" "$(jq -c '.SubjectAlternativeNames' <<<"$cert")" "[\"$
 check "Certificate status" "$(jq -r .Status <<<"$cert")" "ISSUED"
 check "Certificate validation" "$(jq -r '.DomainValidationOptions[0].ValidationMethod' <<<"$cert")" "DNS"
 check "Certificate type (ACM-managed, auto-renew)" "$(jq -r .Type <<<"$cert")" "AMAZON_ISSUED"
-check "Certificate renewal eligibility" "$(jq -r .RenewalEligibility <<<"$cert")" "ELIGIBLE"
+# ACM 只會自動續約「使用中」的憑證：S2c 掛上 CloudFront 之前是 INELIGIBLE，之後必須變成 ELIGIBLE。
+# ACM renews only certificates in use: INELIGIBLE until S2c attaches it to CloudFront, ELIGIBLE afterwards.
+in_use=$(jq '.InUseBy | length' <<<"$cert")
+if [ "$in_use" -gt 0 ]; then
+  check "Certificate renewal eligibility (in use by $in_use)" "$(jq -r .RenewalEligibility <<<"$cert")" "ELIGIBLE"
+else
+  check "Certificate renewal eligibility (not in use yet)" "$(jq -r .RenewalEligibility <<<"$cert")" "INELIGIBLE"
+fi
 
 # --- Web ACL ---
 check "Web ACL ARN is global (CLOUDFRONT scope)" "$(cut -d: -f6 <<<"$acl_arn" | cut -d/ -f1)" "global"
