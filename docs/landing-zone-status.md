@@ -787,6 +787,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - `verify-simulator-stack.sh` Dev、Prod 全部 ✅（Prod 整體 401 項、0 ❌）：帳號 40、`simulator` 群組 40 人且**沒有人在 staff**、`state = paused`、密碼參數 `SecureString`＋CMK＋Standard、**唯讀角色解不開**、排程（`ENABLED`、cron、`Asia/Taipei`、不重試、DLQ、角色信任排程群組 ARN）、函數標準設定、非同步重試 0 → DLQ、告警 2（帳號總數 9）、Prod 終止保護。
 - 政策模擬（執行角色）：正向 `AdminInitiateAuth`、讀密碼參數 = `allowed`；反向 `AdminCreateUser`、`AdminSetUserPassword`、寫 `state`、讀其他參數、DynamoDB `PutItem` = `implicitDeny`。
 - **Dev 手動開關測試**（Admin）：`paused` → `{"outcome":"paused"}`；`running` → `probe_ok`（`status 200`、`products 8`、`synthetic true`）；`RUNNING`（不認得的值）→ `paused`；`paused`＋`{"probe": true}` → `probe_ok`；最後恢復 `paused`。
+- **S1d：Prod 開啟（2026-11-18 16:00，Prod Admin）**：dry run 今天 29 筆（08–19 時 `[4,3,4,3,1,2,3,7,2,0,0,0]`）；反向：`paused` 時手動執行 → `paused`；`state` 改 `running` 後 `probe_ok`（200、8 個商品、`synthetic`）。**刻意不手動下單**，由 16:05 排程觸發第一批：`hour 16`、`planned 2`、`created 2`、沒有 violation；事件 2 筆 `OrderCreated CREATED synthetic=true`；DLQ 0。開啟前的時段（08–15 時）不補跑（下一輪生效，SIM-N-001）。Prod 逾時 48 小時，模擬訂單停在 `CREATED` 直到自動取消（S1 D5；S2d 後由模擬烘焙廠推進）；模擬帳號是 `example.com`，不寄信。
 - **Prod 手動探測**（Admin，`state = paused`）：`{"probe": true}` → `probe_ok`（`status 200`、`products 8`、`synthetic true`）；`{"source":"manual"}` → `paused`。Prod 的模擬器**尚未開啟**。
 - 一個 `probe_ok` 同時驗證：SSM 讀密碼（CMK、`kms:EncryptionContext:PARAMETER_ARN`）→ simulator client 登入 → token 的 `synthetic` claim（S1a）→ authorizer audience → 目錄 API。
 
@@ -795,7 +796,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - **執行一小時**（Dev，`running`，17 時手動）：`simulated`、`planned 1`、`created 1`、`violations []`；**同一小時重跑** → `replayed 1`、`created 0`（冪等，沒有多下單）。
 - **事件標記**：bus 日誌 `synthetic IS TRUE` 只有 1 筆 `OrderCreated CREATED`（重播不產生事件）；10 分鐘後多 1 筆 `OrderStatusChanged CANCELLED`——逾時工作流（`system:timeout`）取消的訂單也帶 `synthetic`，因為事件 detail 來自 Streams 的 NewImage，標記屬於訂單本身。
 - **排程**：18:05 由 Scheduler 觸發 → `hour 18`、`planned 1`、`created 1`；19:05 → `planned 0`、沒有下單（反向）；20 時以後沒有執行（反向，cron `8-19`）；DLQ 0。
-- **Dev 目前 `running`**（觀察期，每天 2–6 筆）；**Prod 仍是 `paused`**，S1d 再開啟。
+- **Dev、Prod 都是 `running`**（2026-11-18 起；Dev 每天 2–6 筆、Prod 5–40 筆）。
 
 教訓 / Lessons：
 - 驗證腳本也會有 bug：唯讀角色讀不到 Lambda 環境變數的值（#56，§10.14 #8 再犯一次）、寫死的告警總數（#58）。兩次都是「系統正常、驗證失敗」，管線因此跳過 Prod，沒有讓問題上線。驗證要檢查**不變條件**（全部接上、在上限內、只允許這些），不檢查某個時間點的數量或看不到的值。
@@ -952,7 +953,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-18 | 溯源 S2a（§10.17，PR #65、#66）部署 Dev、Prod 並驗證；Dev smoke 129/129 |
 | ✅ 2026-11-18 | 模擬器 Dev 觀察期：11/17 17–19 時與 11/18 10、11、14 時全部照計畫（共 5 筆 created、0 violation、DLQ 0、無告警） |
 | ✅ 2026-11-18 | minimatch 警示（PR #63）部署 Dev、Prod：Lambda 程式不變（只有每次部署的 custom resource 更新） |
-| P1 | 模擬器 S1d：Prod `state` 改 `running` 並驗證 |
+| ✅ 2026-11-18 | 模擬器 S1d：Prod `state` 改 `running`，16:05 排程自動下第一批 2 筆模擬訂單（§10.16）；**模擬器 S1 完成** |
 | P1 | 溯源 S2b（us-east-1 edge stack）→ S2c（公開頁）→ S2d（模擬烘焙廠） |
 | ✅ 2026-11-18 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`），Developer 可在 Dev 切換模擬器開關（§3） |
 | ✅ 2026-11-18 | Dependabot 安全警示 2 筆（`minimatch` < 11.0.1，Moderate，只在測試／synth 工具鏈）：PR #63 以 npm `overrides` 升到 11.0.9；`aws-cdk-lib` 內部打包（bundleDependencies）的一份要等新版 |
