@@ -838,6 +838,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 
 - **兩階段**（與 ADR-029 E2 相同）：部署後把輸出 `TraceCertificateArn`、`TraceWebAclArn` 填進 `lib/config.ts` 的 `trace.edge`，S2c 的台北 `trace` stack 才會建立 distribution。不用 `crossRegionReferences`（會多兩個 custom resource Lambda、兩個 stack 強耦合）。
 - **Free 方案的條件**（2026-11-18 查證）：一個訂閱＝剛好 1 個 distribution＋1 個 web ACL（可選加 Route 53 hosted zone）；distribution 本身必須先設定 `WebACLId`；最多 5 條 WAF 規則；沒有存取日誌、沒有自訂快取／回應標頭政策（用 managed 政策＋S3 `Cache-Control`）；方案涵蓋 web ACL、規則、請求費。
+- ACM 只會自動續約**使用中**的憑證：S2c 掛上 CloudFront 之前 `RenewalEligibility = INELIGIBLE` 是正常的（驗證腳本依 `InUseBy` 判斷；掛上後必須是 `ELIGIBLE`）。憑證有效期 13 個月，S2c 不會晚到過期。
 - **費用**：S2c 訂閱之前，web ACL 是 pay-as-you-go（每月 USD 5＋每條規則 USD 1，按時間比例；2 個環境約 USD 0.5／天）→ **S2c 要緊接著做**；訂閱後 0 元。ACM 公開憑證免費。
 - 將來可評估：把 hosted zone 加入方案（Free 上限 50 筆記錄），由方案負擔 zone 費用（目前 2 個 zone 約 USD 12／年）。
 
