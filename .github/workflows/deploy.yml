@@ -73,7 +73,7 @@ jobs:
 
       - name: cdk deploy (Dev)
         run: >
-          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data brewline-dev-auth brewline-dev-ops brewline-dev-events brewline-dev-api brewline-dev-notify brewline-dev-simulator
+          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data brewline-dev-auth brewline-dev-ops brewline-dev-events brewline-dev-api brewline-dev-notify brewline-dev-simulator brewline-dev-edge
           -c env=dev -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -166,6 +166,14 @@ jobs:
           { echo "### Simulator stack (Dev)"; echo '```'; cat verify-simulator.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
 
+      - name: Verify edge stack (us-east-1 ACM certificate, CLOUDFRONT web ACL within the Free plan)
+        run: |
+          set +e
+          scripts/verify-edge-stack.sh dev outputs.json | tee verify-edge.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### Edge stack (Dev, us-east-1)"; echo '```'; cat verify-edge.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
   deploy-prod:
     name: Deploy Prod
     needs: deploy-dev
@@ -215,7 +223,7 @@ jobs:
 
       - name: cdk deploy (Prod)
         run: >
-          npx cdk deploy brewline-prod-pipeline-check brewline-prod-data brewline-prod-auth brewline-prod-ops brewline-prod-events brewline-prod-api brewline-prod-notify brewline-prod-simulator
+          npx cdk deploy brewline-prod-pipeline-check brewline-prod-data brewline-prod-auth brewline-prod-ops brewline-prod-events brewline-prod-api brewline-prod-notify brewline-prod-simulator brewline-prod-edge
           -c env=prod -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -304,4 +312,12 @@ jobs:
           scripts/verify-simulator-stack.sh prod outputs.json | tee verify-simulator.txt
           rc=${PIPESTATUS[0]}
           { echo "### Simulator stack (Prod)"; echo '```'; cat verify-simulator.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Verify edge stack (us-east-1 ACM certificate, CLOUDFRONT web ACL within the Free plan)
+        run: |
+          set +e
+          scripts/verify-edge-stack.sh prod outputs.json | tee verify-edge.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### Edge stack (Prod, us-east-1)"; echo '```'; cat verify-edge.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc

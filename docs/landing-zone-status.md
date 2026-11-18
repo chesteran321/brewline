@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD 骨架、共用資料基礎、訂貨模組 A1–A4 完成；模擬器 S0（bus 資源政策）、S1a（simulator client、`synthetic`）、S1b（帳號、開關、排程）、S1c（訂單產生器）完成；Dev 觀察期中，Prod 尚未開啟（S1d）** / P0 complete; P1 CI/CD, data foundation and ordering A1–A4 complete; simulator S0–S1c complete, Dev under observation, Prod not yet enabled (S1d)（2026-11-17）
+> 狀態 Status：**P0 完成；P1 CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1（Dev／Prod 皆 `running`）完成；溯源 S2a（批次、烘焙廠角色、追溯 API）完成，S2b（us-east-1 edge）進行中** / P0 complete; P1 CI/CD, data foundation, ordering A1–A4 and simulator S1 complete; traceability S2a complete, S2b (us-east-1 edge) in progress（2026-11-18）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -56,6 +56,7 @@
   - ⚠️ **服務可用 ≠ CloudFormation 支援**：CDK 內建區域資料（aws-cdk-lib 2.275.0）把 `AWS::SES::EmailIdentity`、`ConfigurationSet`、`ConfigurationSetEventDestination` 判為台北不支援（synth 錯誤 F3006）；2026-11-16 以 `aws cloudformation describe-type --region ap-east-2`（需 Admin，Developer 沒有 `cloudformation:DescribeType`）實測都存在 → 程式中 acknowledge。新增資源類型前都用 `describe-type` 實測。
   - CloudShell **沒有**台北區域：在東京開 CloudShell，指令加 `--region ap-east-2`。
   - ✅ `describe-type` 實測（2026-11-17，Dev Admin）：`AWS::Scheduler::Schedule`、`AWS::Events::EventBusPolicy` 皆 `FULLY_MUTABLE LIVE`；對照組 `AWS::Cognito::UserPoolClient` LIVE、反向 `AWS::Pipes::Pipe` → `TypeNotFoundException`（證明查的是台北）。CDK 2.275.0 對這兩種類型**沒有** F3006。
+  - ✅ `describe-type` 實測（2026-11-18，Dev Admin，S2 前置）：台北與 us-east-1 的 `AWS::CloudFront::Distribution`、`AWS::CloudFront::OriginAccessControl`、`AWS::PricingPlanManager::Subscription`、`AWS::WAFv2::WebACL` 皆 `FULLY_MUTABLE LIVE`；`AWS::CertificateManager::Certificate` 在 us-east-1 `LIVE`、**台北 `NON_PROVISIONABLE`**（台北的 CloudFormation 不能建 ACM 憑證；CloudFront 本來就只接受 us-east-1 的憑證）。
 
 ---
 
@@ -500,12 +501,12 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 密碼 | ≥ 12，大小寫、數字、符號；歷史 5 組 | 同左 |
 | MFA | OPTIONAL，只開 TOTP；無 SMS 設定 | 同左 |
 | 自訂屬性 | `custom:tenant_id`（String 1–64，mutable；**任何 app client 都不能寫**；不可刪除或改名） | 同左 |
-| 群組 | `cafe`、`simulator`、`staff` | 同左 |
+| 群組 | `cafe`、`simulator`、`staff`、`simulator-roastery`（S2a） | 同左 |
 | App client | `web`（SRP＋refresh、無 OAuth、token 撤銷、access／ID **15 分**（A2a，原 60 分）／refresh 7 天）；`smoke-test`（`ADMIN_USER_PASSWORD_AUTH`）；**`simulator`**（S1a，`ADMIN_USER_PASSWORD_AUTH`＋refresh、無 secret、15 分） | `web`、**`simulator`** |
 | pre token 觸發器 | `brewline-dev-identity-pre-token`（V2_0，Node 24 arm64，保留併發 5，log 7 天） | `…-prod-…`（保留併發 10，log 30 天） |
 | SSM | `/brewline/dev/auth/{user-pool-id,user-pool-arn,web-client-id,issuer,smoke-test-client-id,simulator-client-id}` | 除 `smoke-test-client-id` 以外 |
 
-- Scope 對照（`services/identity/src/scopes.ts`）：`cafe`／`simulator` → `brewline/catalog.read`、`brewline/orders.read`、`brewline/orders.write`（訂單 scope 於 A2a 加入）；`staff` → `brewline/catalog.read`、`brewline/admin`（**沒有訂單 scope**：staff 不屬於任何租戶）。staff 與 cafe／simulator 同時存在、缺 tenant 或格式錯誤 → 不加任何 scope（fail closed）。
+- Scope 對照（`services/identity/src/scopes.ts`）：`cafe`／`simulator` → `brewline/catalog.read`、`brewline/orders.read`、`brewline/orders.write`（訂單 scope 於 A2a 加入）；`staff` → `brewline/catalog.read`、`brewline/admin`、`brewline/roastery`（S2a；**沒有訂單 scope**：staff 不屬於任何租戶）；`simulator-roastery` → `brewline/catalog.read`、`brewline/roastery`＋`synthetic`（S2a，§10.17）。操作員群組（staff、simulator-roastery）與租戶群組同時存在、操作員群組超過一個、缺 tenant 或格式錯誤 → 不加任何 scope（fail closed）。
 - **模擬器（S1a，ADR-030 D2／D6）**：pre token 觸發器在冷啟動時從 SSM 讀 `simulator-client-id`（用環境變數會造成 pool → 觸發器 → client → pool 的循環依賴），讀取失敗即登入失敗（fail closed，不快取失敗）。經由 `simulator` client 登入時，**只有 `simulator` 群組**拿得到 scope（其他 → `client-not-allowed`，無 scope）。`simulator` 群組的 access token 另有 `synthetic: "true"` claim（不論經由哪個 client）。觸發器角色只有該參數的 `ssm:GetParameter`。
 - cdk-nag 例外：`AwsSolutions-COG2`（MFA 只能整個 pool 設定）、`AwsSolutions-COG8`（Plus 無免費額度）、`AwsSolutions-IAM5[Resource::*]`（X-Ray）。
 - 費用：約 0（10,000 MAU 免費額度以 organization 計）。
@@ -788,7 +789,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 政策模擬（執行角色）：正向 `AdminInitiateAuth`、讀密碼參數 = `allowed`；反向 `AdminCreateUser`、`AdminSetUserPassword`、寫 `state`、讀其他參數、DynamoDB `PutItem` = `implicitDeny`。
 - **Dev 手動開關測試**（Admin）：`paused` → `{"outcome":"paused"}`；`running` → `probe_ok`（`status 200`、`products 8`、`synthetic true`）；`RUNNING`（不認得的值）→ `paused`；`paused`＋`{"probe": true}` → `probe_ok`；最後恢復 `paused`。
 - **S1d：Prod 開啟（2026-11-18 16:00，Prod Admin）**：dry run 今天 29 筆（08–19 時 `[4,3,4,3,1,2,3,7,2,0,0,0]`）；反向：`paused` 時手動執行 → `paused`；`state` 改 `running` 後 `probe_ok`（200、8 個商品、`synthetic`）。**刻意不手動下單**，由 16:05 排程觸發第一批：`hour 16`、`planned 2`、`created 2`、沒有 violation；事件 2 筆 `OrderCreated CREATED synthetic=true`；DLQ 0。開啟前的時段（08–15 時）不補跑（下一輪生效，SIM-N-001）。Prod 逾時 48 小時，模擬訂單停在 `CREATED` 直到自動取消（S1 D5；S2d 後由模擬烘焙廠推進）；模擬帳號是 `example.com`，不寄信。
-- **Prod 手動探測**（Admin，`state = paused`）：`{"probe": true}` → `probe_ok`（`status 200`、`products 8`、`synthetic true`）；`{"source":"manual"}` → `paused`。Prod 的模擬器**尚未開啟**。
+- **Prod 手動探測**（Admin，`state = paused`）：`{"probe": true}` → `probe_ok`（`status 200`、`products 8`、`synthetic true`）；`{"source":"manual"}` → `paused`（S1d 開啟前）。
 - 一個 `probe_ok` 同時驗證：SSM 讀密碼（CMK、`kms:EncryptionContext:PARAMETER_ARN`）→ simulator client 登入 → token 的 `synthetic` claim（S1a）→ authorizer audience → 目錄 API。
 
 已驗證 S1c（2026-11-17，PR #60；之後 #61、#48、#55 部署後重驗：Dev 406 項 ✅、smoke 92/92，Prod 403 項 ✅）：
@@ -825,6 +826,20 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 
 教訓 / Lessons：
 - （2026-11-18）**第一次部署被 Dev smoke test 擋下並 rollback（Prod 未部署）**：種子寫入的 `LOT#…/META` 帶 `updated_at`，但讀取用的 `LotItemSchema` 由 strict 的 `SeedLotSchema.extend()` 而來 → 每個批次都 parse 失敗、被當成不存在 → 所有 `POST /admin/roasts` 回 409 `lot_not_found`，後續 ROASTED／SHIPPED 檢查連鎖失敗。單元測試的假資料沒有 `updated_at`，所以沒抓到。修正：讀取 schema 不用 strict（種子檔維持 strict 擋打錯的欄位），並加回歸測試「`getLot` 讀得到 `seedLots()` 實際寫入的項目」（還原舊 schema 時此測試失敗）。原則：**寫入端與讀取端的測試要用同一份資料**，不要各自手寫假資料。
+
+### 10.18 溯源 S2b：us-east-1 edge stack / Traceability S2b（P1，2026-11-18，ADR-031 D3／D4）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| Stack | `brewline-dev-edge`（**us-east-1**，module `traceability`） | `brewline-prod-edge`（**終止保護**） |
+| ACM 憑證 | `trace.dev.brewline-demo.click`：DNS 驗證，記錄寫入 Dev zone `Z00697733VLK1TK9WUYKL`（原生 CloudFormation，沒有 Lambda） | `trace.brewline-demo.click`：Prod zone `Z039360620HRFCTYO5R5J` |
+| WAF web ACL | `brewline-dev-trace`（scope `CLOUDFRONT`，預設 Allow）：① `RateLimitPerIp` 每 IP 每 5 分鐘 300 次 → Block；② `AWSManagedRulesAmazonIpReputationList`；③ `AWSManagedRulesCommonRuleSet`；3 條（Free 方案上限 5）、全部生效、CloudWatch 指標 | `brewline-prod-trace` |
+| SSM（us-east-1，參考用） | `/brewline/dev/edge/{trace-certificate-arn,trace-web-acl-arn}` | `/brewline/prod/edge/...` |
+
+- **兩階段**（與 ADR-029 E2 相同）：部署後把輸出 `TraceCertificateArn`、`TraceWebAclArn` 填進 `lib/config.ts` 的 `trace.edge`，S2c 的台北 `trace` stack 才會建立 distribution。不用 `crossRegionReferences`（會多兩個 custom resource Lambda、兩個 stack 強耦合）。
+- **Free 方案的條件**（2026-11-18 查證）：一個訂閱＝剛好 1 個 distribution＋1 個 web ACL（可選加 Route 53 hosted zone）；distribution 本身必須先設定 `WebACLId`；最多 5 條 WAF 規則；沒有存取日誌、沒有自訂快取／回應標頭政策（用 managed 政策＋S3 `Cache-Control`）；方案涵蓋 web ACL、規則、請求費。
+- **費用**：S2c 訂閱之前，web ACL 是 pay-as-you-go（每月 USD 5＋每條規則 USD 1，按時間比例；2 個環境約 USD 0.5／天）→ **S2c 要緊接著做**；訂閱後 0 元。ACM 公開憑證免費。
+- 將來可評估：把 hosted zone 加入方案（Free 上限 50 筆記錄），由方案負擔 zone 費用（目前 2 個 zone 約 USD 12／年）。
 
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
@@ -946,7 +961,6 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-16 | 網域 `brewline-demo.click` 註冊完成（ACTIVE、隱私保護、自動續約）；A4d 訂單通知信（§10.14，PR #41–#43）部署 Dev、Prod；Dev 端到端 4 封信＋逾時 4/4 |
 | ✅ 2026-11-18 | 網域聯絡人驗證：`get-contact-reachability-status` = `DONE`（Prod Admin，us-east-1） |
 | ✅ 2026-11-16 | A4e 定期補貨（§10.15，PR #46、#47）部署 Dev、Prod；Dev smoke 78/78、`replenish-check` 10/10；**訂貨模組 A1–A4 完成** |
-| P1 | 下一步：模擬器（docs/07）→ 溯源（docs/04） |
 | ✅ 2026-11-17 | 模擬器決策 D1–D9 定案（docs/07 對照，見 ADR-030）；S0（RSK-017）bus 資源政策部署 Dev、Prod 並驗證，含真實憑證反向測試（§10.10，PR #52） |
 | ✅ 2026-11-17 | 模擬器 S1a（simulator client、`synthetic`）、S1b（stack、帳號 40、開關 `paused`、排程、探測）部署 Dev、Prod 並驗證，含 Dev 開關測試與 Prod 探測（§10.16，PR #54／#56／#57／#58） |
 | ✅ 2026-11-17 | 模擬器 S1c 產生器（§10.16，PR #60）部署 Dev、Prod；Dev 驗證 dry-run 雜湊與本機相同、手動一小時（建立／重播／事件 `synthetic`）、逾時取消帶 `synthetic`、排程 18 時下單、19 時 0 筆；Dev 留在 `running` |
@@ -954,7 +968,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-18 | 模擬器 Dev 觀察期：11/17 17–19 時與 11/18 10、11、14 時全部照計畫（共 5 筆 created、0 violation、DLQ 0、無告警） |
 | ✅ 2026-11-18 | minimatch 警示（PR #63）部署 Dev、Prod：Lambda 程式不變（只有每次部署的 custom resource 更新） |
 | ✅ 2026-11-18 | 模擬器 S1d：Prod `state` 改 `running`，16:05 排程自動下第一批 2 筆模擬訂單（§10.16）；**模擬器 S1 完成** |
-| P1 | 溯源 S2b（us-east-1 edge stack）→ S2c（公開頁）→ S2d（模擬烘焙廠） |
+| P1 | 溯源 S2b（§10.18）：部署 Dev、Prod（us-east-1）並驗證 → 把 ARN 填進 config `trace.edge` → **S2c 緊接著做**（web ACL 訂閱前按時計費）→ S2d（模擬烘焙廠） |
 | ✅ 2026-11-18 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`），Developer 可在 Dev 切換模擬器開關（§3） |
 | ✅ 2026-11-18 | Dependabot 安全警示 2 筆（`minimatch` < 11.0.1，Moderate，只在測試／synth 工具鏈）：PR #63 以 npm `overrides` 升到 11.0.9；`aws-cdk-lib` 內部打包（bundleDependencies）的一份要等新版 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |

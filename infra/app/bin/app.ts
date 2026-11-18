@@ -5,10 +5,11 @@ import { applyStandardTags, RequiredTagsChecker } from '../lib/aspects/required-
 import { ApiGuardrailsChecker } from '../lib/aspects/api-guardrails';
 import { DataProtectionChecker } from '../lib/aspects/data-protection';
 import { LambdaGuardrailsChecker } from '../lib/aspects/lambda-guardrails';
-import { resolveEnv } from '../lib/config';
+import { EDGE_REGION, resolveEnv } from '../lib/config';
 import { ApiStack } from '../lib/stacks/api-stack';
 import { AuthStack } from '../lib/stacks/auth-stack';
 import { DataStack } from '../lib/stacks/data-stack';
+import { EdgeStack } from '../lib/stacks/edge-stack';
 import { EventsStack } from '../lib/stacks/events-stack';
 import { NotifyStack } from '../lib/stacks/notify-stack';
 import { SimulatorStack } from '../lib/stacks/simulator-stack';
@@ -147,3 +148,15 @@ ApiGuardrailsChecker.attach(app);
 // cdk-nag v3 runs as a native CDK policy-validation plugin; violations fail synth and block the PR.
 // 刻意例外請用 Validations.of(construct).acknowledge({ id, reason })，並在 PR 說明原因。
 Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));
+
+// 溯源公開頁的 us-east-1 資源（S2b，ADR-031 D4）：ACM 憑證＋CLOUDFRONT web ACL。
+// 不依賴其他 stack；ARN 由 config `trace.edge` 交給 S2c 的台北 stack（兩階段）。
+// us-east-1 resources for the public trace page; ARNs reach the Taipei stack through config (two phases).
+const edgeStack = new EdgeStack(app, `brewline-${env.name}-edge`, {
+  envName: env.name,
+  trace: env.trace,
+  env: { account: env.account, region: EDGE_REGION },
+  description: 'BrewLine edge (us-east-1): ACM certificate and CloudFront web ACL for the public trace page',
+  terminationProtection: env.name === 'prod',
+});
+Tags.of(edgeStack).add('module', 'traceability', { priority: 200 });
