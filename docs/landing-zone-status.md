@@ -857,7 +857,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | CloudFront | 別名 `trace.<網域>`、edge stack 的 us-east-1 憑證（TLSv1.2_2021、SNI）與 web ACL、OAC、HTTPS 轉址、只有 GET／HEAD、managed `CachingOptimized`（遵守原點 `Cache-Control: max-age=300`）＋ managed `SecurityHeadersPolicy`、HTTP/2＋3、IPv6；403／404 → 一律 404 `/404.html`（快取 60 秒）；沒有存取日誌（Free 方案不支援） | 同左 |
 | Free 方案 | `AWS::PricingPlanManager::Subscription`：`CloudFront`／`FREE`／`DEFAULT`，ResourceArns＝distribution＋web ACL | 同左 |
 | DNS | A／AAAA alias → distribution（Dev zone） | Prod zone |
-| 投影函數 | `brewline-<env>-traceability-trace-projector`：規則 `brewline-<env>-trace-project`（`source=brewline.traceability`，`RoastBatchRoasted`／`RoastBatchRecalled`）→ 強一致讀 `ROAST#`／`LOT#`／`PRODUCT#` 的 `META`（只有 `GetItem`、`LeadingKeys` 限定、明確 Deny Scan）→ `PutObject v1/<qr_token>.json`（只能寫 `v1/*`）；DLQ＋告警（DLQ、Errors） | 同左 |
+| 投影函數 | `brewline-<env>-traceability-trace-projector`：規則 `brewline-<env>-trace-project`（`source=brewline.traceability`，`RoastBatchRoasted`／`RoastBatchRecalled`）→ 強一致讀 `ROAST#`／`LOT#`／`PRODUCT#` 的 `META`（只有 `GetItem`、`LeadingKeys` 限定、明確 Deny Scan）→ `PutObject v1/<qr_token>.json`（只能寫 `v1/*`）；DLQ＋DLQ 告警（不另設 Errors 告警：免費額度 10 個，見教訓） | 同左 |
 | 靜態頁 | custom resource `Custom::BrewlineTraceSite`（函數 `…-traceability-site-publisher`，只能寫 5 個固定檔名）：`index.html`、`app.js`、`app.css`、`404.html`、`robots.txt`（`Disallow: /`） | 同左 |
 | 事件（events stack） | stream publisher 的過濾多一條 `entity = RoastBatch`（MODIFY）；`ROASTED` → `RoastBatchRoasted`，第一次召回 → `RoastBatchRecalled`；detail 只有 `roast_id`、`product_id`、`lot_id`（＋`synthetic`），**不含 QR token** | 同左 |
 
@@ -867,6 +867,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 冪等：重投影只是覆寫同一個物件。批次已被 Dev smoke test 清掉 → 略過（不重試）；生豆批次或商品找不到 → 丟錯 → 重試 → DLQ 告警。
 - 召回後最多 5 分鐘（快取）公開頁才顯示提醒（ADR-031 D3 已接受）。
 - 費用：Free 方案 0 元（涵蓋 CloudFront、web ACL 與規則、請求）；S3 幾 KB；Lambda 每批次 1 次呼叫。訂閱後 S2b 的 web ACL 不再按時計費。
+- 教訓（2026-11-19）：**第一次 Dev 部署成功，但 `verify-ops-stack.sh` 擋下：Dev 告警 11 個（免費額度 10，ADR-030 D9）**，Prod 被跳過。原本投影函數有 DLQ 與 Errors 兩個告警；失敗重試後一定進 DLQ，Errors 告警是重複的 → 移除。Dev 現在剛好 10 個：**之後新增告警前要先合併或移除既有的**（status §13）。
 - 驗證：`scripts/verify-trace-stack.sh`（CI，lookup role 唯讀）＝ distribution 設定、Free 方案層級、憑證使用中、bucket 私有，以及**從網際網路實測**：`/` 200＋安全標頭＋`Cache-Control`；反向：3 個亂數 token 都 404 且內容相同、未知路徑 404、POST 403、HTTP → 301、直連 S3 403、TLS 1.1 被拒；若 bucket 已有投影，檢查欄位剛好是白名單。
 
 ## 11. 新增與修訂的決策 / New & Revised ADRs
@@ -997,6 +998,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-18 | minimatch 警示（PR #63）部署 Dev、Prod：Lambda 程式不變（只有每次部署的 custom resource 更新） |
 | ✅ 2026-11-18 | 模擬器 S1d：Prod `state` 改 `running`，16:05 排程自動下第一批 2 筆模擬訂單（§10.16）；**模擬器 S1 完成** |
 | P1 | 溯源 S2c（§10.19）：部署 Dev、Prod 並驗證（Free 方案訂閱成功後 web ACL 不再計費）→ S2d（模擬烘焙廠，產生真正的公開頁） |
+| P1 | **告警已達免費額度 10 個（Dev）**：S2d 或之後要新增告警前，先合併既有告警（例如複合告警或共用 DLQ 告警）|
 | ✅ 2026-11-18 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`），Developer 可在 Dev 切換模擬器開關（§3） |
 | ✅ 2026-11-18 | Dependabot 安全警示 2 筆（`minimatch` < 11.0.1，Moderate，只在測試／synth 工具鏈）：PR #63 以 npm `overrides` 升到 11.0.9；`aws-cdk-lib` 內部打包（bundleDependencies）的一份要等新版 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |
