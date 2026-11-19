@@ -124,10 +124,10 @@ describe.each(['dev', 'prod'] as const)('TraceStack (%s)', (envName) => {
     t.hasResourceProperties('Custom::BrewlineTraceSite', { Files: Match.arrayWith([Match.objectLike({ Key: 'index.html' })]) });
   });
 
-  test('alarms on the projector DLQ and errors; outputs; no synth errors', () => {
-    for (const a of ['trace-projector-dlq-not-empty', 'trace-projector-errors']) {
-      t.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: `brewline-${envName}-${a}` });
-    }
+  test('one alarm (projector DLQ); outputs; no synth errors', () => {
+    t.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: `brewline-${envName}-trace-projector-dlq-not-empty` });
+    // 免費額度 10 個告警（ADR-030 D9）：這個 stack 只用 1 個 / One alarm only (10 free per account).
+    t.resourceCountIs('AWS::CloudWatch::Alarm', 1);
     for (const o of ['TraceUrl', 'DistributionId', 'BucketName', 'FreePlanSubscriptionArn', 'ProjectorFunctionName']) expect(t.findOutputs(o)).not.toEqual({});
     expect(Annotations.fromStack(stack).findError('*', Match.anyValue())).toEqual([]);
   });

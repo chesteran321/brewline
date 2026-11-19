@@ -248,15 +248,8 @@ export class TraceStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    new cloudwatch.Alarm(this, 'ProjectorErrorsAlarm', {
-      alarmName: `brewline-${envName}-trace-projector-errors`,
-      alarmDescription: 'Trace projector errors (retries follow; the DLQ alarm fires if they all fail).',
-      metric: projector.function.metricErrors({ period: Duration.minutes(5), statistic: 'Sum' }),
-      threshold: 1,
-      evaluationPeriods: 1,
-      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-    });
+    // 不另設 Errors 告警：免費額度只有 10 個告警（ADR-030 D9），失敗重試後一定會進 DLQ → 一個 DLQ 告警就涵蓋。
+    // No separate Errors alarm: only 10 alarms are free, and every failure ends in the DLQ after retries.
     notifyAlarms(this, envName);
 
     // --- 8) 參數與輸出 / Parameters and outputs ---
