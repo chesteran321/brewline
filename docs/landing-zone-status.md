@@ -889,6 +889,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 手動 | `{"roastery": "confirm\|schedule\|restock\|roast\|ship\|complete"}`：不看時段、不論開關，只執行該步驟（Admin 呼叫；未知步驟 → 丟錯、不登入） | 同左 |
 
 - **方案 A 的理由**（2026-11-19 討論）：模擬咖啡廳與模擬烘焙廠同屬「合成流量產生器」這個失敗領域，處理方式相同（看 log、暫停模擬器），所以共用一個函數與告警。**不採用**共用 DLQ（方案 B）：告警是「狀態」，一個 DLQ 告警在 ALARM 時，其他來源的新失敗不會再通知；訊息格式不同、權限變寬。之後若真的需要第 11 個告警，選擇付費（每個 USD 0.10／月，修訂 ADR-030 D9），不合併 DLQ。
+- 教訓（2026-11-19）：第一次 Dev 部署成功（帳號 custom resource 有執行），但驗證 1 項 ❌：`Roaster account in simulator-roastery = 0`。user pool 以 **email 當登入別名**（`UsernameAttributes`），Cognito 的 `Username` 是 UUID，不是 email；我用 email 比對 `Username` → 找不到。更糟的是「不在 staff／不在咖啡廳群組」兩項也是拿 email 比 UUID，**因為錯的原因而通過**。修正：先用 `email` 屬性找到帳號，再用它的 `Username` 比對各群組。原則：**反向檢查也要確認它真的有能力失敗**。
 - 只走公開 API（ADR-011）；伺服器端 synthetic 保護（S2a）保證烘焙廠只看得到、改得到模擬訂單與模擬批次。
 - 費用：每天約多 50–150 次 API 呼叫與幾次 Lambda 執行，約 0。
 

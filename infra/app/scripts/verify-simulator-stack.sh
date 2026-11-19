@@ -42,14 +42,18 @@ check "Simulator group members" "$(jq 'length' <<<"$members")" "$want_pool"
 staff=$(aws cognito-idp list-users-in-group --user-pool-id "$pool_id" --group-name staff --region "$region" \
   --query 'Users[].Username' --output json --max-items 100)
 check "Simulated accounts in staff" "$(jq -n --argjson a "$members" --argjson b "$staff" '[$a[] | select(. as $x | $b | index($x))] | length')" "0"
-# S2d：模擬烘焙廠在 simulator-roastery 群組、沒有租戶、不在 staff、不在 simulator 群組
-# The simulated roastery: in simulator-roastery, no tenant, not staff, not a café.
+# S2d：模擬烘焙廠在 simulator-roastery 群組、沒有租戶、不在 staff、不在 simulator 群組。
+# 這個 user pool 以 email 當登入別名 → Cognito 的 Username 是 UUID，要用 email 屬性找人，再用 Username 比對群組。
+# The pool signs in with an email alias, so Username is a UUID: find the roaster by its email attribute,
+# then compare Usernames across groups.
 roasters=$(aws cognito-idp list-users-in-group --user-pool-id "$pool_id" --group-name simulator-roastery --region "$region" \
   --output json --max-items 100)
-check "Roaster account in simulator-roastery" "$(jq '[.Users[] | select(.Username == "sim-roaster@example.com")] | length' <<<"$roasters")" "1"
-check "Roaster has no tenant_id" "$(jq '[.Users[] | select(.Username == "sim-roaster@example.com") | .Attributes[]? | select(.Name == "custom:tenant_id")] | length' <<<"$roasters")" "0"
-check "Roaster in staff" "$(jq -n --argjson b "$staff" '$b | index("sim-roaster@example.com") != null')" "false"
-check "Roaster in simulator (cafe) group" "$(jq -n --argjson a "$members" '$a | index("sim-roaster@example.com") != null')" "false"
+roaster=$(jq -c '[.Users[] | select(any(.Attributes[]?; .Name == "email" and .Value == "sim-roaster@example.com"))]' <<<"$roasters")
+roaster_name=$(jq -r '.[0].Username // ""' <<<"$roaster")
+check "Roaster account in simulator-roastery" "$(jq 'length' <<<"$roaster")" "1"
+check "Roaster has no tenant_id" "$(jq '[.[0].Attributes[]? | select(.Name == "custom:tenant_id")] | length' <<<"$roaster")" "0"
+check "Roaster in staff" "$(jq -n --argjson b "$staff" --arg u "$roaster_name" '$u != "" and ($b | index($u) != null)')" "false"
+check "Roaster in simulator (cafe) group" "$(jq -n --argjson a "$members" --arg u "$roaster_name" '$u != "" and ($a | index($u) != null)')" "false"
 
 # --- SSM：開關、設定、密碼（D7、D2）/ Switch, config, credentials ---
 state=$(aws ssm get-parameter --name "${prefix}/state" --region "$region" --query Parameter.Value --output text 2>/dev/null || echo missing)
