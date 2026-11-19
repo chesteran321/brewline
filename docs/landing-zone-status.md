@@ -868,7 +868,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 召回後最多 5 分鐘（快取）公開頁才顯示提醒（ADR-031 D3 已接受）。
 - 費用：Free 方案 0 元（涵蓋 CloudFront、web ACL 與規則、請求）；S3 幾 KB；Lambda 每批次 1 次呼叫。訂閱後 S2b 的 web ACL 不再按時計費。
 - 教訓（2026-11-19）：**第一次 Dev 部署成功，但 `verify-ops-stack.sh` 擋下：Dev 告警 11 個（免費額度 10，ADR-030 D9）**，Prod 被跳過。原本投影函數有 DLQ 與 Errors 兩個告警；失敗重試後一定進 DLQ，Errors 告警是重複的 → 移除。Dev 現在剛好 10 個：**之後新增告警前要先合併或移除既有的**（status §13）。
-- 驗證：`scripts/verify-trace-stack.sh`（CI，lookup role 唯讀）＝ distribution 設定、Free 方案層級、憑證使用中、bucket 私有，以及**從網際網路實測**：`/` 200＋安全標頭＋`Cache-Control`；反向：3 個亂數 token 都 404 且內容相同、未知路徑 404、POST 403、HTTP → 301、直連 S3 403、TLS 1.1 被拒；若 bucket 已有投影，檢查欄位剛好是白名單。
+- 教訓（2026-11-19）：第二次 Dev 部署 **trace 驗證 39 項中 38 ✅、1 ❌**：`POST rejected = 404 (expected 403)`。CloudFront 對只允許 GET／HEAD 的行為回 403，但我們設定的「403 → 404」錯誤回應同樣套用在它上面 → 回 404。這是期望的行為（所有拒絕都長得一樣），是驗證的預期值寫錯；改成檢查 404 且內容與亂數 token 相同。
+- 驗證：`scripts/verify-trace-stack.sh`（CI，lookup role 唯讀）＝ distribution 設定、Free 方案層級、憑證使用中、bucket 私有，以及**從網際網路實測**：`/` 200＋安全標頭＋`Cache-Control`；反向：3 個亂數 token 都 404 且內容相同、未知路徑 404、POST 也是同一個 404（CloudFront 的 403 經自訂錯誤回應統一）、HTTP → 301、直連 S3 403、TLS 1.1 被拒；若 bucket 已有投影，檢查欄位剛好是白名單。
 
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 

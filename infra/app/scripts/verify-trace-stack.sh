@@ -83,7 +83,10 @@ for i in 1 2 3; do
 done
 check "Unknown tokens return identical bodies" "$(tr ' ' '\n' <<<"$bodies" | grep . | sort -u | wc -l | tr -d ' ')" "1"
 check "Unknown path → 404" "$(code "$base/admin")" "404"
-check "POST rejected" "$(code -X POST "$base/")" "403"
+# CloudFront 對不允許的方法回 403，再經自訂錯誤回應統一成 404 → 與不存在的 token 無法分辨（正是要的）
+# CloudFront answers disallowed methods with 403, which the custom error response turns into the same 404.
+check "POST rejected (403 → uniform 404)" "$(code -X POST "$base/")" "404"
+check "POST body is the uniform 404 page" "$(curl -s -X POST --max-time 15 "$base/" | sha256sum | cut -c1-16)" "$(tr ' ' '\n' <<<"$bodies" | grep . | head -1)"
 check "HTTP → HTTPS redirect" "$(code "http://${want_domain}/")" "301"
 check "Direct S3 access denied" "$(code "https://${bucket}.s3.${region}.amazonaws.com/index.html")" "403"
 tls11=$(curl -s -o /dev/null --max-time 15 --tlsv1.1 --tls-max 1.1 "$base/" && echo accepted || echo rejected)
