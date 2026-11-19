@@ -142,9 +142,11 @@ export class SimulatorStack extends Stack {
       module: 'simulator',
       name: 'run',
       entry: 'simulator/src/run.ts',
-      description: 'Scheduled simulator: kill switch (SSM state); orders through the public API as simulated cafes',
+      description: 'Scheduled simulator: kill switch (SSM state); simulated cafes order and a simulated roastery advances orders via the public API',
       reservedConcurrency: props.lambda.reservedConcurrency.simulator,
-      timeout: Duration.minutes(2),
+      // S2d：16 時排烘／09 時烘焙在 Prod 約 50–90 個 admin 請求（每 300 ms 一個）＋咖啡廳下單（每秒一個）→ 5 分鐘
+      // S2d: the 16:00 schedule and 09:00 roast steps make ~50–90 admin calls in Prod on top of café orders.
+      timeout: Duration.minutes(5),
       environment: {
         POWERTOOLS_SERVICE_NAME: 'simulator-run',
         STATE_PARAM: names.state,

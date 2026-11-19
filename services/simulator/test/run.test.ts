@@ -4,7 +4,7 @@ import { mockClient } from 'aws-sdk-client-mock';
 import { SimulatorConfig } from '../src/config';
 import { HOURS, planDay, planHour } from '../src/generator';
 import { PACE_MS, SEED_PRODUCT_IDS, handler, setDepsForTesting } from '../src/run';
-import { simUsers } from '../src/tenants';
+import { ROASTER_USERNAME, simUsers } from '../src/tenants';
 
 const cog = mockClient(CognitoIdentityProviderClient);
 const ssm = mockClient(SSMClient);
@@ -18,7 +18,7 @@ const ENV = {
   SIMULATOR_CLIENT_ID: 'sim-client', API_ENDPOINT: 'https://api.example.com',
 };
 const jwt = (claims: object) => `h.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.s`;
-const creds = Object.fromEntries(simUsers('x', 40).map((u) => [u.username, `Pw-${u.index}-123456!`]));
+const creds = { ...Object.fromEntries(simUsers('x', 40).map((u) => [u.username, `Pw-${u.index}-123456!`])), [ROASTER_USERNAME]: 'Pw-roaster-123456!' };
 
 // 找一個「10 點有很多單、有重複下單」的日期 / Pick a date whose 10:00 hour has orders, including a duplicate.
 const DATE = (() => {
@@ -35,6 +35,7 @@ const NOW = new Date(`${DATE}T02:05:00Z`); // 10:05 台北 / Taipei
 interface Req { method: string; path: string; key?: string; token: string; body?: any }
 let reqs: Req[];
 let orderResponder: (req: Req, nth: number) => { status: number; body?: object };
+let adminResponder: (req: Req) => { status: number; body?: object };
 let catalogStatus: Record<string, string>;
 let sleeps: number[];
 
@@ -46,13 +47,17 @@ setDepsForTesting({
   fetch: (async (url: URL, init: RequestInit) => {
     const headers = init.headers as Record<string, string>;
     const req: Req = {
-      method: init.method ?? 'GET', path: url.pathname, key: headers['idempotency-key'],
+      method: init.method ?? 'GET', path: url.pathname + url.search, key: headers['idempotency-key'],
       token: headers.authorization!.replace('Bearer ', ''), body: init.body ? JSON.parse(String(init.body)) : undefined,
     };
     reqs.push(req);
     if (req.path === '/products') {
       const items = SEED_PRODUCT_IDS.map((id) => ({ id, stock_status: catalogStatus[id] ?? 'in_stock' }));
       return new Response(JSON.stringify({ items }), { status: 200 });
+    }
+    if (req.path.startsWith('/admin/')) {
+      const r = adminResponder(req);
+      return new Response(JSON.stringify(r.body ?? {}), { status: r.status });
     }
     const nth = reqs.filter((r) => r.key === req.key).length;
     const r = orderResponder(req, nth);
@@ -68,6 +73,7 @@ beforeEach(() => {
   sleeps = [];
   catalogStatus = {};
   orderResponder = (req, nth) => ({ status: nth === 1 ? 201 : 200, body: { order_id: `o_${req.key}` } });
+  adminResponder = () => ({ status: 200, body: { items: [] } });
   ssm.on(GetParameterCommand, { Name: '/c' }).resolves({ Parameter: { Value: JSON.stringify(CONFIG) } });
   ssm.on(GetParameterCommand, { Name: '/p' }).resolves({ Parameter: { Value: JSON.stringify(creds) } });
   cog.on(AdminInitiateAuthCommand).callsFake((input) => ({
@@ -125,8 +131,8 @@ test('duplicate injection: resent with the same key, 200 + same order id counts 
 test('pacing: ≤ 1 request per second between API calls (SIM-N-002)', async () => {
   state('running');
   await handler({});
-  expect(sleeps.length).toBe(orderReqs().length - 1);
-  expect(sleeps.every((ms) => ms >= PACE_MS)).toBe(true);
+  // 咖啡廳的請求間隔 1 秒；烘焙廠另有自己的間隔（admin 路由）/ Café pacing; the roastery paces its own calls.
+  expect(sleeps.filter((ms) => ms >= PACE_MS).length).toBe(orderReqs().length - 1);
 });
 
 test('each café signs in once per run', async () => {
@@ -214,4 +220,54 @@ test('negative: invalid config → throws before signing in', async () => {
   ssm.on(GetParameterCommand, { Name: '/c' }).resolves({ Parameter: { Value: JSON.stringify({ ...CONFIG, extra: 1 }) } });
   await expect(handler({})).rejects.toThrow();
   expect(cog.commandCalls(AdminInitiateAuthCommand)).toHaveLength(0);
+});
+
+// --- 模擬烘焙廠（S2d）/ Simulated roastery ---
+const syntheticOrder = (id: string, status: string) => ({
+  order_id: id, tenant_id: 't_01AAAAAAAAAAAAAAAAAAAAAAAA', status, synthetic: true, status_history: [],
+  allocations: [{ product_id: 'p-0001', qty_kg: 3, allocated_kg: 0, roast_ids: [] }],
+});
+const adminReqs = () => reqs.filter((r) => r.path.startsWith('/admin/'));
+
+test('roastery runs after the cafés in the same run, as the roaster (confirm every hour)', async () => {
+  state('running');
+  const out = (await handler({})) as any;
+  // 10:05：每小時的確認＋10 時的完成 / 10:05: hourly confirm plus the 10:00 completion step.
+  expect(out.roastery.map((r: any) => r.step)).toEqual(['confirm', 'complete']);
+  const firstAdmin = reqs.findIndex((r) => r.path.startsWith('/admin/'));
+  const lastOrder = reqs.map((r) => r.path).lastIndexOf('/orders');
+  expect(firstAdmin).toBeGreaterThan(lastOrder);
+  expect(new Set(adminReqs().map((r) => userOf(r.token)))).toEqual(new Set([ROASTER_USERNAME]));
+});
+
+test('roastery step failure → run throws after the cafés ordered (roastery count in the message)', async () => {
+  state('running');
+  adminResponder = (req) => (req.method === 'GET' ? { status: 200, body: { items: [syntheticOrder('o_X', 'CREATED')] } } : { status: 500 });
+  await expect(handler({})).rejects.toThrow(/cafe 0, roastery [1-9]/);
+  expect(orderReqs().length).toBeGreaterThan(0); // 咖啡廳照常下單 / cafés still ordered
+});
+
+test('manual roastery step while paused: runs only that step, places no café orders', async () => {
+  state('paused');
+  const out = (await handler({ roastery: 'ship' })) as any;
+  expect(out).toMatchObject({ outcome: 'roastery', roastery: [{ step: 'ship', violations: [] }] });
+  expect(orderReqs()).toHaveLength(0);
+  expect(adminReqs().map((r) => r.path)).toEqual(['/admin/orders?status=ROASTED&limit=50']);
+  const tokens = new Set(adminReqs().map((r) => userOf(r.token)));
+  expect([...tokens]).toEqual([ROASTER_USERNAME]);
+});
+
+test('negative: unknown manual roastery step → throws before signing in', async () => {
+  state('running');
+  await expect(handler({ roastery: 'burn-it-all' })).rejects.toThrow('unknown roastery step');
+  expect(cog.commandCalls(AdminInitiateAuthCommand)).toHaveLength(0);
+});
+
+test('negative: roaster token without synthetic claim → roastery violation, cafés unaffected', async () => {
+  state('running');
+  cog.on(AdminInitiateAuthCommand).callsFake((input) => ({
+    AuthenticationResult: { AccessToken: jwt(input.AuthParameters.USERNAME === ROASTER_USERNAME ? { username: ROASTER_USERNAME } : { synthetic: 'true', username: input.AuthParameters.USERNAME }) },
+  }));
+  await expect(handler({})).rejects.toThrow(/roastery 1/);
+  expect(adminReqs()).toHaveLength(0);
 });

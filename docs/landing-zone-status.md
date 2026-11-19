@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1（Dev／Prod 皆 `running`）完成；溯源 S2a（批次、烘焙廠角色、追溯 API）、S2b（us-east-1 edge）、S2c（公開溯源頁，Free 方案）完成；下一步 S2d（模擬烘焙廠）** / P0 complete; P1 CI/CD, data foundation, ordering A1–A4 and simulator S1 complete; traceability S2a–S2c complete, next S2d（2026-11-19）
+> 狀態 Status：**P0 完成；P1 CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1（Dev／Prod 皆 `running`）完成；溯源 S2a（批次、烘焙廠角色、追溯 API）、S2b（us-east-1 edge）、S2c（公開溯源頁，Free 方案）完成，S2d（模擬烘焙廠）進行中** / P0 complete; P1 CI/CD, data foundation, ordering A1–A4 and simulator S1 complete; traceability S2a–S2c complete, S2d (simulated roastery) in progress（2026-11-19）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -877,6 +877,21 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 教訓（2026-11-19）：第二次 Dev 部署 **trace 驗證 39 項中 38 ✅、1 ❌**：`POST rejected = 404 (expected 403)`。CloudFront 對只允許 GET／HEAD 的行為回 403，但我們設定的「403 → 404」錯誤回應同樣套用在它上面 → 回 404。這是期望的行為（所有拒絕都長得一樣），是驗證的預期值寫錯；改成檢查 404 且內容與亂數 token 相同。
 - 驗證：`scripts/verify-trace-stack.sh`（CI，lookup role 唯讀）＝ distribution 設定、Free 方案層級、憑證使用中、bucket 私有，以及**從網際網路實測**：`/` 200＋安全標頭＋`Cache-Control`；反向：3 個亂數 token 都 404 且內容相同、未知路徑 404、POST 也是同一個 404（CloudFront 的 403 經自訂錯誤回應統一）、HTTP → 301、直連 S3 403、TLS 1.1 被拒；若 bucket 已有投影，檢查欄位剛好是白名單。
 
+### 10.20 溯源 S2d：模擬烘焙廠 / Traceability S2d（P1，2026-11-19，ADR-031 D8，方案 A）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| 帳號 | `sim-roaster@example.com`：群組 `simulator-roastery`、**沒有 tenant_id**、token 帶 `synthetic`；由既有的帳號 custom resource 建立，密碼存在同一個 SecureString（`AccountCount` 仍是咖啡廳數 40，另有 `Roasters` = 1） | 同左 |
+| 執行 | **同一個** `brewline-<env>-simulator-run`、同一個排程（08:05–19:05）、同一個開關；先跑咖啡廳下單，再跑烘焙廠（`services/simulator/src/roastery.ts`）；逾時 2 → **5 分鐘** | 同左 |
+| 節奏（台北） | 每小時 confirm：CREATED → CONFIRMED **90%**（依訂單 ID 雜湊；其餘 10% 交給逾時工作流取消）｜16 時 schedule：CONFIRMED → ROASTING_SCHEDULED＋依商品裝箱成烘焙批次（≤ 15 kg、≤ 15 張訂單、烘焙日期＝明天）；restock：低於門檻的商品補回初始量（`expected_version`，衝突重讀一次）｜09 時 roast：被引用的批次 → ROASTED（**產生 QR → 公開頁**）、全數分配的訂單 → ROASTED｜14 時 ship：→ SHIPPED｜10 時 complete：出貨滿 2 個台北日 → COMPLETED | 同左 |
+| 冪等 | 每一步「讀目前狀態 → 只做還沒做的」；批次 Idempotency-Key＝`simroast-` ＋ sha256（烘焙日期、商品、公斤、分配）→ 重跑得到 200；改狀態遇到 409 `invalid_transition`／批次 409 `invalid_state` 算「已完成」 | 同左 |
+| 錯誤 | 咖啡廳與烘焙廠的違規分開記錄（log `roastery[]`），烘焙廠出錯不擋下單；最後一起丟錯 → 既有的 `simulator-run-errors` 告警（**不新增告警**，仍是 10 個） | 同左 |
+| 手動 | `{"roastery": "confirm\|schedule\|restock\|roast\|ship\|complete"}`：不看時段、不論開關，只執行該步驟（Admin 呼叫；未知步驟 → 丟錯、不登入） | 同左 |
+
+- **方案 A 的理由**（2026-11-19 討論）：模擬咖啡廳與模擬烘焙廠同屬「合成流量產生器」這個失敗領域，處理方式相同（看 log、暫停模擬器），所以共用一個函數與告警。**不採用**共用 DLQ（方案 B）：告警是「狀態」，一個 DLQ 告警在 ALARM 時，其他來源的新失敗不會再通知；訊息格式不同、權限變寬。之後若真的需要第 11 個告警，選擇付費（每個 USD 0.10／月，修訂 ADR-030 D9），不合併 DLQ。
+- 只走公開 API（ADR-011）；伺服器端 synthetic 保護（S2a）保證烘焙廠只看得到、改得到模擬訂單與模擬批次。
+- 費用：每天約多 50–150 次 API 呼叫與幾次 Lambda 執行，約 0。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -1004,8 +1019,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-18 | 模擬器 Dev 觀察期：11/17 17–19 時與 11/18 10、11、14 時全部照計畫（共 5 筆 created、0 violation、DLQ 0、無告警） |
 | ✅ 2026-11-18 | minimatch 警示（PR #63）部署 Dev、Prod：Lambda 程式不變（只有每次部署的 custom resource 更新） |
 | ✅ 2026-11-18 | 模擬器 S1d：Prod `state` 改 `running`，16:05 排程自動下第一批 2 筆模擬訂單（§10.16）；**模擬器 S1 完成** |
-| P1 | 溯源 S2d（模擬烘焙廠，ADR-031 D8）：產生 Prod 的第一個公開頁 |
-| P1 | **告警已達免費額度 10 個（Dev、Prod）**：S2d 或之後要新增告警前，先合併既有告警（例如複合告警或共用 DLQ 告警）|
+| P1 | 溯源 S2d（§10.20）：部署 Dev、Prod → Dev 手動 `schedule`／`roast` 端到端看到公開頁 → Prod 16:05 排烘、隔天 09:05 產生**第一個公開頁** |
+| P1 | **告警已達免費額度 10 個（Dev、Prod）**：S2d 沒有新增；之後需要時付費（每個 USD 0.10／月）並修訂 ADR-030 D9，**不合併 DLQ**（§10.20） |
 | ✅ 2026-11-18 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`），Developer 可在 Dev 切換模擬器開關（§3） |
 | ✅ 2026-11-18 | Dependabot 安全警示 2 筆（`minimatch` < 11.0.1，Moderate，只在測試／synth 工具鏈）：PR #63 以 npm `overrides` 升到 11.0.9；`aws-cdk-lib` 內部打包（bundleDependencies）的一份要等新版 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |

@@ -11,7 +11,7 @@ import { DeleteParameterCommand, GetParameterCommand, PutParameterCommand, SSMCl
 import { Logger } from '@aws-lambda-powertools/logger';
 import type { CloudFormationCustomResourceEvent } from 'aws-lambda';
 import { Credentials, CredentialsSchema } from './config';
-import { SimUser, simUsers } from './tenants';
+import { ROASTER_GROUP, ROASTER_USERNAME, SimUser, simUsers } from './tenants';
 
 /**
  * 模擬咖啡廳帳號的 custom resource（ADR-030 D3）。只在部署時執行；執行中的模擬器沒有建立帳號的權限。
@@ -23,6 +23,7 @@ import { SimUser, simUsers } from './tenants';
  * - 已存在的帳號不重設密碼；只有新帳號或密碼參數裡缺少的帳號才設定
  * - `state` 參數只在不存在時建立為 `paused`（之後由人切換，部署不覆蓋）
  * - 帳號的 tenant_id 與種子不符 → 失敗（避免模擬器以錯的租戶下單）
+ * - S2d：另建模擬烘焙廠 `sim-roaster@example.com`（群組 `simulator-roastery`，**不能有** tenant_id）
  *
  * Accounts get random passwords stored in a CMK-encrypted SecureString (never logged or returned to CloudFormation).
  * Existing accounts keep their passwords; the state parameter is created once as "paused" and never overwritten.
@@ -94,7 +95,21 @@ async function existingTenant(poolId: string, username: string): Promise<string 
   }
 }
 
-async function createUser(poolId: string, u: SimUser): Promise<void> {
+/** 要建立的帳號：40 家咖啡廳（有租戶）＋ 1 個烘焙廠（tenantId 空字串＝沒有租戶）/ Cafés plus the roaster. */
+interface Account {
+  readonly username: string;
+  readonly tenantId: string;
+  readonly group: string;
+}
+
+export function accounts(seed: string, poolSize: number): Account[] {
+  return [
+    ...simUsers(seed, poolSize).map((u: SimUser) => ({ username: u.username, tenantId: u.tenantId, group: SIMULATOR_GROUP })),
+    { username: ROASTER_USERNAME, tenantId: '', group: ROASTER_GROUP },
+  ];
+}
+
+async function createUser(poolId: string, u: Account): Promise<void> {
   await cognito.send(
     new AdminCreateUserCommand({
       UserPoolId: poolId,
@@ -103,22 +118,24 @@ async function createUser(poolId: string, u: SimUser): Promise<void> {
       UserAttributes: [
         { Name: 'email', Value: u.username },
         { Name: 'email_verified', Value: 'true' },
-        { Name: 'custom:tenant_id', Value: u.tenantId },
+        ...(u.tenantId ? [{ Name: 'custom:tenant_id', Value: u.tenantId }] : []),
       ],
     }),
   );
-  await cognito.send(new AdminAddUserToGroupCommand({ UserPoolId: poolId, Username: u.username, GroupName: SIMULATOR_GROUP }));
+  await cognito.send(new AdminAddUserToGroupCommand({ UserPoolId: poolId, Username: u.username, GroupName: u.group }));
 }
 
 export interface ProvisionResult {
+  /** 咖啡廳帳號數（不含烘焙廠；CloudFormation 輸出 AccountCount）/ Café accounts, excluding the roaster. */
   readonly users: number;
+  readonly roasters: number;
   readonly created: number;
   readonly passwordsSet: number;
   readonly stateCreated: boolean;
 }
 
 export async function provision(p: ProvisionProps): Promise<ProvisionResult> {
-  const users = simUsers(p.seed, p.poolSize);
+  const users = accounts(p.seed, p.poolSize);
   const creds = await readCredentials(p.credentialsParam);
   const next: Credentials = {};
   let created = 0;
@@ -179,13 +196,14 @@ export async function provision(p: ProvisionProps): Promise<ProvisionResult> {
     if (!isName(err, 'ParameterAlreadyExists')) throw err;
   }
 
-  return { users: users.length, created, passwordsSet, stateCreated };
+  const roasters = users.filter((u) => u.group === ROASTER_GROUP).length;
+  return { users: users.length - roasters, roasters, created, passwordsSet, stateCreated };
 }
 
 export async function deprovision(p: ProvisionProps): Promise<number> {
   if (p.retainOnDelete) return 0;
   let deleted = 0;
-  for (const u of simUsers(p.seed, p.poolSize)) {
+  for (const u of accounts(p.seed, p.poolSize)) {
     try {
       await cognito.send(new AdminDeleteUserCommand({ UserPoolId: p.userPoolId, Username: u.username }));
       deleted++;
@@ -214,6 +232,6 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
   logger.info('simulator accounts provisioned', { ...r });
   return {
     PhysicalResourceId: physicalResourceId,
-    Data: { Users: String(r.users), Created: String(r.created), PasswordsSet: String(r.passwordsSet) },
+    Data: { Users: String(r.users), Roasters: String(r.roasters), Created: String(r.created), PasswordsSet: String(r.passwordsSet) },
   };
 };

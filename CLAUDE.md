@@ -115,6 +115,7 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 執行 | `brewline-<env>-simulator-run`，台北 08:05–19:05 每小時；執行角色只有 `AdminInitiateAuth`＋讀 3 個參數（RSK-018 的權限只在帳號 custom resource） |
 | 產生器 | `services/simulator/src/generator.ts`（純函數）：同一組（種子、日期、小時）→ 同一份計畫與冪等鍵；手動 `{"dryRun": true, "date": …}` 回傳計畫雜湊；`{"probe": true}` 只探測。**改季節／星期／小時權重或挑選邏輯會改變冪等鍵以外的內容 → 同一小時重跑會 422** |
 | 規則 | 模擬流量一律走公開 API（ADR-011），不直接寫 DynamoDB；預期沒達成就丟錯（觸發 `Errors` 告警），不用自訂指標 |
+| 模擬烘焙廠（ADR-031 D8，S2d） | `sim-roaster@example.com`（`simulator-roastery`，無租戶）；**同一個** run 函數（方案 A，共用 `run-errors` 告警）：每小時確認 90%、16 時排烘＋補貨、09 時烘焙（QR）、14 時出貨、出貨 2 天後完成（`services/simulator/src/roastery.ts`）；手動 `{"roastery": "<步驟>"}`；**告警已滿 10 個：新增要付費並修訂 ADR-030 D9，不要合併 DLQ** |
 
 ### Lambda 標準 / Lambda standard（ADR-023）
 
