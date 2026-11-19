@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1（Dev／Prod 皆 `running`）完成；溯源 S2a（批次、烘焙廠角色、追溯 API）完成，S2b（us-east-1 edge）進行中** / P0 complete; P1 CI/CD, data foundation, ordering A1–A4 and simulator S1 complete; traceability S2a complete, S2b (us-east-1 edge) in progress（2026-11-18）
+> 狀態 Status：**P0 完成；P1 CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1（Dev／Prod 皆 `running`）完成；溯源 S2a（批次、烘焙廠角色、追溯 API）、S2b（us-east-1 edge）完成，S2c（公開溯源頁）進行中** / P0 complete; P1 CI/CD, data foundation, ordering A1–A4 and simulator S1 complete; traceability S2a–S2b complete, S2c (public trace page) in progress（2026-11-19）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -827,7 +827,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 教訓 / Lessons：
 - （2026-11-18）**第一次部署被 Dev smoke test 擋下並 rollback（Prod 未部署）**：種子寫入的 `LOT#…/META` 帶 `updated_at`，但讀取用的 `LotItemSchema` 由 strict 的 `SeedLotSchema.extend()` 而來 → 每個批次都 parse 失敗、被當成不存在 → 所有 `POST /admin/roasts` 回 409 `lot_not_found`，後續 ROASTED／SHIPPED 檢查連鎖失敗。單元測試的假資料沒有 `updated_at`，所以沒抓到。修正：讀取 schema 不用 strict（種子檔維持 strict 擋打錯的欄位），並加回歸測試「`getLot` 讀得到 `seedLots()` 實際寫入的項目」（還原舊 schema 時此測試失敗）。原則：**寫入端與讀取端的測試要用同一份資料**，不要各自手寫假資料。
 
-### 10.18 溯源 S2b：us-east-1 edge stack / Traceability S2b（P1，2026-11-18，ADR-031 D3／D4）
+### 10.18 溯源 S2b：us-east-1 edge stack / Traceability S2b（P1，2026-11-18，ADR-031 D3／D4，PR #69、#70）
 
 | 項目 | Dev | Prod |
 |---|---|---|
@@ -840,7 +840,34 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - **Free 方案的條件**（2026-11-18 查證）：一個訂閱＝剛好 1 個 distribution＋1 個 web ACL（可選加 Route 53 hosted zone）；distribution 本身必須先設定 `WebACLId`；最多 5 條 WAF 規則；沒有存取日誌、沒有自訂快取／回應標頭政策（用 managed 政策＋S3 `Cache-Control`）；方案涵蓋 web ACL、規則、請求費。
 - ACM 只會自動續約**使用中**的憑證：S2c 掛上 CloudFront 之前 `RenewalEligibility = INELIGIBLE` 是正常的（驗證腳本依 `InUseBy` 判斷；掛上後必須是 `ELIGIBLE`）。憑證有效期 13 個月，S2c 不會晚到過期。
 - **費用**：S2c 訂閱之前，web ACL 是 pay-as-you-go（每月 USD 5＋每條規則 USD 1，按時間比例；2 個環境約 USD 0.5／天）→ **S2c 要緊接著做**；訂閱後 0 元。ACM 公開憑證免費。
+已驗證（2026-11-18，commit `734b83d`／#70，Deploy run `44275865419`）：Dev、Prod 各 20 項 ✅、0 ❌——憑證 `ISSUED`、DNS 驗證、只有一個名稱、`AMAZON_ISSUED`；web ACL global、預設 Allow、3 條規則名稱正確、沒有 Count 模式、速率規則 Block／IP／300 秒／300 次、每條規則都有指標；SSM 與輸出一致；Prod 終止保護 `true`。Prod 憑證在部署過程中就完成 DNS 驗證（zone 與憑證同帳號）。ARN 已填入 config `trace.edge`（S2c）。
+
+教訓 / Lessons：
+- （2026-11-18）**第一次 Dev 驗證失敗 1 項，Prod 被跳過**：`RenewalEligibility = INELIGIBLE`。ACM 只續約**使用中**的憑證，S2c 掛上 CloudFront 前就是 `INELIGIBLE`，是驗證腳本的預期值寫錯，資源正常。修正（#70）：依 `InUseBy` 判斷——沒人使用時預期 `INELIGIBLE`、使用中必須 `ELIGIBLE`。原則：**驗證的預期值要把前提條件一起寫進去**，不要寫死。
+
 - 將來可評估：把 hosted zone 加入方案（Free 上限 50 筆記錄），由方案負擔 zone 費用（目前 2 個 zone 約 USD 12／年）。
+
+### 10.19 溯源 S2c：公開溯源頁 / Traceability S2c（P1，2026-11-19，ADR-031 D2–D4）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| Stack | `brewline-dev-trace`（台北，module `traceability`） | `brewline-prod-trace`（**終止保護**） |
+| 網址 | `https://trace.dev.brewline-demo.click/#<qr_token>` | `https://trace.brewline-demo.click/#<qr_token>` |
+| S3 | `brewline-<env>-trace-<帳號>`：封鎖公開存取、SSE-S3、只允許 TLS ≥ 1.2、Bucket owner enforced、**保留**、`data-class=public`；bucket policy 只有一條 Allow：`cloudfront.amazonaws.com` 的 `s3:GetObject`，條件 `AWS:SourceArn` = 這個 distribution（OAC）；**沒有 ListBucket** → 不存在的 token 是 403 | 同左 |
+| CloudFront | 別名 `trace.<網域>`、edge stack 的 us-east-1 憑證（TLSv1.2_2021、SNI）與 web ACL、OAC、HTTPS 轉址、只有 GET／HEAD、managed `CachingOptimized`（遵守原點 `Cache-Control: max-age=300`）＋ managed `SecurityHeadersPolicy`、HTTP/2＋3、IPv6；403／404 → 一律 404 `/404.html`（快取 60 秒）；沒有存取日誌（Free 方案不支援） | 同左 |
+| Free 方案 | `AWS::PricingPlanManager::Subscription`：`CloudFront`／`FREE`／`DEFAULT`，ResourceArns＝distribution＋web ACL | 同左 |
+| DNS | A／AAAA alias → distribution（Dev zone） | Prod zone |
+| 投影函數 | `brewline-<env>-traceability-trace-projector`：規則 `brewline-<env>-trace-project`（`source=brewline.traceability`，`RoastBatchRoasted`／`RoastBatchRecalled`）→ 強一致讀 `ROAST#`／`LOT#`／`PRODUCT#` 的 `META`（只有 `GetItem`、`LeadingKeys` 限定、明確 Deny Scan）→ `PutObject v1/<qr_token>.json`（只能寫 `v1/*`）；DLQ＋告警（DLQ、Errors） | 同左 |
+| 靜態頁 | custom resource `Custom::BrewlineTraceSite`（函數 `…-traceability-site-publisher`，只能寫 5 個固定檔名）：`index.html`、`app.js`、`app.css`、`404.html`、`robots.txt`（`Disallow: /`） | 同左 |
+| 事件（events stack） | stream publisher 的過濾多一條 `entity = RoastBatch`（MODIFY）；`ROASTED` → `RoastBatchRoasted`，第一次召回 → `RoastBatchRecalled`；detail 只有 `roast_id`、`product_id`、`lot_id`（＋`synthetic`），**不含 QR token** | 同左 |
+
+- **讀取路徑沒有 Lambda／API／DynamoDB**（D2）：列舉 token 只會打到 CloudFront＋S3，回應一律相同的 404，再被 WAF 每 IP 速率規則擋下（TRC-N-004）。
+- **投影是白名單「建構」**（`services/traceability/src/projection.ts`）：只從允許的欄位組新物件，不複製再刪減 → 資料表新增欄位也不會出現在公開頁（RSK-019）。內容：商品名稱、生豆批次（生產者〔虛構〕、國家、產區、海拔、品種、處理法、杯測、採收季）、烘焙日期與烘焙度、召回提醒、`demo`（模擬資料）。沒有批次 ID、公斤數、租戶、訂單、建立者。
+- **token 放在 URL fragment（`#`）**：瀏覽器不會把它送到 CloudFront，也不會放進 Referer；頁面另有 `no-referrer`、嚴格 CSP（只允許同源 script／style／fetch，沒有 inline）、所有資料用 `textContent` 輸出。
+- 冪等：重投影只是覆寫同一個物件。批次已被 Dev smoke test 清掉 → 略過（不重試）；生豆批次或商品找不到 → 丟錯 → 重試 → DLQ 告警。
+- 召回後最多 5 分鐘（快取）公開頁才顯示提醒（ADR-031 D3 已接受）。
+- 費用：Free 方案 0 元（涵蓋 CloudFront、web ACL 與規則、請求）；S3 幾 KB；Lambda 每批次 1 次呼叫。訂閱後 S2b 的 web ACL 不再按時計費。
+- 驗證：`scripts/verify-trace-stack.sh`（CI，lookup role 唯讀）＝ distribution 設定、Free 方案層級、憑證使用中、bucket 私有，以及**從網際網路實測**：`/` 200＋安全標頭＋`Cache-Control`；反向：3 個亂數 token 都 404 且內容相同、未知路徑 404、POST 403、HTTP → 301、直連 S3 403、TLS 1.1 被拒；若 bucket 已有投影，檢查欄位剛好是白名單。
 
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
@@ -875,7 +902,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | RSK-016 | A3 之前已預留的庫存不會自動釋放；單筆最多預留 500 kg，可能佔滿某商品 | M | M | 不開放註冊；路由限流；**A3c staff 可取消、A3d 未確認訂單自動取消並釋放（Dev 10 分／Prod 48 小時）**；剩餘：48 小時內仍可佔住庫存 |
 | RSK-017 | 自訂 bus 沒有資源政策：同帳號內有 `events:PutEvents` 的身分可偽造 `brewline.ordering` 事件（例如假的 `OrderCreated` 會啟動逾時工作流，但取消前會讀 DynamoDB，影響有限） | L | M | **已緩解（S0，2026-11-17）**：bus 資源政策 Deny 白名單以外的 `PutEvents`（§10.10）。剩餘：SSO Admin 與 CloudFormation 執行角色（可改政策）仍可發布 |
 | RSK-018 | 模擬器帳號 custom resource 有 `AdminCreateUser`／`AdminSetUserPassword`／`AdminAddUserToGroup`（IAM 無法依群組或使用者限制）：能修改此函數或其角色的身分，理論上可以重設 staff 密碼或把帳號加進 staff | L | M | 函數只由 CloudFormation provider 呼叫；修改需要 CI 部署或 Admin；Developer 只在 Dev 且不能改 Lambda／IAM；執行中的模擬器函數**只有** `AdminInitiateAuth`（S1b，政策模擬驗證）；`verify-simulator-stack.sh` 檢查模擬帳號不在 staff 群組 |
-| RSK-019 | 公開溯源頁若輸出錯誤欄位，可能洩漏租戶或訂單資訊 | L | M | 公開資料只來自寫入時的白名單投影（S2c）；租戶角色讀不到 `ROAST#`／`LOT#`；公開讀取路徑沒有資料庫權限；驗收搜尋租戶 ID、Email 結果為 0 |
+| RSK-019 | 公開溯源頁若輸出錯誤欄位，可能洩漏租戶或訂單資訊 | L | M | 公開資料只來自寫入時的白名單投影（S2c，以建構而非刪減實作、單元測試搜尋內部欄位）；租戶角色讀不到 `ROAST#`／`LOT#`；公開讀取路徑沒有資料庫權限；驗收搜尋租戶 ID、Email 結果為 0 |
 | RSK-013 | 主要區域無 Macie，無法自動偵測 S3 中的個資 | L | L | 個資只存 DynamoDB；DATA-011/012 設計層預防；資料湖 DQ 檢查加入 Email／電話格式偵測 |
 
 ---
@@ -969,7 +996,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-18 | 模擬器 Dev 觀察期：11/17 17–19 時與 11/18 10、11、14 時全部照計畫（共 5 筆 created、0 violation、DLQ 0、無告警） |
 | ✅ 2026-11-18 | minimatch 警示（PR #63）部署 Dev、Prod：Lambda 程式不變（只有每次部署的 custom resource 更新） |
 | ✅ 2026-11-18 | 模擬器 S1d：Prod `state` 改 `running`，16:05 排程自動下第一批 2 筆模擬訂單（§10.16）；**模擬器 S1 完成** |
-| P1 | 溯源 S2b（§10.18）：部署 Dev、Prod（us-east-1）並驗證 → 把 ARN 填進 config `trace.edge` → **S2c 緊接著做**（web ACL 訂閱前按時計費）→ S2d（模擬烘焙廠） |
+| P1 | 溯源 S2c（§10.19）：部署 Dev、Prod 並驗證（Free 方案訂閱成功後 web ACL 不再計費）→ S2d（模擬烘焙廠，產生真正的公開頁） |
 | ✅ 2026-11-18 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`），Developer 可在 Dev 切換模擬器開關（§3） |
 | ✅ 2026-11-18 | Dependabot 安全警示 2 筆（`minimatch` < 11.0.1，Moderate，只在測試／synth 工具鏈）：PR #63 以 npm `overrides` 升到 11.0.9；`aws-cdk-lib` 內部打包（bundleDependencies）的一份要等新版 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |

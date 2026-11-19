@@ -9,6 +9,7 @@ import { EDGE_REGION, resolveEnv } from '../lib/config';
 import { ApiStack } from '../lib/stacks/api-stack';
 import { AuthStack } from '../lib/stacks/auth-stack';
 import { DataStack } from '../lib/stacks/data-stack';
+import { TraceStack } from '../lib/stacks/trace-stack';
 import { EdgeStack } from '../lib/stacks/edge-stack';
 import { EventsStack } from '../lib/stacks/events-stack';
 import { NotifyStack } from '../lib/stacks/notify-stack';
@@ -160,3 +161,21 @@ const edgeStack = new EdgeStack(app, `brewline-${env.name}-edge`, {
   terminationProtection: env.name === 'prod',
 });
 Tags.of(edgeStack).add('module', 'traceability', { priority: 200 });
+
+// 公開溯源頁（S2c，ADR-031 D2–D4）：需要 edge 的 ARN（config `trace.edge`）、資料表與 bus → 在 events 之後。
+// Public trace page: needs the edge ARNs from config, the table and the bus.
+if (env.trace.edge) {
+  const traceStack = new TraceStack(app, `brewline-${env.name}-trace`, {
+    envName: env.name,
+    lambda: env.lambda,
+    trace: env.trace,
+    env: { account: env.account, region: env.region },
+    description: 'BrewLine public trace page (ADR-031): S3 projections, CloudFront Free plan, DNS',
+    terminationProtection: env.name === 'prod',
+  });
+  traceStack.addStackDependency(dataStack, 'reads /brewline/<env>/data/* from SSM');
+  traceStack.addStackDependency(opsStack, 'alarms publish to the ops topic');
+  traceStack.addStackDependency(eventsStack, 'rule on the brewline-<env> bus; roast events from the stream publisher');
+  traceStack.addStackDependency(edgeStack, 'certificate and web ACL (ARNs via config)');
+  Tags.of(traceStack).add('module', 'traceability', { priority: 200 });
+}

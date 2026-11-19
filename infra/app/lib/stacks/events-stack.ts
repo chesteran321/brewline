@@ -163,12 +163,18 @@ export class EventsStack extends Stack {
       // Failed batches (pointers) go to the DLQ using the function role; SqsDlq grants sqs:SendMessage.
       onFailure: new SqsDlq(streamDlq),
       // 事件過濾：只叫起訂單與庫存的變更（冪等記錄、商品 META、刪除都不會叫起函數）
-      // Event filtering: only order and stock changes invoke the function.
+      // Event filtering: only order, stock and roast batch changes invoke the function.
       filters: [
         lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entity: { S: lambda.FilterRule.isEqual('Order') } } } }),
         lambda.FilterCriteria.filter({
           eventName: lambda.FilterRule.isEqual('MODIFY'),
           dynamodb: { Keys: { sk: { S: lambda.FilterRule.isEqual('STOCK') } } },
+        }),
+        // S2c：烘焙批次的修改（ROASTED、召回）→ RoastBatchRoasted／RoastBatchRecalled
+        // Roast batch modifications (roasted, recalled) for the public trace projection.
+        lambda.FilterCriteria.filter({
+          eventName: lambda.FilterRule.isEqual('MODIFY'),
+          dynamodb: { NewImage: { entity: { S: lambda.FilterRule.isEqual('RoastBatch') } } },
         }),
       ],
     });

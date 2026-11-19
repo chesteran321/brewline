@@ -62,7 +62,7 @@ check "Mapping retries"          "$(jq -r .MaximumRetryAttempts <<<"$esm")" "3"
 check "Mapping bisect on error"  "$(jq -r .BisectBatchOnFunctionError <<<"$esm")" "true"
 check "Mapping on-failure → DLQ" "$(jq -r '.DestinationConfig.OnFailure.Destination // "none"' <<<"$esm")" \
   "arn:aws:sqs:${region}:$(cut -d: -f5 <<<"$stream_arn"):brewline-${env_name}-events-stream-dlq"
-check "Mapping filters"          "$(jq -r '.FilterCriteria.Filters | length' <<<"$esm")" "2"
+check "Mapping filters (order, stock, roast batch)" "$(jq -r '.FilterCriteria.Filters | length' <<<"$esm")" "3"
 
 fn=$(out PublisherFunctionName)
 cfg=$(aws lambda get-function-configuration --function-name "$fn" --region "$region" --output json)
