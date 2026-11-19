@@ -68,7 +68,7 @@ check "Stack termination protection" "$(aws cloudformation describe-stacks --sta
   --query 'Stacks[0].EnableTerminationProtection' --output text | tr '[:upper:]' '[:lower:]')" "$want_termination_protection"
 
 echo
-echo "Next (S2c): put these into lib/config.ts trace.edge for ${env_name}:"
+echo "config.ts trace.edge for ${env_name} must match (S2c):"
 echo "  certificateArn: '${cert_arn}'"
 echo "  webAclArn: '${acl_arn}'"
 exit $fail

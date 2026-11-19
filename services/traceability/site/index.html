@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<title>BrewLine 溯源 / Trace</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header>
+  <p class="brand">BrewLine</p>
+  <button type="button" id="lang" aria-label="Switch language">English</button>
+</header>
+<main>
+  <p id="status" role="status" data-i18n="loading">載入中…</p>
+  <section id="trace" hidden>
+    <p id="demo" class="demo" hidden data-i18n="demo">這是作品集的示範資料，不是真實商品。</p>
+    <div id="recall" class="recall" role="alert" hidden>
+      <strong data-i18n="recallTitle">召回通知</strong>
+      <p id="recall-notice"></p>
+      <p id="recall-at" class="muted"></p>
+    </div>
+    <h1 id="product"></h1>
+    <h2 data-i18n="origin">產地</h2>
+    <dl id="lot"></dl>
+    <h2 data-i18n="roast">烘焙</h2>
+    <dl id="roast"></dl>
+  </section>
+</main>
+<footer>
+  <p data-i18n="footer">BrewLine 是 AWS 架構作品集，不是商業網站。生產者名稱為虛構。</p>
+</footer>
+</body>
+</html>

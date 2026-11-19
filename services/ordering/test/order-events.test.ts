@@ -61,6 +61,36 @@ describe('toDomainEvent', () => {
     expect(toDomainEvent(rec('MODIFY', stock(20), stock(5)))).toBeUndefined(); // 回補 / restock
     expect(toDomainEvent(rec('MODIFY', stock(0, 0), stock(5, 0)))).toBeUndefined(); // 門檻 0 = 不告警 / threshold 0 disables
   });
+  const roast = (status: string, extra: object = {}) => ({
+    pk: 'ROAST#r_X', sk: 'META', entity: 'RoastBatch', roast_id: `r_${'2'.repeat(26)}`, product_id: 'p-0001', lot_id: 'L-2026-001',
+    status, kg: 10, qr_token: 'Q'.repeat(22), created_by: 'staff-sub-secret', request_hash: 'h', ...extra,
+  });
+  test('roast batch → ROASTED: RoastBatchRoasted (source brewline.traceability) without the QR token or creator', () => {
+    const e = toDomainEvent(rec('MODIFY', roast('ROASTED'), roast('SCHEDULED', { qr_token: undefined })))!;
+    expect(e).toMatchObject({
+      source: 'brewline.traceability',
+      detailType: 'RoastBatchRoasted',
+      detail: { roast_id: `r_${'2'.repeat(26)}`, product_id: 'p-0001', lot_id: 'L-2026-001' },
+    });
+    const json = JSON.stringify(e.detail);
+    for (const f of ['Q'.repeat(22), 'qr_token', 'staff-sub-secret', 'created_by', 'ROAST#']) expect(json).not.toContain(f);
+  });
+  test('first recall → RoastBatchRecalled; synthetic batches carry synthetic: true', () => {
+    const recall = { recall: { at: 'x', notice: 'Recalled for testing', by: 'staff' } };
+    expect(toDomainEvent(rec('MODIFY', roast('ROASTED', { ...recall, synthetic: true }), roast('ROASTED', { synthetic: true })))).toMatchObject({
+      source: 'brewline.traceability',
+      detailType: 'RoastBatchRecalled',
+      detail: { synthetic: true },
+    });
+    // 反向：已召回後的其他修改、排程中的批次修改、新建批次 → 不發 / Negative cases.
+    expect(toDomainEvent(rec('MODIFY', roast('ROASTED', recall), roast('ROASTED', recall)))).toBeUndefined();
+    expect(toDomainEvent(rec('MODIFY', roast('SCHEDULED'), roast('SCHEDULED')))).toBeUndefined();
+    expect(toDomainEvent(rec('INSERT', roast('SCHEDULED')))).toBeUndefined();
+    expect(toDomainEvent(rec('MODIFY', roast('ROASTED'), roast('SCHEDULED')))!.detail).not.toHaveProperty('synthetic');
+  });
+  test('order events keep source brewline.ordering', () => {
+    expect(toDomainEvent(rec('INSERT', order('CREATED')))!.source).toBe('brewline.ordering');
+  });
   test.each([
     ['REMOVE of an order (cleanup)', rec('REMOVE', undefined, order('CREATED'))],
     ['idempotency record', rec('INSERT', { pk: `TENANT#${T}`, sk: 'IDEMP#k', entity: 'Idempotency' })],

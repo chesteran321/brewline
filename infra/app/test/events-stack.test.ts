@@ -54,6 +54,7 @@ describe.each(['dev', 'prod'] as const)('EventsStack (%s)', (envName) => {
     expect(patterns).toEqual([
       { dynamodb: { NewImage: { entity: { S: ['Order'] } } } },
       { eventName: ['MODIFY'], dynamodb: { Keys: { sk: { S: ['STOCK'] } } } },
+      { eventName: ['MODIFY'], dynamodb: { NewImage: { entity: { S: ['RoastBatch'] } } } },
     ]);
     // 政策先建立，對應才建立 / The policy exists before the mapping.
     expect(m.DependsOn!.some((d) => d.includes('DefaultPolicy'))).toBe(true);

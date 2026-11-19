@@ -2,7 +2,7 @@ import { EventBridgeClient, PutEventsCommand, PutEventsRequestEntry } from '@aws
 import { Logger } from '@aws-lambda-powertools/logger';
 import { Tracer } from '@aws-lambda-powertools/tracer';
 import type { DynamoDBBatchResponse, DynamoDBStreamEvent } from 'aws-lambda';
-import { EVENT_SOURCE, toDomainEvent } from './order-events';
+import { toDomainEvent } from './order-events';
 
 /**
  * DynamoDB Streams → EventBridge（A3b，ADR-026）。台北沒有 EventBridge Pipes，所以用 Lambda。
@@ -44,7 +44,7 @@ export const handler = async (event: DynamoDBStreamEvent): Promise<DynamoDBBatch
       seq,
       entry: {
         EventBusName: busName,
-        Source: EVENT_SOURCE,
+        Source: mapped.source,
         DetailType: mapped.detailType,
         Time: mapped.time,
         Detail: JSON.stringify(mapped.detail),

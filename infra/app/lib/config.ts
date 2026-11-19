@@ -67,6 +67,8 @@ export interface LambdaSettings {
     readonly replenish: number;
     /** 模擬器執行（ADR-030；1 = 同一時間只跑一輪）/ Simulator run (1 = one run at a time). */
     readonly simulator: number;
+    /** 溯源投影（S2c；事件量很小，節流由 EventBridge 重試）/ Trace projector (low volume; throttles retried). */
+    readonly traceProjector: number;
   };
 }
 
@@ -209,7 +211,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 7, // COST-007
-      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2, simulator: 1 },
+      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2, simulator: 1, traceProjector: 2 },
     },
     api: {
       throttleRateLimit: 10,
@@ -244,6 +246,11 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       hostedZoneId: 'Z00697733VLK1TK9WUYKL',
       hostedZoneName: 'dev.brewline-demo.click',
       rateLimitPer5Min: 300,
+      // S2b 部署輸出（2026-11-18，Deploy run 44273349356）/ Outputs of brewline-dev-edge.
+      edge: {
+        certificateArn: 'arn:aws:acm:us-east-1:610935435571:certificate/47f15188-0677-445a-ade2-9a87d69a13ca',
+        webAclArn: 'arn:aws:wafv2:us-east-1:610935435571:global/webacl/brewline-dev-trace/e6df2977-d489-484e-84a9-7b87e5ede319',
+      },
     },
   },
   prod: {
@@ -265,7 +272,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 30, // COST-007
-      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2, simulator: 1 },
+      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2, simulator: 1, traceProjector: 2 },
     },
     api: {
       throttleRateLimit: 50,
@@ -308,6 +315,11 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       hostedZoneId: 'Z039360620HRFCTYO5R5J',
       hostedZoneName: 'brewline-demo.click',
       rateLimitPer5Min: 300,
+      // S2b 部署輸出（2026-11-18，Deploy run 44275865419）/ Outputs of brewline-prod-edge.
+      edge: {
+        certificateArn: 'arn:aws:acm:us-east-1:062868712468:certificate/2cdb9832-028e-4775-b4bb-80d47bc0df9d',
+        webAclArn: 'arn:aws:wafv2:us-east-1:062868712468:global/webacl/brewline-prod-trace/7b407737-e10a-406c-8389-d5b4a2b83b22',
+      },
     },
   },
 };

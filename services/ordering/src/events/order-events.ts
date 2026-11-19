@@ -11,16 +11,21 @@ import type { DynamoDBRecord } from 'aws-lambda';
  * | OrderCreated        | INSERT，entity = Order                                             |
  * | OrderStatusChanged  | MODIFY，entity = Order，status 改變                                  |
  * | StockLow            | MODIFY，sk = STOCK，available_kg 從 ≥ 門檻 **跌破** 門檻（只在跨越時發一次） |
+ * | RoastBatchRoasted   | MODIFY，entity = RoastBatch，status 變成 ROASTED（S2c，source `brewline.traceability`） |
+ * | RoastBatchRecalled  | MODIFY，entity = RoastBatch，第一次出現 recall（S2c）                    |
  *
  * detail 一律白名單：不含 created_by（使用者 sub）、pk／sk、冪等鍵。模擬器的訂單另有 `synthetic: true`。
  * Details are allow-listed: never the user's sub, keys, or idempotency key.
+ * 烘焙批次事件**不含 QR token**：token 只在資料表與公開投影中，不進事件日誌 / Roast events never carry the QR token.
  */
 
 export const EVENT_SOURCE = 'brewline.ordering';
+export const TRACE_EVENT_SOURCE = 'brewline.traceability';
 
-export type DetailType = 'OrderCreated' | 'OrderStatusChanged' | 'StockLow';
+export type DetailType = 'OrderCreated' | 'OrderStatusChanged' | 'StockLow' | 'RoastBatchRoasted' | 'RoastBatchRecalled';
 
 export interface DomainEvent {
+  readonly source: string;
   readonly detailType: DetailType;
   readonly time: Date;
   readonly detail: Record<string, unknown>;
@@ -68,6 +73,7 @@ export function toDomainEvent(record: DynamoDBRecord): DomainEvent | undefined {
     if (!order.tenant_id || !order.order_id || !order.status) return undefined;
     if (record.eventName === 'INSERT') {
       return {
+        source: EVENT_SOURCE,
         detailType: 'OrderCreated',
         time,
         detail: {
@@ -82,10 +88,28 @@ export function toDomainEvent(record: DynamoDBRecord): DomainEvent | undefined {
     }
     if (record.eventName === 'MODIFY' && old && old.status !== now.status) {
       return {
+        source: EVENT_SOURCE,
         detailType: 'OrderStatusChanged',
         time,
         detail: { ...base, ...order, previous_status: str(old.status), items: lines(now.items) },
       };
+    }
+    return undefined;
+  }
+
+  if (now?.entity === 'RoastBatch' && record.eventName === 'MODIFY' && old) {
+    const roast = {
+      roast_id: str(now.roast_id),
+      product_id: str(now.product_id),
+      lot_id: str(now.lot_id),
+      ...(now.synthetic === true ? { synthetic: true } : {}),
+    };
+    if (!roast.roast_id || !roast.product_id || !roast.lot_id) return undefined;
+    if (old.status !== 'ROASTED' && now.status === 'ROASTED') {
+      return { source: TRACE_EVENT_SOURCE, detailType: 'RoastBatchRoasted', time, detail: { ...base, ...roast } };
+    }
+    if (!old.recall && now.recall) {
+      return { source: TRACE_EVENT_SOURCE, detailType: 'RoastBatchRecalled', time, detail: { ...base, ...roast } };
     }
     return undefined;
   }
@@ -97,6 +121,7 @@ export function toDomainEvent(record: DynamoDBRecord): DomainEvent | undefined {
     const pk = str(now.pk);
     if (threshold > 0 && before !== undefined && after !== undefined && before >= threshold && after < threshold && pk?.startsWith('PRODUCT#')) {
       return {
+        source: EVENT_SOURCE,
         detailType: 'StockLow',
         time,
         detail: { ...base, product_id: pk.slice('PRODUCT#'.length), available_kg: after, low_threshold_kg: threshold },
