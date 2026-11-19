@@ -9,7 +9,7 @@ import {
 import { DeleteParameterCommand, GetParameterCommand, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { mockClient } from 'aws-sdk-client-mock';
 import { deprovision, handler, provision, ProvisionProps, setClientsForTesting } from '../src/provision';
-import { simUsers } from '../src/tenants';
+import { ROASTER_USERNAME, simUsers } from '../src/tenants';
 
 const cog = mockClient(CognitoIdentityProviderClient);
 const ssm = mockClient(SSMClient);
@@ -20,6 +20,7 @@ const P: ProvisionProps = {
   stateParam: '/b/dev/simulator/state', kmsKeyId: 'arn:key', retainOnDelete: false,
 };
 const users = simUsers('seed', 3);
+const all = [...users.map((u) => u.username), ROASTER_USERNAME];
 const existing = (tenant: string) => ({ UserAttributes: [{ Name: 'custom:tenant_id', Value: tenant }] });
 const notFound = Object.assign(new Error('x'), { name: 'UserNotFoundException' });
 const paramNotFound = Object.assign(new Error('x'), { name: 'ParameterNotFound' });
@@ -37,18 +38,23 @@ const credentialsPut = () =>
   ssm.commandCalls(PutParameterCommand).map((c) => c.args[0].input).find((i) => i.Name === P.credentialsParam);
 const statePut = () => ssm.commandCalls(PutParameterCommand).map((c) => c.args[0].input).find((i) => i.Name === P.stateParam);
 
-test('first run: creates every account in the simulator group with its seeded tenant, stores passwords encrypted', async () => {
+test('first run: creates every café in the simulator group with its seeded tenant, plus the roaster; stores passwords encrypted', async () => {
   const r = await provision(P);
-  expect(r).toEqual({ users: 3, created: 3, passwordsSet: 3, stateCreated: true });
+  expect(r).toEqual({ users: 3, roasters: 1, created: 4, passwordsSet: 4, stateCreated: true });
   const creates = cog.commandCalls(AdminCreateUserCommand).map((c) => c.args[0].input);
-  expect(creates.map((c) => c.Username)).toEqual(users.map((u) => u.username));
+  expect(creates.map((c) => c.Username)).toEqual(all);
   expect(creates[0]).toMatchObject({ MessageAction: 'SUPPRESS' });
   expect(creates[0]!.UserAttributes).toContainEqual({ Name: 'custom:tenant_id', Value: users[0]!.tenantId });
-  expect(cog.commandCalls(AdminAddUserToGroupCommand).every((c) => c.args[0].input.GroupName === 'simulator')).toBe(true);
+  const groups = cog.commandCalls(AdminAddUserToGroupCommand).map((c) => [c.args[0].input.Username, c.args[0].input.GroupName]);
+  expect(groups).toEqual([...users.map((u) => [u.username, 'simulator']), [ROASTER_USERNAME, 'simulator-roastery']]);
+  // 烘焙廠沒有租戶、永遠不在 staff / The roaster has no tenant and is never staff.
+  const roaster = creates.find((c) => c.Username === ROASTER_USERNAME)!;
+  expect(roaster.UserAttributes!.map((a) => a.Name)).not.toContain('custom:tenant_id');
+  expect(groups.some(([, g]) => g === 'staff')).toBe(false);
   const put = credentialsPut()!;
   expect(put).toMatchObject({ Type: 'SecureString', KeyId: 'arn:key', Tier: 'Standard', Overwrite: true });
   const stored = JSON.parse(put.Value!);
-  expect(Object.keys(stored).sort()).toEqual(users.map((u) => u.username).sort());
+  expect(Object.keys(stored).sort()).toEqual([...all].sort());
   // 密碼與 Cognito 設定的一致 / Stored passwords match what Cognito was given.
   for (const c of cog.commandCalls(AdminSetUserPasswordCommand)) {
     expect(stored[c.args[0].input.Username!]).toBe(c.args[0].input.Password);
@@ -59,11 +65,12 @@ test('first run: creates every account in the simulator group with its seeded te
 
 test('re-run with everything in place: no new users, no password resets, no credentials write; state untouched', async () => {
   for (const u of users) cog.on(AdminGetUserCommand, { Username: u.username }).resolves(existing(u.tenantId));
-  const stored = Object.fromEntries(users.map((u) => [u.username, 'Existing-Password-1!']));
+  cog.on(AdminGetUserCommand, { Username: ROASTER_USERNAME }).resolves({ UserAttributes: [] });
+  const stored = Object.fromEntries(all.map((u) => [u, 'Existing-Password-1!']));
   ssm.on(GetParameterCommand, { Name: P.credentialsParam }).resolves({ Parameter: { Value: JSON.stringify(stored) } });
   ssm.on(PutParameterCommand, { Name: P.stateParam }).rejects(exists);
   const r = await provision(P);
-  expect(r).toEqual({ users: 3, created: 0, passwordsSet: 0, stateCreated: false });
+  expect(r).toEqual({ users: 3, roasters: 1, created: 0, passwordsSet: 0, stateCreated: false });
   expect(cog.commandCalls(AdminCreateUserCommand)).toHaveLength(0);
   expect(cog.commandCalls(AdminSetUserPasswordCommand)).toHaveLength(0);
   expect(credentialsPut()).toBeUndefined();
@@ -71,10 +78,11 @@ test('re-run with everything in place: no new users, no password resets, no cred
 
 test('an account missing from the credentials parameter gets a new password; others keep theirs', async () => {
   for (const u of users) cog.on(AdminGetUserCommand, { Username: u.username }).resolves(existing(u.tenantId));
+  cog.on(AdminGetUserCommand, { Username: ROASTER_USERNAME }).resolves({ UserAttributes: [] });
   const stored = { [users[0]!.username]: 'Existing-Password-1!' };
   ssm.on(GetParameterCommand, { Name: P.credentialsParam }).resolves({ Parameter: { Value: JSON.stringify(stored) } });
   const r = await provision(P);
-  expect(r.passwordsSet).toBe(2);
+  expect(r.passwordsSet).toBe(3);
   expect(JSON.parse(credentialsPut()!.Value!)[users[0]!.username]).toBe('Existing-Password-1!');
 });
 
@@ -85,6 +93,11 @@ test('negative: an account with the wrong tenant_id fails the deploy instead of 
   expect(credentialsPut()).toBeUndefined();
 });
 
+test('negative: a roaster account that somehow has a tenant_id fails the deploy (operators never belong to a tenant)', async () => {
+  cog.on(AdminGetUserCommand, { Username: ROASTER_USERNAME }).resolves(existing('t_01AAAAAAAAAAAAAAAAAAAAAAAA'));
+  await expect(provision(P)).rejects.toThrow('unexpected tenant_id');
+});
+
 test('negative: other SSM errors on the state parameter fail', async () => {
   ssm.on(PutParameterCommand, { Name: P.stateParam }).rejects(Object.assign(new Error('x'), { name: 'AccessDeniedException' }));
   await expect(provision(P)).rejects.toThrow();
@@ -93,7 +106,7 @@ test('negative: other SSM errors on the state parameter fail', async () => {
 test('delete: removes accounts and parameters unless retained', async () => {
   cog.on(AdminDeleteUserCommand).resolves({});
   ssm.on(DeleteParameterCommand).resolves({});
-  expect(await deprovision(P)).toBe(3);
+  expect(await deprovision(P)).toBe(4);
   expect(ssm.commandCalls(DeleteParameterCommand).map((c) => c.args[0].input.Name).sort()).toEqual([P.credentialsParam, P.stateParam].sort());
   cog.reset();
   ssm.reset();
@@ -110,7 +123,7 @@ test('handler never returns passwords to CloudFormation', async () => {
       StateParam: P.stateParam, KmsKeyId: 'arn:key', RetainOnDelete: 'false',
     },
   } as never);
-  expect(out).toEqual({ PhysicalResourceId: 'brewline-simulator-accounts', Data: { Users: '3', Created: '3', PasswordsSet: '3' } });
+  expect(out).toEqual({ PhysicalResourceId: 'brewline-simulator-accounts', Data: { Users: '3', Roasters: '1', Created: '4', PasswordsSet: '4' } });
   const pw = cog.commandCalls(AdminSetUserPasswordCommand)[0]!.args[0].input.Password!;
   expect(JSON.stringify(out)).not.toContain(pw);
 });

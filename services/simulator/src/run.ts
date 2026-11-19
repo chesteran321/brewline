@@ -4,7 +4,8 @@ import { Logger } from '@aws-lambda-powertools/logger';
 import seedProducts from '../../ordering/seed/products.json';
 import { Credentials, CredentialsSchema, SimulatorConfig, SimulatorConfigSchema, SimulatorState, parseState } from './config';
 import { PlannedOrder, planDay, planHash, planHour, taipeiNow } from './generator';
-import { simUsername } from './tenants';
+import { ROASTERY_STEPS, Roastery, RoasteryStep, StepSummary, stepsForHour } from './roastery';
+import { ROASTER_USERNAME, simUsername } from './tenants';
 
 /**
  * 模擬器排程函數（ADR-030）。
@@ -15,7 +16,10 @@ import { simUsername } from './tenants';
  *   每秒最多 1 個請求（SIM-N-002）；部分請求用同一個 Idempotency-Key 重送（SIM-F-008）。
  * - 預期：新單 201、重跑同一小時 200、庫存不足 409 都正常；重送必須 200 且同一個 `order_id`；其他結果算違規。
  *   有違規就在最後丟錯 → Lambda `Errors` 告警（D9）。非同步重試 0，失敗事件進 DLQ。
- * - 手動事件：`{ "probe": true }` 不論開關都探測一次；`{ "dryRun": true, "date": "YYYY-MM-DD" }` 只回傳當天計畫的雜湊
+ * - S2d：咖啡廳下單之後，以模擬烘焙廠身分推進模擬訂單（`roastery.ts`，依台北時段）；兩段的違規分開記錄，
+ *   烘焙廠出錯不會擋住下單，最後一起丟錯（同一個 `run-errors` 告警，方案 A）。
+ * - 手動事件：`{ "roastery": "<步驟>" }` 不看時段、強制執行一個烘焙廠步驟（不論開關，與 probe 相同）；
+ *   `{ "probe": true }` 不論開關都探測一次；`{ "dryRun": true, "date": "YYYY-MM-DD" }` 只回傳當天計畫的雜湊
  *   （SIM-F-009），不登入、不呼叫 API。
  *
  * Reads the switch first; when running, signs in as the planned cafés through the simulator client and orders through
@@ -259,6 +263,7 @@ export async function simulateHour(
 
 export interface RunEvent {
   readonly source?: string;
+  readonly roastery?: string;
   readonly probe?: boolean;
   readonly dryRun?: boolean;
   readonly date?: string;
@@ -268,7 +273,24 @@ export type RunOutcome =
   | { readonly outcome: 'paused' }
   | { readonly outcome: 'dry_run'; readonly date: string; readonly orders: number; readonly perHour: number[]; readonly hash: string }
   | ({ readonly outcome: 'probe_ok'; readonly state: SimulatorState } & ProbeResult)
-  | ({ readonly outcome: 'simulated' } & HourSummary);
+  | ({ readonly outcome: 'simulated'; readonly roastery: readonly StepSummary[] } & HourSummary)
+  | { readonly outcome: 'roastery'; readonly roastery: readonly StepSummary[] };
+
+/** 依序執行烘焙廠步驟；每一步失敗不影響下一步（各自記錄違規）/ Run roastery steps; one step failing does not stop the next. */
+export async function runRoastery(env: RunEnv, sessions: Sessions, steps: readonly RoasteryStep[], date: string): Promise<StepSummary[]> {
+  const token = await sessions.token(ROASTER_USERNAME);
+  if (claims(token).synthetic !== 'true') throw new Error('roaster token has no synthetic claim');
+  const roastery = new Roastery((path, init) => call(env, path, token, init), sleep, date);
+  const out: StepSummary[] = [];
+  for (const step of steps) {
+    try {
+      out.push(await roastery.run(step));
+    } catch (err) {
+      out.push({ step, counts: {}, violations: [`${step} threw ${(err as Error).name}`] });
+    }
+  }
+  return out;
+}
 
 export const handler = async (event: RunEvent = {}): Promise<RunOutcome> => {
   const env = readEnv();
@@ -285,7 +307,11 @@ export const handler = async (event: RunEvent = {}): Promise<RunOutcome> => {
   }
 
   const state = await readState(env);
-  if (state !== 'running' && event.probe !== true) {
+  const manualStep = event.roastery;
+  if (manualStep !== undefined && !(ROASTERY_STEPS as readonly string[]).includes(manualStep)) {
+    throw new Error(`unknown roastery step; use one of ${ROASTERY_STEPS.join(', ')}`);
+  }
+  if (state !== 'running' && event.probe !== true && manualStep === undefined) {
     logger.info('simulator paused; nothing to do', { state });
     return { outcome: 'paused' };
   }
@@ -303,11 +329,30 @@ export const handler = async (event: RunEvent = {}): Promise<RunOutcome> => {
   }
 
   const { date, hour } = taipeiNow(clock());
-  const summary = await simulateHour(env, cfg, sessions, p.catalog, date, hour);
-  // 只記錄數量與參考編號，不記錄帳號或 token / Counts and references only; no accounts or tokens.
-  logger.info('simulated hour', { ...summary });
-  if (summary.violations.length > 0) {
-    throw new Error(`simulator expectations failed (${summary.violations.length}): ${summary.violations.slice(0, 5).join('; ')}`);
+  if (manualStep !== undefined) {
+    const roastery = await runRoastery(env, sessions, [manualStep as RoasteryStep], date);
+    logger.info('roastery (manual)', { state, roastery });
+    const v = roastery.flatMap((r) => r.violations);
+    if (v.length > 0) throw new Error(`roastery expectations failed (${v.length}): ${v.slice(0, 5).join('; ')}`);
+    return { outcome: 'roastery', roastery };
   }
-  return { outcome: 'simulated', ...summary };
+
+  // 先下單（咖啡廳），再推進（烘焙廠）；烘焙廠出錯不影響下單 / Cafés first, then the roastery.
+  const summary = await simulateHour(env, cfg, sessions, p.catalog, date, hour);
+  let roastery: StepSummary[];
+  try {
+    roastery = await runRoastery(env, sessions, stepsForHour(hour), date);
+  } catch (err) {
+    roastery = [{ step: 'confirm', counts: {}, violations: [`roaster sign-in failed: ${(err as Error).name}`] }];
+  }
+  // 只記錄數量與參考編號，不記錄帳號或 token / Counts and references only; no accounts or tokens.
+  logger.info('simulated hour', { ...summary, roastery });
+  const cafe = summary.violations;
+  const roast = roastery.flatMap((r) => r.violations);
+  if (cafe.length + roast.length > 0) {
+    throw new Error(
+      `simulator expectations failed (cafe ${cafe.length}, roastery ${roast.length}): ${[...cafe, ...roast].slice(0, 5).join('; ')}`,
+    );
+  }
+  return { outcome: 'simulated', ...summary, roastery };
 };

@@ -40,3 +40,11 @@ export function simUsers(seed: string, poolSize: number): SimUser[] {
     tenantId: simTenantId(seed, i + 1),
   }));
 }
+
+/**
+ * 模擬烘焙廠帳號（S2d，ADR-031 D6／D8）：群組 `simulator-roastery`，**沒有租戶**、沒有 admin；token 帶 `synthetic`，
+ * 伺服器只讓它碰模擬訂單與模擬批次。
+ * Simulated roastery account: group `simulator-roastery`, no tenant, no admin; synthetic data only.
+ */
+export const ROASTER_USERNAME = 'sim-roaster@example.com';
+export const ROASTER_GROUP = 'simulator-roastery';

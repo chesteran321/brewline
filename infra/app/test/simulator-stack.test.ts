@@ -121,7 +121,7 @@ describe.each(['dev', 'prod'] as const)('SimulatorStack (%s)', (envName) => {
     template.hasResourceProperties('AWS::Lambda::Function', {
       FunctionName: `brewline-${envName}-simulator-run`,
       ReservedConcurrentExecutions: 1,
-      Timeout: 120,
+      Timeout: 300, // S2d：咖啡廳＋烘焙廠 / cafés plus the roastery
       Environment: {
         Variables: Match.objectLike({
           STATE_PARAM: `${prefix}/state`,
