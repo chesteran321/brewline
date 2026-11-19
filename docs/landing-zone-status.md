@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1（Dev／Prod 皆 `running`）完成；溯源 S2a（批次、烘焙廠角色、追溯 API）、S2b（us-east-1 edge）完成，S2c（公開溯源頁）進行中** / P0 complete; P1 CI/CD, data foundation, ordering A1–A4 and simulator S1 complete; traceability S2a–S2b complete, S2c (public trace page) in progress（2026-11-19）
+> 狀態 Status：**P0 完成；P1 CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1（Dev／Prod 皆 `running`）完成；溯源 S2a（批次、烘焙廠角色、追溯 API）、S2b（us-east-1 edge）、S2c（公開溯源頁，Free 方案）完成；下一步 S2d（模擬烘焙廠）** / P0 complete; P1 CI/CD, data foundation, ordering A1–A4 and simulator S1 complete; traceability S2a–S2c complete, next S2d（2026-11-19）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -847,7 +847,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 
 - 將來可評估：把 hosted zone 加入方案（Free 上限 50 筆記錄），由方案負擔 zone 費用（目前 2 個 zone 約 USD 12／年）。
 
-### 10.19 溯源 S2c：公開溯源頁 / Traceability S2c（P1，2026-11-19，ADR-031 D2–D4）
+### 10.19 溯源 S2c：公開溯源頁 / Traceability S2c（P1，2026-11-19，ADR-031 D2–D4，PR #71–#73）
 
 | 項目 | Dev | Prod |
 |---|---|---|
@@ -867,6 +867,12 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 冪等：重投影只是覆寫同一個物件。批次已被 Dev smoke test 清掉 → 略過（不重試）；生豆批次或商品找不到 → 丟錯 → 重試 → DLQ 告警。
 - 召回後最多 5 分鐘（快取）公開頁才顯示提醒（ADR-031 D3 已接受）。
 - 費用：Free 方案 0 元（涵蓋 CloudFront、web ACL 與規則、請求）；S3 幾 KB；Lambda 每批次 1 次呼叫。訂閱後 S2b 的 web ACL 不再按時計費。
+已驗證（2026-11-19，commit #73，Deploy run `44443589350`）：**Dev ✅ 507、Prod ✅ 498、0 ❌**——
+- Free 方案層級 `FREE`（Dev、Prod）→ web ACL 不再按時計費；憑證被 distribution 使用、`RenewalEligibility = ELIGIBLE`。
+- 從網際網路：`/`、`app.js`、`robots.txt` 200；HSTS、`nosniff`、`SAMEORIGIN`、`Cache-Control: public, max-age=300`；反向：亂數 token、未知路徑、POST 都是**同一個** 404、HTTP → 301、直連 S3 403、TLS 1.1 被拒。
+- **Dev 端到端**：smoke test 烘焙的批次已自動投影；經 CloudFront 讀取 200，欄位剛好是白名單、沒有租戶／訂單／Email。Prod 尚無烘焙批次（`⏭`，S2d 之後才有）。
+- 告警：Dev、Prod 都是 **10 個**（免費額度上限）。
+
 - 教訓（2026-11-19）：**第一次 Dev 部署成功，但 `verify-ops-stack.sh` 擋下：Dev 告警 11 個（免費額度 10，ADR-030 D9）**，Prod 被跳過。原本投影函數有 DLQ 與 Errors 兩個告警；失敗重試後一定進 DLQ，Errors 告警是重複的 → 移除。Dev 現在剛好 10 個：**之後新增告警前要先合併或移除既有的**（status §13）。
 - 教訓（2026-11-19）：第二次 Dev 部署 **trace 驗證 39 項中 38 ✅、1 ❌**：`POST rejected = 404 (expected 403)`。CloudFront 對只允許 GET／HEAD 的行為回 403，但我們設定的「403 → 404」錯誤回應同樣套用在它上面 → 回 404。這是期望的行為（所有拒絕都長得一樣），是驗證的預期值寫錯；改成檢查 404 且內容與亂數 token 相同。
 - 驗證：`scripts/verify-trace-stack.sh`（CI，lookup role 唯讀）＝ distribution 設定、Free 方案層級、憑證使用中、bucket 私有，以及**從網際網路實測**：`/` 200＋安全標頭＋`Cache-Control`；反向：3 個亂數 token 都 404 且內容相同、未知路徑 404、POST 也是同一個 404（CloudFront 的 403 經自訂錯誤回應統一）、HTTP → 301、直連 S3 403、TLS 1.1 被拒；若 bucket 已有投影，檢查欄位剛好是白名單。
@@ -998,8 +1004,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-18 | 模擬器 Dev 觀察期：11/17 17–19 時與 11/18 10、11、14 時全部照計畫（共 5 筆 created、0 violation、DLQ 0、無告警） |
 | ✅ 2026-11-18 | minimatch 警示（PR #63）部署 Dev、Prod：Lambda 程式不變（只有每次部署的 custom resource 更新） |
 | ✅ 2026-11-18 | 模擬器 S1d：Prod `state` 改 `running`，16:05 排程自動下第一批 2 筆模擬訂單（§10.16）；**模擬器 S1 完成** |
-| P1 | 溯源 S2c（§10.19）：部署 Dev、Prod 並驗證（Free 方案訂閱成功後 web ACL 不再計費）→ S2d（模擬烘焙廠，產生真正的公開頁） |
-| P1 | **告警已達免費額度 10 個（Dev）**：S2d 或之後要新增告警前，先合併既有告警（例如複合告警或共用 DLQ 告警）|
+| P1 | 溯源 S2d（模擬烘焙廠，ADR-031 D8）：產生 Prod 的第一個公開頁 |
+| P1 | **告警已達免費額度 10 個（Dev、Prod）**：S2d 或之後要新增告警前，先合併既有告警（例如複合告警或共用 DLQ 告警）|
 | ✅ 2026-11-18 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`），Developer 可在 Dev 切換模擬器開關（§3） |
 | ✅ 2026-11-18 | Dependabot 安全警示 2 筆（`minimatch` < 11.0.1，Moderate，只在測試／synth 工具鏈）：PR #63 以 npm `overrides` 升到 11.0.9；`aws-cdk-lib` 內部打包（bundleDependencies）的一份要等新版 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |
