@@ -1013,7 +1013,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 12 §2 | `pii` 控制移除「Macie 一次性掃描」 |
 | 13 §4 | 新增 RB-SEC-03 break-glass；RB-COST-01 解除方式；RB-DR-01 區域 SCP 調整 |
 | 13 §6 | 每季加入 break-glass 測試 |
-| 14 | 加入 §11 的 ADR 與 RSK-013（ADR-018、ADR-019 已加入，PR #6） |
+| 14 | 加入 §11 的 ADR 與 RSK-013（ADR-018、ADR-019 已加入，PR #6；ADR-030、ADR-031、ADR-032 於 2026-11-20 加入） |
 | 02 §3 | Dev PITR 改為開啟（ADR-019） |
 | 02 §4 | CDK 結構改為 `infra/app/{bin,lib/stacks,lib/aspects,scripts,test}` |
 | 09 §3.1 | 加註：使用 `TableV2`；Streams `NEW_AND_OLD_IMAGES`（A3a）；GSI 依模組逐一新增 |
