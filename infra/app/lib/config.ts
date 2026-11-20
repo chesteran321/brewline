@@ -169,6 +169,23 @@ export interface TraceSettings {
   readonly edge?: { readonly certificateArn: string; readonly webAclArn: string };
 }
 
+/**
+ * 資料湖基礎（P2a，ADR-032 草案；docs/12 §3、COST-006）。
+ * Data lake foundation (P2a).
+ */
+export interface LakeSettings {
+  /** Athena 單次掃描上限（bytes）：COST-006 / Per-query scan cutoff. */
+  readonly bytesScannedCutoffPerQuery: number;
+  /** raw/ 的保存天數：Prod 730（90 天後轉 Glacier IR）、Dev 30（不轉層）/ raw retention. */
+  readonly rawExpirationDays: number;
+  /** raw/ 轉 Glacier IR 的天數；undefined = 不轉（Dev）/ Days before Glacier IR. */
+  readonly rawGlacierIrAfterDays?: number;
+  /** 刪除 stack 時保留 bucket / Keep buckets on stack delete. */
+  readonly retainOnDelete: boolean;
+  /** Dev 專用 smoke 表（brewline_raw.lake_smoke）/ Dev-only smoke table. */
+  readonly smokeTable: boolean;
+}
+
 export interface BrewlineEnv {
   readonly name: EnvName;
   readonly account: string;
@@ -180,6 +197,7 @@ export interface BrewlineEnv {
   readonly mail: MailSettings;
   readonly simulator: SimulatorSettings;
   readonly trace: TraceSettings;
+  readonly lake: LakeSettings;
 }
 
 /** CloudFront 的憑證與 web ACL 只能在這裡 / CloudFront certificates and web ACLs live here only. */
@@ -252,6 +270,12 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
         webAclArn: 'arn:aws:wafv2:us-east-1:610935435571:global/webacl/brewline-dev-trace/e6df2977-d489-484e-84a9-7b87e5ede319',
       },
     },
+    lake: {
+      bytesScannedCutoffPerQuery: 104_857_600, // 100 MB（D7）
+      rawExpirationDays: 30, // Dev 只放模擬／spike 資料，30 天刪除（D2）/ Dev: 30 days, no tiering
+      retainOnDelete: false,
+      smokeTable: true,
+    },
   },
   prod: {
     name: 'prod',
@@ -320,6 +344,13 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
         certificateArn: 'arn:aws:acm:us-east-1:062868712468:certificate/2cdb9832-028e-4775-b4bb-80d47bc0df9d',
         webAclArn: 'arn:aws:wafv2:us-east-1:062868712468:global/webacl/brewline-prod-trace/7b407737-e10a-406c-8389-d5b4a2b83b22',
       },
+    },
+    lake: {
+      bytesScannedCutoffPerQuery: 1_073_741_824, // 1 GB（D7）
+      rawExpirationDays: 730, // docs/12 §3：raw 保存 2 年 / 2 years
+      rawGlacierIrAfterDays: 90,
+      retainOnDelete: true,
+      smokeTable: false,
     },
   },
 };

@@ -73,7 +73,7 @@ jobs:
 
       - name: cdk deploy (Dev)
         run: >
-          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data brewline-dev-auth brewline-dev-ops brewline-dev-events brewline-dev-api brewline-dev-notify brewline-dev-simulator brewline-dev-edge brewline-dev-trace
+          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data brewline-dev-auth brewline-dev-ops brewline-dev-events brewline-dev-api brewline-dev-notify brewline-dev-simulator brewline-dev-edge brewline-dev-trace brewline-dev-lake
           -c env=dev -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -182,6 +182,14 @@ jobs:
           { echo "### Trace stack (Dev)"; echo '```'; cat verify-trace.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
 
+      - name: Verify lake stack (S3 SSE-KMS + lifecycle, Glue databases, Athena workgroup, DLQ, negative read-only tests)
+        run: |
+          set +e
+          scripts/verify-lake-stack.sh dev outputs.json | tee verify-lake.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### Lake stack (Dev)"; echo '```'; cat verify-lake.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
   deploy-prod:
     name: Deploy Prod
     needs: deploy-dev
@@ -231,7 +239,7 @@ jobs:
 
       - name: cdk deploy (Prod)
         run: >
-          npx cdk deploy brewline-prod-pipeline-check brewline-prod-data brewline-prod-auth brewline-prod-ops brewline-prod-events brewline-prod-api brewline-prod-notify brewline-prod-simulator brewline-prod-edge brewline-prod-trace
+          npx cdk deploy brewline-prod-pipeline-check brewline-prod-data brewline-prod-auth brewline-prod-ops brewline-prod-events brewline-prod-api brewline-prod-notify brewline-prod-simulator brewline-prod-edge brewline-prod-trace brewline-prod-lake
           -c env=prod -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -336,4 +344,12 @@ jobs:
           scripts/verify-trace-stack.sh prod outputs.json | tee verify-trace.txt
           rc=${PIPESTATUS[0]}
           { echo "### Trace stack (Prod)"; echo '```'; cat verify-trace.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Verify lake stack (S3 SSE-KMS + lifecycle, Glue databases, Athena workgroup, DLQ, negative read-only tests)
+        run: |
+          set +e
+          scripts/verify-lake-stack.sh prod outputs.json | tee verify-lake.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### Lake stack (Prod)"; echo '```'; cat verify-lake.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc

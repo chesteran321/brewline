@@ -42,9 +42,11 @@ check "Public allow statements" "$(jq '[.Statement[] | select(.Effect == "Allow"
 alarms=$(aws cloudwatch describe-alarms --alarm-name-prefix "brewline-${env_name}-" --region "$region" --output json)
 total=$(jq '.MetricAlarms | length' <<<"$alarms")
 wired=$(jq --arg t "$topic" '[.MetricAlarms[] | select((.AlarmActions | index($t)) and (.OKActions | index($t)))] | length' <<<"$alarms")
-# 不寫死數量（每加一個告警就會失敗一次，S1b 踩到）；守住的是「全部接上主題」與「≤ 10 個免費額度」（ADR-030 D9）。
-# No fixed count (it broke on every new alarm); the invariants are "all wired" and "within the 10 free alarms".
-check "Alarms (brewline-${env_name}-*) within free tier (1-10)" "$([[ "$total" -ge 1 && "$total" -le 10 ]] && echo "true ($total)" || echo "false ($total)")" "true ($total)"
+# 不寫死數量（每加一個告警就會失敗一次，S1b 踩到）；守住的是「全部接上主題」與「每環境 ≤ 13 個」。
+# ADR-030 D9 修訂（P2 設計 D8）：免費 10 個是全組織共用 → 改管控總數，每環境上限 13（lake／shipment／procurement 各 1 個 DLQ 告警）。
+# No fixed count (it broke on every new alarm); the invariants are "all wired" and "≤ 13 per environment"
+# (ADR-030 D9 revised: the 10 free alarms are shared org-wide, so the budget is a total, one DLQ alarm per P2 module).
+check "Alarms (brewline-${env_name}-*) within budget (1-13, ADR-030 D9 revised)" "$([[ "$total" -ge 1 && "$total" -le 13 ]] && echo "true ($total)" || echo "false ($total)")" "true ($total)"
 check "Alarms notifying the topic (ALARM + OK)" "$wired" "$total"
 
 rule=$(aws events describe-rule --name "brewline-${env_name}-stock-low" --event-bus-name "brewline-${env_name}" --region "$region" --output json)
