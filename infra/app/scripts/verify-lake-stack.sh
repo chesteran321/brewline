@@ -210,8 +210,10 @@ check "Firehose role trust SourceAccount/SourceArn" "$(jq -r '.Statement[0].Cond
   "${account} arn:aws:firehose:${region}:${account}:deliverystream/${stream}"
 
 # --- 28：反向：錯誤前綴沒有物件 / Negative: nothing in the error prefix ---
+# 用 JSON＋jq 計數：`--output text` 在沒有物件時印 `None`、有多頁時每頁各印一行（CLI 自動分頁）。
+# Count with JSON + jq: text output prints `None` when empty and one line per page when paginated.
 check "Objects under raw/events-errors/ (negative)" "$(aws s3api list-objects-v2 --bucket "$lake" --prefix raw/events-errors/ --region "$region" \
-  --query 'KeyCount' --output text)" "0"
+  --query 'Contents[].Key' --output json | jq 'length')" "0"
 
 # --- 29：投遞成功（最近 24 小時有資料才檢查）/ Delivery success when there was traffic ---
 succ=$(aws cloudwatch get-metric-statistics --namespace AWS/Firehose --metric-name DeliveryToS3.Success \
@@ -225,12 +227,17 @@ else
 fi
 
 # --- 19：反向：唯讀角色讀不到物件內容（沒有 kms:Decrypt）/ Negative: the read-only role cannot read objects (no kms:Decrypt) ---
-obj=$(aws s3api list-objects-v2 --bucket "$lake" --region "$region" --max-items 1 --query 'Contents[0].Key' --output text 2>/dev/null || echo None)
-if [[ -z "$obj" || "$obj" == "None" ]]; then
+# `--max-items 1 --output text` 在有第二個物件時會多印一行 `None`（分頁的 NextToken）→ 鍵名被污染 → NoSuchKey。
+# 改用 JSON 取第一個鍵 / With --max-items and text output a second line (`None`) is appended once there is more
+# than one object, which corrupted the key (NoSuchKey). Take the first key from JSON instead.
+obj=$(aws s3api list-objects-v2 --bucket "$lake" --region "$region" --max-items 1 --query 'Contents[].Key' --output json 2>/dev/null \
+  | jq -r 'if type == "array" then (.[0] // "") else "" end')
+if [[ -z "$obj" ]]; then
   skip "Read-only GetObject denied: no object in the lake yet (Dev: after T1 in the spec §7)"
 else
   err=$(aws s3api get-object --bucket "$lake" --key "$obj" --region "$region" /dev/null 2>&1 >/dev/null || true)
-  check "Read-only GetObject (${obj}) denied" "$(grep -q 'AccessDenied' <<<"$err" && echo denied || echo "allowed: ${err:0:80}")" "denied"
+  # 只有 AccessDenied 算通過；NoSuchKey 代表腳本取錯鍵（不是「被允許」）/ Only AccessDenied passes; NoSuchKey means a script bug.
+  check "Read-only GetObject (${obj}) denied" "$(if grep -q 'AccessDenied' <<<"$err"; then echo denied; elif grep -q 'NoSuchKey' <<<"$err"; then echo "script error: NoSuchKey"; else echo "allowed: ${err:0:80}"; fi)" "denied"
 fi
 
 # --- 20：反向：唯讀角色不能啟動查詢 / Negative: the read-only role cannot start queries ---
