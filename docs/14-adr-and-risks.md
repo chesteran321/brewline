@@ -295,6 +295,75 @@
   - 沙盒期間收件人必須先驗證；Dev 與 Prod 各自驗證。
 - **替代方案 Alternatives considered**：見 A4 規劃（D1 B／C、D2 A／C、D3 B／C）。
 
+### ADR-030 模擬器範圍與設計（S1 決策）/ Simulator Scope and Design
+
+- **狀態 Status**：Accepted（2026-11-17）；S1a–S1d 已實作（status §10.16）；**D9 於 2026-11-20 修訂**；修正 07（docs/07 對照見 status §12）
+- **背景 Context**：docs/07 的模擬器同時涵蓋租戶、訂單、生豆／烘焙批次、貨櫃與 EDI 異常；BrewLine 需要穩定、可重現、可標記的合成流量，同時不讓模擬帳號取得 staff 權限、不讓密碼進 repo 或 CloudFormation。
+- **決策 Decision**：
+  - **D1 分階段**：S1＝租戶＋訂單＋重複下單異常；生豆／烘焙批次 → S2（溯源）；貨櫃／DCSA／IFTSTA／EDI 異常 → S3（P2）。
+  - **D2 身分**：專用 `simulator` app client（`ADMIN_USER_PASSWORD_AUTH`）＋每人隨機密碼存 SSM SecureString（資料層 CMK）；pre token 觸發器限制經由此 client 只發 scope 給 `simulator` 群組。
+  - **D3 帳號**：部署時由 custom resource 建立 40 個使用者（先啟用 30，每月依日期啟用 1–2）；執行函數只有 `AdminInitiateAuth`（RSK-018 的建立權限只在 custom resource）。
+  - **D4 規模**：Dev、Prod 都跑（Prod 每天 5–40 筆、Dev 2–6 筆；每筆 1–3 個商品 × 1–5 kg；跳過庫存偏低）；首次部署為 `paused`。
+  - **D5** S1 不推進訂單（由逾時工作流取消）；烘焙廠操作員留給 S2（ADR-031 D8）。
+  - **D6 標記**：`synthetic: true` 由伺服器依 `cognito:groups`（JWT claim）寫入訂單與事件；body 帶此欄位 → 400。
+  - **D7 開關**：`state` 參數只在第一次建立時寫入（部署不覆蓋；Dev 可由 Developer 切換），`config` 由 CDK 管理；`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`。
+  - **D8 排程與重現性**：台北 08:05–19:05 每小時；冪等鍵＝hash(種子, 日期, 小時, 序號)；重現性以 dry-run 計畫雜湊驗證（SIM-F-009）。
+  - **D9 監控**：不建自訂指標；預期沒達成就讓函數失敗 → `Errors` 告警。原為「每帳號告警 ≤ 10（免費額度）」。
+    - **D9 修訂（2026-11-20）**：CloudWatch 告警免費額度 10 個是**全組織**共用（含管理帳號；Free Tier 頁 `Global-CW:AlarmMonitorUsage` 實測），每帳號 ≤ 10 的前提不成立 → 改為管控組織總數、告警費預算 ≤ USD 2／月、每環境 ≤ 13（P2 每模組一個 DLQ 告警，ADR-032 D8）；**不合併 DLQ**（共用 DLQ 的告警在 ALARM 期間會遮蔽其他來源的新失敗）。`verify-ops-stack.sh`、`verify-simulator-stack.sh` 的上限改為 ≤ 13。
+- **後果 Consequences**：
+  - 沒有新的固定費用（SecureString Standard 免費、排程與 Lambda 在免費額度內）；P2 完成後組織告警約 26 個、每月約 USD 1.6。
+  - 改 `config.ts` 的 `simulator.seed` 會產生新的一批租戶；改產生器權重會讓同一小時重跑得到 422。
+  - 前置：S0（RSK-017，bus 資源政策）。
+- **替代方案 Alternatives considered**：模擬器直接寫 DynamoDB（違反 ADR-011）；USER_PASSWORD_AUTH 或共用密碼（較弱）；執行時建立帳號（執行角色需要 `AdminCreateUser`）；CloudFormation 管理 `state`（每次部署被覆蓋）；自訂指標（多一層要維護）。
+
+### ADR-031 溯源範圍與設計（S2 決策）/ Traceability Scope and Design
+
+- **狀態 Status**：Accepted（2026-11-18）；S2a–S2d 於 2026-11-20 全部實作（status §10.17–§10.20）；修正 04
+- **背景 Context**：docs/04 要求生豆批次 → 烘焙批次 → 訂單的雙向追溯、QR 公開頁與召回。公開頁不能洩漏租戶或訂單資訊（RSK-019），讀取路徑要能承受 token 列舉，而且要在 USD 300／年的預算內提供 WAF。
+- **決策 Decision**：
+  - **D1 範圍**：S2＝生豆批次（8 個種子）＋烘焙批次＋QR＋公開頁＋staff 追溯＋召回＋模擬烘焙廠；航程（SHP，TRC-F-004）、天氣（PRC）、換批、召回寄信延後。
+  - **D2 公開頁**：S3 預先產生的**白名單 JSON 投影**（事件觸發，以建構而非刪減實作）；讀取路徑沒有 Lambda／API／DynamoDB。
+  - **D3 CloudFront 統一費率 Free 方案**（WAF＋IP 速率限制＋DDoS，`AWS::PricingPlanManager::Subscription`）；快取用 `Cache-Control: max-age=300`（召回最多 5 分鐘後顯示）；方案不合格時退回 pay-as-you-go 且不掛 WAF。
+  - **D4 兩階段部署**：us-east-1 `edge`（ACM、CLOUDFRONT web ACL）→ ARN 寫入 config → 台北 `trace`（bucket、OAC、distribution、方案訂閱）；不用 `crossRegionReferences`。`describe-type`：台北 Distribution／Subscription `LIVE`；ACM 為 `NON_PROVISIONABLE`（未實測，CloudFront 本來就只接受 us-east-1 憑證）。
+  - **D5 資料模型**：單表鄰接清單（`LOT#…/ROAST#…`、`ROAST#…/ORDER#…`），**不加 GSI2**。
+  - **D6 身分**：`brewline/roastery` scope＋`simulator-roastery` 群組（無租戶、無 admin、`synthetic`）；伺服器端 synthetic 保護（模擬呼叫者只碰模擬資料）。
+  - **D7 補貨**：`expected_version` 樂觀鎖、上限 2000 kg。
+  - **D8 模擬烘焙廠節奏**（方案 A：與模擬咖啡廳共用同一個函數與 `run-errors` 告警）：每小時確認 90%、16:05 排烘＋補貨、隔天 09 時烘焙（產生 QR）／14 時出貨、出貨 2 天後完成。
+  - **D9 QR 與召回**：QR token 128-bit（放在 URL fragment）；召回只有 admin、只能一次。
+- **後果 Consequences**：
+  - Free 方案 0 元（CloudFront、web ACL、規則、請求），但只能用 managed 快取／回應標頭政策、沒有存取日誌；WAF 規則 ≤ 5。
+  - 2026-11-20 Prod 第一批 9 個公開溯源頁由排程自動產生。
+- **替代方案 Alternatives considered**：API Gateway＋Lambda 動態公開頁（列舉流量直達資料庫）；regional WAF（約 USD 190／年）；GSI2（鄰接清單已足夠）；模擬烘焙廠獨立函數與告警（方案 B 共用 DLQ 會遮蔽失敗）。
+
+### ADR-032 P2 資料設計與資料湖基礎 / P2 Data Design and Data Lake Foundation
+
+- **狀態 Status**：Accepted（2026-11-20，D1–D12；D8 同日修訂）；P2a（資料湖基礎）已實作（PR #78，status §10.21）；修正 05 PRC-F-002、06 §4／§7、09 §3.4、12 DS-01／09／10；修訂 ADR-030 D9
+- **背景 Context**：P2 涵蓋資料湖、海運追蹤（06，含 TRC-F-004）與採購分析（05）。查證結果（2026-11-19～20）：aisstream.io **沒有正式使用條款**（官方 2023 年 GitHub 留言表示目前無使用限制、無 SLA），只有岸基 AIS，5 個出口港中 4 個在非洲／南美弱覆蓋區；World Port Index 為公有領域；UN/LOCODE 授權不明確。台北 `describe-type` 對 `AWS::Glue::Database`／`Table` 回 `NON_PROVISIONABLE`，但測試 stack 實際 `CREATE_COMPLETE`（status §2）。免費額度（含 CloudWatch 告警 10 個）是**組織層級**（status §5）。
+- **決策 Decision**：
+  - **D1 公開頁海運旅程用模擬航程**：真實港口（UN/LOCODE＋WPI 座標）、虛構船名與 ISO 6346 貨櫃號、決定性種子，頁面標示 `demo`。理由：沒有正式授權；岸基覆蓋撐不起產地 → 台灣的完整航程；真實船＋虛構貨物放公開頁會誤導；可重現、可回放測試（SHP-F-004）。
+  - **D2 aisstream 只在 Dev 做 7 天 spike**：內部、不公開、資料 30 天後刪除；量測 7 個港口 geofence 的訊息數；有正式條款前不進 Prod（DATA-001）。
+  - **D3 raw → curated 用 Athena UNLOAD**：Step Functions Standard 先清空目的分區（UNLOAD 要求目的地為空）再 UNLOAD → 分區覆寫冪等（PRC-N-003）；維持 Node-only，不需 pyarrow／Glue job。
+  - **D4 Glue 由 CDK 定義**（L1 `CfnDatabase`／`CfnTable`）、Hive 分區 Parquet＋**partition projection**；不用 crawler；**不開 Lake Formation**（維持 IAM 權限模型）。
+  - **D5 SSE-KMS 沿用資料層 CMK＋S3 Bucket Key**（`kms:ViaService = s3.ap-east-2.amazonaws.com`）：不增加 KMS 固定費，Bucket Key 讓請求數接近 0。
+  - **D6 訂單事件進資料湖**：bus 規則 → Firehose → `raw/events/`（GZIP）；detail 已是白名單、無個資（DATA-012）。
+  - **D7 專用 workgroup `brewline-<env>-analytics`**：`EnforceWorkGroupConfiguration`、單次掃描上限 Prod 1 GB／Dev 100 MB（COST-006）、結果 SSE-KMS、結果 bucket 7 天刪除；`primary` 無法刪除 → IAM 只允許此 workgroup。
+  - **D8（2026-11-20 修訂）每個模組一個 DLQ＋一個告警**：`lake-dlq`、`shipment-dlq`、`procurement-dlq` → 每環境 +3 個告警（Dev、Prod 各 13）。DQ 失敗、資料過期、EDI 解析失敗改用事件 → 規則 → 既有 `ops-alerts`（每次都通知）。修訂理由：告警是「狀態」，共用 DLQ 在 ALARM 期間會遮蔽其他來源的新失敗；訊息格式不同、權限變寬（同 status §10.20 方案 A 的推理）。每個告警 USD 0.10／月，一年約 USD 5 換清楚的失敗領域。
+  - **D9 aisstream spike**：每 30 分、256 MB、連線 120 秒（≈ 43,200 GB-秒／月，免費額度內）；SHP-N-003 改為 ≤ 35 分。
+  - **D10 儀表板預先計算**：每日工作流把結果寫成 JSON（`analytics/serving/`）→ staff API 讀取；請求路徑不跑 Athena（同 ADR-031 D2）。
+  - **D11 溯源頁旅程**：出口／抵達港、日期、船名（`demo`）、簡化航跡 ≤ 200 點，**同源 SVG**，不載地圖圖磚（CSP 不變）。
+  - **D12 EDI（IFTSTA）在 P2 做**，排在海運最後：對應依 UNECE 公開目錄自行設計，文件註明目錄版本；不使用任何公司或合作夥伴的對應規則（C-03）。
+  - **實作補充（P2a，2026-11-20）**：
+    - Glue Data Catalog **不加密**：`AWS::Glue::DataCatalogEncryptionSettings` 是帳號層級單例（影響所有 Catalog 使用者），中繼資料不含敏感資料。
+    - Lake bucket policy：`DenyWrongKmsKey`／`DenyNonKmsSse` 寫成 `Null: false`＋`StringNotEquals`（「標頭存在且不等於」）。實作規格原寫 `StringNotEqualsIfExists`，但 `…IfExists` 在鍵不存在時為 true → 會擋掉所有沒帶加密標頭、依預設加密寫入的上傳。寫入者指定金鑰時一律用 SSM 的 CMK **ARN**（金鑰 ID 也會被拒）。
+    - Dev bucket 不用 `autoDeleteObjects`（會多一個 custom resource Lambda）；P2a stack 沒有任何 Lambda。
+    - `describe-type` 判讀規則：`FULLY_MUTABLE`／`IMMUTABLE`＋`LIVE` → 可用；`NON_PROVISIONABLE`／`TypeNotFound` → Dev 測試 stack create → 讀回 → delete 後再下結論；每次附對照組與反向組（status §2）。
+- **後果 Consequences**：
+  - 告警：P2a 後每環境 11、P2b 後 12、P2e 後 13；組織合計 P2 完成後約 26（每月約 USD 1.6）。ADR-030 D9 改為管控組織總數、告警費 ≤ USD 2／月，`verify-ops-stack.sh` 與 `verify-simulator-stack.sh` 上限 ≤ 13（不變條件，不寫死目前數量）。
+  - P2a 本身幾乎不增加費用（告警 +USD 0.10／月／環境）；P2a-2（Firehose）之後增加，開始前先看 Dev 費用（Dev 月預算 2026-11-20 起 USD 10）。
+  - Developer 許可集（Dev）新增 Athena（只此 workgroup）、Glue 讀取、lake 讀取、`raw/_smoke/*` 寫入、`kms:ViaService = s3`；Prod 沒有人員查詢路徑。
+  - 公開頁的海運資訊全部是模擬資料；真實 AIS 只用於內部覆蓋量測。
+- **替代方案 Alternatives considered**：aisstream 進 Prod 並公開顯示（無授權、覆蓋不足）；Glue crawler（每次至少 10 分鐘計費、schema 漂移）；pyarrow／Glue job（要 Python 或 Glue 費用）；Lake Formation（改變權限模型）；共用一個 DLQ（D8 修訂前的方案，遮蔽失敗）；Glue 目錄加密（帳號層級副作用）。
+
 ### ADR 範本 / ADR Template
 
 ```markdown
@@ -314,7 +383,7 @@
 
 | 編號 ID | 風險 Risk | 可能性 L | 影響 I | 緩解 Mitigation | 負責 Owner |
 |---|---|---|---|---|---|
-| RSK-001 | aisstream.io 服務中斷或條款變更 / AIS source outage or terms change | M | M | 擷取逾期告警；溯源頁降級顯示；評估替代來源 | Chester |
+| RSK-001 | aisstream.io 服務中斷或條款變更 / AIS source outage or terms change | M | M | 擷取逾期告警；溯源頁降級顯示；評估替代來源；**ADR-032 D1／D2（2026-11-20）**：公開頁改用模擬航程，aisstream 只在 Dev spike，不是 Prod 依賴 | Chester |
 | RSK-002 | AWS 免費額度或定價政策變更 / Free tier or pricing changes | M | M | 每季複查價格；月度成本檢視 | Chester |
 | RSK-003 | 安全服務實際成本超出預估 / Security services cost overrun | M | M | 試用期實測；ADR-008 縮減順序 | Chester |
 | RSK-004 | CloudFront Free 方案額度或規則數不足 / Free plan limits reached | L | M | 監控用量通知；必要時升級 Pro（每月 USD 15） | Chester |
