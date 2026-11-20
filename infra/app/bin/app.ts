@@ -193,4 +193,5 @@ const lakeStack = new LakeStack(app, `brewline-${env.name}-lake`, {
 });
 lakeStack.addStackDependency(dataStack, 'CMK ARN for SSE-KMS (SSM)');
 lakeStack.addStackDependency(opsStack, 'DLQ alarm publishes to the ops topic (SSM)');
+lakeStack.addStackDependency(eventsStack, 'order-events rule on the brewline-<env> bus (SSM bus name, P2a-2)');
 Tags.of(lakeStack).add('module', 'data-lake', { priority: 200 });

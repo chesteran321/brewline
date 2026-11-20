@@ -1,7 +1,8 @@
 import { App } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { ENVIRONMENTS } from '../lib/config';
-import { ATHENA_ENGINE, LAKE_DATABASES, LAKE_PARAMETERS, LakeStack, SMOKE_TABLE } from '../lib/stacks/lake-stack';
+import { ORDER_EVENTS_INPUT_TEMPLATE } from '../lib/constructs/order-events-firehose';
+import { ATHENA_ENGINE, LAKE_DATABASES, LAKE_PARAMETERS, LakeStack, ORDER_EVENTS_TABLE, SMOKE_TABLE } from '../lib/stacks/lake-stack';
 
 const make = (envName: 'dev' | 'prod') => {
   const app = new App();
@@ -25,6 +26,9 @@ describe.each(['dev', 'prod'] as const)('LakeStack (%s)', (envName) => {
   const [resultsId, resultsBucket] = bucketByName('athena-results');
   const policyOf = (bucketId: string) =>
     Object.values(t.findResources('AWS::S3::BucketPolicy')).find((p) => p.Properties.Bucket.Ref === bucketId)!.Properties.PolicyDocument.Statement as Stmt[];
+  const tableNamed = (name: string) =>
+    Object.values(t.findResources('AWS::Glue::Table')).filter((r) => r.Properties.TableInput.Name === name);
+  const smokeTables = () => tableNamed(SMOKE_TABLE);
   const rules = (b: { [key: string]: any }): Rule[] => b.Properties.LifecycleConfiguration.Rules;
 
   test('both buckets: SSE-KMS with the data CMK (SSM) + Bucket Key, block public access, owner-enforced, data-class internal', () => {
@@ -117,11 +121,11 @@ describe.each(['dev', 'prod'] as const)('LakeStack (%s)', (envName) => {
     // 期望值寫死環境，不讀 config：Prod 誤開 smokeTable 時這裡要失敗 / Hard-coded so a Prod config slip fails here.
     expect(e.lake.smokeTable).toBe(envName === 'dev');
     if (envName === 'prod') {
-      t.resourceCountIs('AWS::Glue::Table', 0);
+      expect(smokeTables()).toEqual([]);
       return;
     }
-    t.resourceCountIs('AWS::Glue::Table', 1);
-    const table = Object.values(t.findResources('AWS::Glue::Table'))[0]!;
+    expect(smokeTables()).toHaveLength(1);
+    const table = smokeTables()[0]!;
     expect(table.DependsOn).toEqual([expect.stringContaining('GlueDbRaw')]);
     expect(table.Properties).toMatchObject({
       DatabaseName: LAKE_DATABASES.raw,
@@ -183,8 +187,8 @@ describe.each(['dev', 'prod'] as const)('LakeStack (%s)', (envName) => {
     });
   });
 
-  test('nine SSM parameters under /brewline/<env>/lake/ with matching outputs', () => {
-    t.resourceCountIs('AWS::SSM::Parameter', 9);
+  test('eleven SSM parameters under /brewline/<env>/lake/ with matching outputs (P2a 9 + P2a-2 2)', () => {
+    t.resourceCountIs('AWS::SSM::Parameter', 11);
     for (const [name, outputId] of Object.entries(LAKE_PARAMETERS)) {
       t.hasResourceProperties('AWS::SSM::Parameter', { Name: `/brewline/${envName}/lake/${name}`, Type: 'String', Tier: 'Standard' });
       expect(t.findOutputs(outputId)).not.toEqual({});
@@ -196,5 +200,132 @@ describe.each(['dev', 'prod'] as const)('LakeStack (%s)', (envName) => {
     t.resourceCountIs('AWS::Lambda::Function', 0);
     expect(Object.keys(t.findResources('Custom::S3AutoDeleteObjects'))).toEqual([]);
     expect(Annotations.fromStack(stack).findError('*', Match.anyValue())).toEqual([]);
+  });
+
+  // ---------------- P2a-2：訂單事件 → Firehose → raw/events/ ----------------
+  const streamOf = () => Object.values(t.findResources('AWS::KinesisFirehose::DeliveryStream'))[0]!;
+  const firehosePolicy = () =>
+    Object.values(t.findResources('AWS::IAM::Policy')).find((p) =>
+      (p.Properties.PolicyDocument.Statement as Stmt[]).some((x) => x.Sid === 'WriteOrderEventPrefixes'),
+    )!.Properties.PolicyDocument.Statement as Stmt[];
+  const ruleOf = () => Object.values(t.findResources('AWS::Events::Rule'))[0]!;
+  const streamArn = { 'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, `:firehose:ap-east-2:${e.account}:deliverystream/brewline-${envName}-order-events`]] };
+
+  test('P2a-2 Firehose: DirectPut, AWS-owned stream key, raw/events/ prefixes, GZIP, 5 MiB/300 s, CMK for objects, error logs, no processing', () => {
+    t.resourceCountIs('AWS::KinesisFirehose::DeliveryStream', 1);
+    const p = streamOf().Properties;
+    expect(p).toMatchObject({
+      DeliveryStreamName: `brewline-${envName}-order-events`,
+      DeliveryStreamType: 'DirectPut',
+      DeliveryStreamEncryptionConfigurationInput: { KeyType: 'AWS_OWNED_CMK' },
+    });
+    const d = p.ExtendedS3DestinationConfiguration;
+    expect(d).toMatchObject({
+      BucketARN: { 'Fn::GetAtt': [lakeId, 'Arn'] },
+      Prefix: 'raw/events/dt=!{timestamp:yyyy-MM-dd}/',
+      ErrorOutputPrefix: 'raw/events-errors/!{firehose:error-output-type}/dt=!{timestamp:yyyy-MM-dd}/',
+      CompressionFormat: 'GZIP',
+      BufferingHints: { SizeInMBs: 5, IntervalInSeconds: 300 },
+      EncryptionConfiguration: { KMSEncryptionConfig: { AWSKMSKeyARN: { Ref: expect.stringContaining('datakmskeyarn') } } },
+      CloudWatchLoggingOptions: { Enabled: true },
+    });
+    // 反向：沒有資料處理（E1-A 由規則產生換行）/ Negative: no processing configuration.
+    expect(d.ProcessingConfiguration).toBeUndefined();
+    expect(d.DynamicPartitioningConfiguration).toBeUndefined();
+    t.hasResourceProperties('AWS::Logs::LogGroup', {
+      LogGroupName: `/aws/kinesisfirehose/brewline-${envName}-order-events`,
+      RetentionInDays: envName === 'dev' ? 7 : 30,
+    });
+  });
+
+  test('P2a-2 Firehose role: trust firehose with SourceAccount/SourceArn; writes only two prefixes; KMS via S3 with the bucket ARN as context', () => {
+    t.hasResourceProperties('AWS::IAM::Role', {
+      RoleName: `brewline-${envName}-order-events-firehose`,
+      AssumeRolePolicyDocument: {
+        Statement: [
+          Match.objectLike({
+            Principal: { Service: 'firehose.amazonaws.com' },
+            Condition: {
+              StringEquals: { 'aws:SourceAccount': { Ref: 'AWS::AccountId' } },
+              ArnEquals: { 'aws:SourceArn': streamArn },
+            },
+          }),
+        ],
+      },
+    });
+    const st = firehosePolicy();
+    const write = st.find((x) => x.Sid === 'WriteOrderEventPrefixes')!;
+    expect([write.Action].flat().sort()).toEqual(['s3:AbortMultipartUpload', 's3:PutObject']);
+    expect(write.Resource).toHaveLength(2);
+    expect(write.Resource).toEqual(
+      expect.arrayContaining([
+        { 'Fn::Join': ['', [{ 'Fn::GetAtt': [lakeId, 'Arn'] }, '/raw/events-errors/*']] },
+        { 'Fn::Join': ['', [{ 'Fn::GetAtt': [lakeId, 'Arn'] }, '/raw/events/*']] },
+      ]),
+    );
+    const kmsSt = st.find((x) => x.Sid === 'DataKeyViaS3ForLakeBucket')!;
+    expect([kmsSt.Action].flat().sort()).toEqual(['kms:Decrypt', 'kms:GenerateDataKey']);
+    // Bucket Key：加密內容是 bucket ARN（不是物件 ARN）/ Bucket Key: the context is the bucket ARN.
+    expect(kmsSt.Condition!.StringEquals!['kms:EncryptionContext:aws:s3:arn']).toEqual({ 'Fn::GetAtt': [lakeId, 'Arn'] });
+    expect(kmsSt.Condition!.StringEquals!['kms:ViaService']).toBeDefined();
+    // 反向：不能讀、不能刪、沒有 Resource "*" / Negative: no read, no delete, no wildcard resource.
+    const actions = st.flatMap((x) => [x.Action].flat());
+    expect(actions).not.toEqual(expect.arrayContaining(['s3:GetObject']));
+    expect(actions).not.toEqual(expect.arrayContaining(['s3:DeleteObject']));
+    expect(st.filter((x) => x.Resource === '*')).toEqual([]);
+  });
+
+  test('P2a-2 rule: only OrderCreated/OrderStatusChanged; input transformer emits one JSON line; DLQ = lake-dlq; retries 3 / 2 h', () => {
+    t.resourceCountIs('AWS::Events::Rule', 1);
+    const r = ruleOf().Properties;
+    expect(r).toMatchObject({
+      Name: `brewline-${envName}-lake-order-events`,
+      State: 'ENABLED',
+      EventBusName: { Ref: expect.stringContaining('eventsbusname') },
+      EventPattern: { source: ['brewline.ordering'], 'detail-type': ['OrderCreated', 'OrderStatusChanged'] },
+    });
+    expect(r.Targets).toHaveLength(1);
+    const target = r.Targets[0];
+    expect(target.Arn).toEqual(streamArn);
+    expect(target.DeadLetterConfig).toEqual({ Arn: { 'Fn::GetAtt': [expect.stringContaining('LakeDlq'), 'Arn'] } });
+    expect(target.RetryPolicy).toEqual({ MaximumRetryAttempts: 3, MaximumEventAgeInSeconds: 7200 });
+    expect(target.InputTransformer.InputPathsMap).toEqual({ id: '$.id', detail_type: '$.detail-type', source: '$.source', time: '$.time', detail: '$.detail' });
+    expect(target.InputTransformer.InputTemplate).toBe(ORDER_EVENTS_INPUT_TEMPLATE);
+    expect(target.InputTransformer.InputTemplate.endsWith('}\n')).toBe(true);
+    // 反向：不用 <aws.events.event…>（文件規定只能當欄位值）/ Negative: no reserved full-event variable.
+    expect(target.InputTransformer.InputTemplate).not.toMatch(/aws\.events\.event/);
+    // 規則投遞失敗可以寫進 lake-dlq（限定這條規則）/ The DLQ accepts dead letters from this rule only.
+    const qp = Object.values(t.findResources('AWS::SQS::QueuePolicy'))[0]!.Properties.PolicyDocument.Statement as Stmt[];
+    const dl = qp.find((x) => x.Sid === 'AllowOrderEventsRuleDeadLetters')!;
+    expect(dl).toMatchObject({ Effect: 'Allow', Action: 'sqs:SendMessage' });
+    expect(JSON.stringify(dl.Condition)).toContain(`/brewline-${envName}-lake-order-events`);
+    // 規則角色只能寫這個 stream / The rule role can only put into this stream.
+    const rulePolicy = Object.values(t.findResources('AWS::IAM::Policy')).find((p) =>
+      (p.Properties.PolicyDocument.Statement as Stmt[]).some((x) => x.Sid === 'PutIntoOrderEventsStream'),
+    )!.Properties.PolicyDocument.Statement as Stmt[];
+    expect(rulePolicy).toEqual([
+      expect.objectContaining({ Action: expect.arrayContaining(['firehose:PutRecord', 'firehose:PutRecordBatch']), Resource: target.Arn }),
+    ]);
+  });
+
+  test('P2a-2 Glue table order_events in both envs: JSON lines, projection from 2026-11-20, malformed JSON fails', () => {
+    const tables = tableNamed(ORDER_EVENTS_TABLE);
+    expect(tables).toHaveLength(1);
+    const ti = tables[0]!.Properties.TableInput;
+    expect(tables[0]!.Properties.DatabaseName).toBe(LAKE_DATABASES.raw);
+    expect(ti.StorageDescriptor.Columns.map((c: { Name: string }) => c.Name)).toEqual(['id', 'detail_type', 'source', 'time', 'detail']);
+    expect(ti.StorageDescriptor.Columns[4].Type).toMatch(/^struct<event_id:string,.*synthetic:boolean,items:array<struct<product_id:string,qty_kg:double>>>$/);
+    expect(ti.StorageDescriptor.SerdeInfo).toEqual({
+      SerializationLibrary: 'org.openx.data.jsonserde.JsonSerDe',
+      Parameters: { 'ignore.malformed.json': 'false' },
+    });
+    expect(ti.Parameters).toMatchObject({
+      'projection.enabled': 'true',
+      'projection.dt.type': 'date',
+      'projection.dt.range': '2026-11-20,NOW',
+      synthetic: 'mixed',
+      ingested_by: 'firehose',
+    });
+    expect(ti.Parameters['storage.location.template']).toEqual({ 'Fn::Join': ['', ['s3://', { Ref: lakeId }, '/raw/events/dt=${dt}/']] });
   });
 });
