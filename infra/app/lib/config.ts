@@ -184,6 +184,8 @@ export interface LakeSettings {
   readonly retainOnDelete: boolean;
   /** Dev 專用 smoke 表（brewline_raw.lake_smoke）/ Dev-only smoke table. */
   readonly smokeTable: boolean;
+  /** 訂單事件 Firehose 錯誤日誌保存天數（P2a-2）/ Order-events Firehose error log retention (days). */
+  readonly orderEventsLogRetentionDays: 7 | 30;
 }
 
 export interface BrewlineEnv {
@@ -275,6 +277,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       rawExpirationDays: 30, // Dev 只放模擬／spike 資料，30 天刪除（D2）/ Dev: 30 days, no tiering
       retainOnDelete: false,
       smokeTable: true,
+      orderEventsLogRetentionDays: 7,
     },
   },
   prod: {
@@ -351,6 +354,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       rawGlacierIrAfterDays: 90,
       retainOnDelete: true,
       smokeTable: false,
+      orderEventsLogRetentionDays: 30,
     },
   },
 };

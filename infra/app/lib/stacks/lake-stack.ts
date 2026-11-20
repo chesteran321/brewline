@@ -4,12 +4,15 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as glue from 'aws-cdk-lib/aws-glue';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { DATA_CLASS_TAG, EnvName, LakeSettings } from '../config';
+import { ORDER_EVENTS_PREFIX, OrderEventsFirehose } from '../constructs/order-events-firehose';
 import { DataStack } from './data-stack';
+import { EventsStack } from './events-stack';
 import { notifyAlarms } from './ops-stack';
 
 export interface LakeStackProps extends StackProps {
@@ -28,6 +31,11 @@ export const LAKE_DATABASES = {
 export const SMOKE_TABLE = 'lake_smoke';
 export const SMOKE_PREFIX = 'raw/_smoke/';
 
+/** 訂單事件表（P2a-2，ADR-032 D6；Dev、Prod 都建，E5）/ Order events table in both envs. */
+export const ORDER_EVENTS_TABLE = 'order_events';
+/** 訂單事件 projection 起點：P2a-2 開始寫入的日期 / Projection start: the day ingestion began. */
+export const ORDER_EVENTS_PROJECTION_START = '2026-11-20';
+
 /** Athena 引擎版本（D7）/ Athena engine version. */
 export const ATHENA_ENGINE = 'Athena engine version 3';
 
@@ -45,12 +53,14 @@ export const LAKE_PARAMETERS = {
   'db-analytics': 'DbAnalytics',
   'dlq-arn': 'DlqArn',
   'dlq-url': 'DlqUrl',
+  'order-events-stream-name': 'OrderEventsStreamName',
+  'order-events-stream-arn': 'OrderEventsStreamArn',
 } as const;
 
 /** 前綴慣例（S3 沒有資料夾，不建立物件）/ Prefix convention; S3 has no folders, so nothing is created. */
 export const LAKE_PREFIX_CONVENTION =
   'raw/<source>/dt=YYYY-MM-DD/, curated/<table>/..., analytics/<table>/..., analytics/serving/, ' +
-  'quarantine/<source>/dt=.../, edi/{inbound,archive,quarantine}/, raw/_smoke/ (Dev only)';
+  'quarantine/<source>/dt=.../, edi/{inbound,archive,quarantine}/, raw/events/ + raw/events-errors/ (Firehose), raw/_smoke/ (Dev only)';
 
 /**
  * 資料湖基礎（P2a，ADR-032 草案，P2 設計 D3–D8）。
@@ -263,6 +273,63 @@ export class LakeStack extends Stack {
     });
     notifyAlarms(this, envName);
 
+    // --- 6b) 訂單事件 → Firehose → raw/events/（P2a-2，ADR-032 D6）。不新增告警（E4）---
+    // Order events → Firehose → raw/events/. No new alarm: rule failures go to the lake DLQ.
+    const orderEvents = new OrderEventsFirehose(this, 'OrderEvents', {
+      envName,
+      bucket,
+      keyArn,
+      busName: ssm.StringParameter.valueForStringParameter(this, `${EventsStack.parameterPrefix(envName)}/bus-name`),
+      deadLetterQueue: dlq,
+      logRetention: lake.orderEventsLogRetentionDays as logs.RetentionDays,
+    });
+
+    const eventsTable = new glue.CfnTable(this, 'OrderEventsTable', {
+      catalogId: this.account,
+      databaseName: LAKE_DATABASES.raw,
+      tableInput: {
+        name: ORDER_EVENTS_TABLE,
+        description: 'Order domain events (OrderCreated, OrderStatusChanged) delivered by Firehose; JSON Lines, gzip (P2a-2)',
+        tableType: 'EXTERNAL_TABLE',
+        partitionKeys: [{ name: 'dt', type: 'string' }],
+        parameters: {
+          classification: 'json',
+          'projection.enabled': 'true',
+          'projection.dt.type': 'date',
+          'projection.dt.format': 'yyyy-MM-dd',
+          'projection.dt.range': `${ORDER_EVENTS_PROJECTION_START},NOW`,
+          'projection.dt.interval': '1',
+          'projection.dt.interval.unit': 'DAYS',
+          'storage.location.template': `${lakeUri(ORDER_EVENTS_PREFIX)}dt=\${dt}/`,
+          // 出處欄位（12 §5）；同一張表有模擬與非模擬事件 → 用 detail.synthetic 過濾 / Mixed: filter on detail.synthetic.
+          source_id: 'BREWLINE_ORDER_EVENTS',
+          synthetic: 'mixed',
+          license: 'n/a (own data)',
+          ingested_by: 'firehose',
+        },
+        storageDescriptor: {
+          location: lakeUri(ORDER_EVENTS_PREFIX),
+          columns: [
+            { name: 'id', type: 'string' },
+            { name: 'detail_type', type: 'string' },
+            { name: 'source', type: 'string' },
+            { name: 'time', type: 'string' },
+            {
+              name: 'detail',
+              type:
+                'struct<event_id:string,occurred_at:string,tenant_id:string,order_id:string,status:string,previous_status:string,' +
+                'payment_status:string,total:double,currency:string,synthetic:boolean,items:array<struct<product_id:string,qty_kg:double>>>',
+            },
+          ],
+          inputFormat: 'org.apache.hadoop.mapred.TextInputFormat',
+          outputFormat: 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat',
+          // 格式錯誤要讓查詢失敗，不要默默略過 / Malformed JSON must fail the query, not be skipped.
+          serdeInfo: { serializationLibrary: 'org.openx.data.jsonserde.JsonSerDe', parameters: { 'ignore.malformed.json': 'false' } },
+        },
+      },
+    });
+    eventsTable.addResourceDependency(databases.raw);
+
     // --- 7) SSM 參數與輸出（其他 stack 讀 SSM，ADR-018）/ Parameters and outputs ---
     const values: Record<keyof typeof LAKE_PARAMETERS, { value: string; description: string }> = {
       'bucket-name': { value: bucket.bucketName, description: `BrewLine ${envName} data lake bucket. Prefixes: ${LAKE_PREFIX_CONVENTION}` },
@@ -274,6 +341,8 @@ export class LakeStack extends Stack {
       'db-analytics': { value: databases.analytics.ref, description: 'Glue database for analytics data' },
       'dlq-arn': { value: dlq.queueArn, description: 'Data lake module DLQ ARN (P2 design D8)' },
       'dlq-url': { value: dlq.queueUrl, description: 'Data lake module DLQ URL' },
+      'order-events-stream-name': { value: orderEvents.streamName, description: 'Order events Firehose stream (P2a-2)' },
+      'order-events-stream-arn': { value: orderEvents.streamArn, description: 'Order events Firehose stream ARN' },
     };
     const prefix = LakeStack.parameterPrefix(envName);
     for (const [name, outputId] of Object.entries(LAKE_PARAMETERS) as Array<[keyof typeof LAKE_PARAMETERS, string]>) {

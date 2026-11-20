@@ -125,6 +125,7 @@ check "DLQ alarm state not ALARM" "$(jq -r '.StateValue != "ALARM"' <<<"$al")" "
 declare -A params=(
   [bucket-name]=BucketName [bucket-arn]=BucketArn [results-bucket-name]=ResultsBucketName [workgroup-name]=WorkgroupName
   [db-raw]=DbRaw [db-curated]=DbCurated [db-analytics]=DbAnalytics [dlq-arn]=DlqArn [dlq-url]=DlqUrl
+  [order-events-stream-name]=OrderEventsStreamName [order-events-stream-arn]=OrderEventsStreamArn
 )
 matched=0
 for name in "${!params[@]}"; do
@@ -138,6 +139,90 @@ check "Stack termination protection" "$(aws cloudformation describe-stacks --sta
   --query 'Stacks[0].EnableTerminationProtection' --output text | tr '[:upper:]' '[:lower:]')" "$want_termination_protection"
 check "Lambda functions in stack (negative)" "$(aws cloudformation list-stack-resources --stack-name "$stack" --region "$region" \
   --query "length(StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'])" --output text)" "0"
+
+# ==================== P2a-2：訂單事件 → Firehose → raw/events/（ADR-032 D6）====================
+stream="brewline-${env_name}-order-events"
+rule="brewline-${env_name}-lake-order-events"
+bus=$(aws ssm get-parameter --name "/brewline/${env_name}/events/bus-name" --region "$region" --query Parameter.Value --output text)
+lake_arn="arn:aws:s3:::${lake}"
+
+# --- 21–23：Firehose 設定 / Firehose configuration ---
+ds=$(aws firehose describe-delivery-stream --delivery-stream-name "$stream" --region "$region" --query DeliveryStreamDescription --output json)
+check "Firehose status, type" "$(jq -r '"\(.DeliveryStreamStatus) \(.DeliveryStreamType)"' <<<"$ds")" "ACTIVE DirectPut"
+check "Firehose stream encryption" "$(jq -r '.DeliveryStreamEncryptionConfiguration | "\(.Status) \(.KeyType)"' <<<"$ds")" "ENABLED AWS_OWNED_CMK"
+dst=$(jq -c '.Destinations[0].ExtendedS3DestinationDescription' <<<"$ds")
+check "Firehose destination bucket" "$(jq -r .BucketARN <<<"$dst")" "$lake_arn"
+check "Firehose prefix" "$(jq -r .Prefix <<<"$dst")" 'raw/events/dt=!{timestamp:yyyy-MM-dd}/'
+check "Firehose error prefix" "$(jq -r .ErrorOutputPrefix <<<"$dst")" 'raw/events-errors/!{firehose:error-output-type}/dt=!{timestamp:yyyy-MM-dd}/'
+check "Firehose compression, buffering (MB s)" "$(jq -r '"\(.CompressionFormat) \(.BufferingHints.SizeInMBs) \(.BufferingHints.IntervalInSeconds)"' <<<"$dst")" "GZIP 5 300"
+check "Firehose object encryption key" "$(jq -r '.EncryptionConfiguration.KMSEncryptionConfig.AWSKMSKeyARN' <<<"$dst")" "$key_arn"
+check "Firehose error logging" "$(jq -r '.CloudWatchLoggingOptions | "\(.Enabled) \(.LogGroupName)"' <<<"$dst")" "true /aws/kinesisfirehose/${stream}"
+# 反向：沒有資料處理（換行由規則的 input transformer 產生，E1-A）/ Negative: no processing.
+check "Firehose processors (negative)" "$(jq -r '[(.ProcessingConfiguration.Processors // [])[]] | length' <<<"$dst")" "0"
+fh_role=$(jq -r .RoleARN <<<"$dst")
+
+# --- 24：規則 / Rule ---
+r=$(aws events describe-rule --name "$rule" --event-bus-name "$bus" --region "$region" --output json)
+check "Rule state" "$(jq -r .State <<<"$r")" "ENABLED"
+check "Rule pattern" "$(jq -c '.EventPattern | fromjson | {source, "detail-type": (."detail-type" | sort)}' <<<"$r")" \
+  '{"source":["brewline.ordering"],"detail-type":["OrderCreated","OrderStatusChanged"]}'
+tg=$(aws events list-targets-by-rule --rule "$rule" --event-bus-name "$bus" --region "$region" --query 'Targets' --output json)
+check "Rule targets" "$(jq -r 'length' <<<"$tg")" "1"
+check "Rule target = stream" "$(jq -r '.[0].Arn' <<<"$tg")" "arn:aws:firehose:${region}:${account}:deliverystream/${stream}"
+check "Rule target DLQ = lake-dlq" "$(jq -r '.[0].DeadLetterConfig.Arn' <<<"$tg")" "$(out DlqArn)"
+check "Rule target retry (attempts age)" "$(jq -r '.[0].RetryPolicy | "\(.MaximumRetryAttempts) \(.MaximumEventAgeInSeconds)"' <<<"$tg")" "3 7200"
+check "Rule input template ends with a newline" "$(jq -r '.[0].InputTransformer.InputTemplate | endswith("}\n")' <<<"$tg")" "true"
+check "Rule input paths" "$(jq -c '.[0].InputTransformer.InputPathsMap | to_entries | sort_by(.key) | from_entries' <<<"$tg")" \
+  '{"detail":"$.detail","detail_type":"$.detail-type","id":"$.id","source":"$.source","time":"$.time"}'
+
+# --- 25：Glue 表 / Glue table ---
+et=$(aws glue get-table --database-name brewline_raw --name order_events --region "$region" --query Table --output json)
+check "order_events location" "$(jq -r .StorageDescriptor.Location <<<"$et")" "s3://${lake}/raw/events/"
+check "order_events projection" "$(jq -r '.Parameters | "\(."projection.enabled") \(."projection.dt.type") \(."projection.dt.range")"' <<<"$et")" "true date 2026-11-20,NOW"
+check "order_events location template" "$(jq -r '.Parameters."storage.location.template"' <<<"$et")" "s3://${lake}/raw/events/dt=\${dt}/"
+check "order_events malformed JSON fails" "$(jq -r '.StorageDescriptor.SerdeInfo.Parameters."ignore.malformed.json"' <<<"$et")" "false"
+check "order_events columns" "$(jq -r '[.StorageDescriptor.Columns[].Name] | join(",")' <<<"$et")" "id,detail_type,source,time,detail"
+
+# --- 26：Firehose 角色政策模擬（只算身分政策）/ Policy simulation for the Firehose role ---
+sim() {  # sim <action> <resource> [context-entries...]
+  local a=$1 res=$2; shift 2
+  aws iam simulate-principal-policy --policy-source-arn "$fh_role" --action-names "$a" --resource-arns "$res" "$@" \
+    --query 'EvaluationResults[0].EvalDecision' --output text
+}
+check "Firehose role PutObject raw/events/" "$(sim s3:PutObject "${lake_arn}/raw/events/dt=2026-11-20/x.gz")" "allowed"
+check "Firehose role PutObject raw/events-errors/" "$(sim s3:PutObject "${lake_arn}/raw/events-errors/x")" "allowed"
+check "Firehose role PutObject raw/other/ (negative)" "$(sim s3:PutObject "${lake_arn}/raw/other/x")" "implicitDeny"
+check "Firehose role PutObject curated/ (negative)" "$(sim s3:PutObject "${lake_arn}/curated/x")" "implicitDeny"
+check "Firehose role GetObject (negative)" "$(sim s3:GetObject "${lake_arn}/raw/events/x")" "implicitDeny"
+check "Firehose role DeleteObject (negative)" "$(sim s3:DeleteObject "${lake_arn}/raw/events/x")" "implicitDeny"
+via_s3="ContextKeyName=kms:ViaService,ContextKeyValues=s3.${region}.amazonaws.com,ContextKeyType=string"
+check "Firehose role GenerateDataKey via S3 (bucket context)" "$(sim kms:GenerateDataKey "$key_arn" --context-entries "$via_s3" \
+  "ContextKeyName=kms:EncryptionContext:aws:s3:arn,ContextKeyValues=${lake_arn},ContextKeyType=string")" "allowed"
+check "Firehose role GenerateDataKey without ViaService (negative)" "$(sim kms:GenerateDataKey "$key_arn" \
+  --context-entries "ContextKeyName=kms:EncryptionContext:aws:s3:arn,ContextKeyValues=${lake_arn},ContextKeyType=string")" "implicitDeny"
+check "Firehose role GenerateDataKey other bucket (negative)" "$(sim kms:GenerateDataKey "$key_arn" --context-entries "$via_s3" \
+  "ContextKeyName=kms:EncryptionContext:aws:s3:arn,ContextKeyValues=${lake_arn}-other,ContextKeyType=string")" "implicitDeny"
+
+# --- 27：Firehose 角色信任政策 / Trust policy ---
+trust=$(aws iam get-role --role-name "${fh_role##*/}" --query Role.AssumeRolePolicyDocument --output json)
+check "Firehose role trust principal" "$(jq -r '[.Statement[].Principal.Service] | flatten | unique | join(",")' <<<"$trust")" "firehose.amazonaws.com"
+check "Firehose role trust SourceAccount/SourceArn" "$(jq -r '.Statement[0].Condition | "\(.StringEquals["aws:SourceAccount"]) \(.ArnEquals["aws:SourceArn"])"' <<<"$trust")" \
+  "${account} arn:aws:firehose:${region}:${account}:deliverystream/${stream}"
+
+# --- 28：反向：錯誤前綴沒有物件 / Negative: nothing in the error prefix ---
+check "Objects under raw/events-errors/ (negative)" "$(aws s3api list-objects-v2 --bucket "$lake" --prefix raw/events-errors/ --region "$region" \
+  --query 'KeyCount' --output text)" "0"
+
+# --- 29：投遞成功（最近 24 小時有資料才檢查）/ Delivery success when there was traffic ---
+succ=$(aws cloudwatch get-metric-statistics --namespace AWS/Firehose --metric-name DeliveryToS3.Success \
+  --dimensions Name=DeliveryStreamName,Value="$stream" --start-time "$(date -u -d '-24 hours' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" \
+  --period 3600 --statistics Minimum --region "$region" --query 'Datapoints[].Minimum' --output json)
+if [[ "$(jq 'length' <<<"$succ")" == 0 ]]; then
+  skip "DeliveryToS3.Success: no deliveries in the last 24 hours yet"
+else
+  # CloudWatch 回傳浮點數（1.0）→ floor 後比對（同 §10.7 教訓）/ Float from CloudWatch: floor before comparing.
+  check "DeliveryToS3.Success minimum (last 24 h)" "$(jq 'min | floor' <<<"$succ")" "1"
+fi
 
 # --- 19：反向：唯讀角色讀不到物件內容（沒有 kms:Decrypt）/ Negative: the read-only role cannot read objects (no kms:Decrypt) ---
 obj=$(aws s3api list-objects-v2 --bucket "$lake" --region "$region" --max-items 1 --query 'Contents[0].Key' --output text 2>/dev/null || echo None)
