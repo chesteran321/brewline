@@ -12,6 +12,7 @@ import { DataStack } from '../lib/stacks/data-stack';
 import { TraceStack } from '../lib/stacks/trace-stack';
 import { EdgeStack } from '../lib/stacks/edge-stack';
 import { EventsStack } from '../lib/stacks/events-stack';
+import { LakeStack } from '../lib/stacks/lake-stack';
 import { NotifyStack } from '../lib/stacks/notify-stack';
 import { SimulatorStack } from '../lib/stacks/simulator-stack';
 import { OpsStack } from '../lib/stacks/ops-stack';
@@ -179,3 +180,17 @@ if (env.trace.edge) {
   traceStack.addStackDependency(edgeStack, 'certificate and web ACL (ARNs via config)');
   Tags.of(traceStack).add('module', 'traceability', { priority: 200 });
 }
+
+// 資料湖基礎（P2a，ADR-032）：lake／Athena 結果 bucket、Glue DB×3、workgroup、lake-dlq＋告警。沒有 Lambda。
+// 不被既有 stack 依賴 → 部署清單最後 / Nothing depends on it, so it is deployed last.
+// Data lake foundation (P2a): buckets, Glue databases, workgroup, DLQ + alarm. No Lambda.
+const lakeStack = new LakeStack(app, `brewline-${env.name}-lake`, {
+  envName: env.name,
+  lake: env.lake,
+  env: { account: env.account, region: env.region },
+  description: 'BrewLine data lake foundation (P2a, ADR-032): S3 lake + Athena results, Glue databases, workgroup, DLQ',
+  terminationProtection: env.name === 'prod',
+});
+lakeStack.addStackDependency(dataStack, 'CMK ARN for SSE-KMS (SSM)');
+lakeStack.addStackDependency(opsStack, 'DLQ alarm publishes to the ops topic (SSM)');
+Tags.of(lakeStack).add('module', 'data-lake', { priority: 200 });

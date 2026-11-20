@@ -123,7 +123,8 @@ check "Alarm count" "$(jq '.MetricAlarms | length' <<<"$alarms")" "2"
 check "Alarms with an action" "$(jq '[.MetricAlarms[] | select((.AlarmActions | length) > 0 and (.OKActions | length) > 0)] | length' <<<"$alarms")" "2"
 check "Alarms in ALARM" "$(jq '[.MetricAlarms[] | select(.StateValue == "ALARM")] | length' <<<"$alarms")" "0"
 total=$(aws cloudwatch describe-alarms --region "$region" --query 'length(MetricAlarms)' --output text)
-check "Account alarms ≤ 10 (free tier, D9)" "$([[ "$total" -le 10 ]] && echo "true ($total)" || echo "false ($total)")" "true ($total)"
+# ADR-030 D9 修訂（P2 設計 D8）：每環境上限 13（與 verify-ops-stack.sh 相同）/ D9 revised: ≤ 13 per environment.
+check "Account alarms ≤ 13 (ADR-030 D9 revised)" "$([[ "$total" -le 13 ]] && echo "true ($total)" || echo "false ($total)")" "true ($total)"
 dlq=$(aws sqs get-queue-attributes --queue-url "$(out DlqUrl)" --region "$region" \
   --attribute-names SqsManagedSseEnabled ApproximateNumberOfMessages --output json)
 check "DLQ SSE-SQS"  "$(jq -r .Attributes.SqsManagedSseEnabled <<<"$dlq")" "true"

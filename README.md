@@ -105,6 +105,23 @@ No AWS keys live in this repo.
 | `Missing or invalid context "env"` | 少了 `-c env=dev` 或 `-c env=prod` |
 | `cdk diff` 提示無法扮演 deploy-role | 預期行為：PR 只有 lookup role（唯讀） |
 
+## 資料湖前綴慣例 / Data lake prefixes（P2a，`brewline-<env>-lake`）
+
+S3 沒有資料夾，前綴不預先建立；同一份慣例也寫在 SSM `/brewline/<env>/lake/bucket-name` 的說明。
+S3 has no folders, so nothing is pre-created; the same convention is in the SSM parameter description.
+
+| 前綴 Prefix | 內容 Content | 保存 Retention |
+|---|---|---|
+| `raw/<source>/dt=YYYY-MM-DD/` | 原始資料（JSON，gzip） | Prod 90 天轉 Glacier IR、730 天刪除；Dev 30 天刪除 |
+| `curated/<table>/…` | Parquet（Athena UNLOAD） | 730 天 |
+| `analytics/<table>/…`、`analytics/serving/` | 彙總、儀表板 JSON | 730 天 |
+| `quarantine/<source>/dt=…/` | DQ 失敗 | 90 天 |
+| `edi/{inbound,archive,quarantine}/` | IFTSTA（P2d） | P2d 決定 |
+| `raw/_smoke/`（Dev） | P2a smoke 表 `brewline_raw.lake_smoke` | 30 天 |
+
+所有前綴：舊版本 30 天刪除、未完成的 multipart 7 天中止。上傳一律 SSE-KMS（資料層 CMK）；指定其他金鑰或 SSE-S3 會被 bucket policy 拒絕。
+All prefixes: noncurrent versions 30 days, incomplete multipart uploads 7 days. Uploads naming another key or SSE-S3 are denied.
+
 ## 授權與資料 / Data & licensing
 
 所有咖啡廳、訂單、貨櫃資料皆為模擬產生；外部資料來源與授權見 [`docs/12-data-governance.md`](docs/12-data-governance.md)。
