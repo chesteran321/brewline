@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0 完成；P1 CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1（Dev／Prod 皆 `running`）完成；溯源 S2a（批次、烘焙廠角色、追溯 API）、S2b（us-east-1 edge）、S2c（公開溯源頁，Free 方案）完成，S2d（模擬烘焙廠）進行中** / P0 complete; P1 CI/CD, data foundation, ordering A1–A4 and simulator S1 complete; traceability S2a–S2c complete, S2d (simulated roastery) in progress（2026-11-19）
+> 狀態 Status：**P0、P1 完成**——CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1、溯源 S2a–S2d（公開溯源頁＋模擬烘焙廠，Prod 2026-11-20 起自動產生）；FSBP 100%；下一步 **P2 資料**（資料湖 → 海運追蹤 → 採購分析） / P0 and P1 complete; FSBP 100%; next: P2 data（2026-11-20）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -345,16 +345,28 @@
 - 不用 CIS：帳號基線項目已由 SCP、Identity Center 以預防性控制達成；FSBP 涵蓋本專案實際使用的 Serverless 服務。
 - 試用期：2026-11-09 起 30 天。
 
-已處理的 finding（Prod，2026-11-13）：
+已處理的 finding（Prod，2026-11-13；**2026-11-19 全面整理，見下方**）：
 
 | 控制項 | 狀態 | 處理 |
 |---|---|---|
-| `Config.1`（CRITICAL） | FAILED：`CONFIG_RECORDER_MISSING_REQUIRED_RESOURCE_TYPES`（49 種） | recorder 加入 49 種（§8）。預期仍會因 IAM、ApiGatewayV2 在台北無法記錄而失敗 → 等週期性重新評估（≤ 24 h）後確認剩餘原因；若只剩台北不支援的類型，改為 SUPPRESSED 並註明 §2 |
+| `Config.1`（CRITICAL） | FAILED：`CONFIG_RECORDER_MISSING_REQUIRED_RESOURCE_TYPES`（49 種） | recorder 加入 49 種（§8）→ **2026-11-19 確認 `PASSED`／`RESOLVED`**：台北不支援的類型（IAM、ApiGatewayV2）不算缺少，**不需要 SUPPRESSED**（先補能補的、再看剩餘原因，而不是直接隱藏） |
 | `Cognito.1`（中） | 原為「不明」（Config 未記錄 UserPool）→ 加入記錄類型後**數分鐘內**變成 FAILED | **SUPPRESSED**（`batch-update-findings`，備註引用 ADR-022：Plus 方案無免費額度；以不開放註冊、強密碼、JWT＋scope、限流緩解） |
 | `APIGateway.9`（中） | 「無資料」0/0（Config 不記錄 ApiGatewayV2） | 不處理；由 `ApiGuardrailsChecker`＋驗證腳本 `Stage access logs = true` 涵蓋（同 `KMS.4` 的作法） |
 
 - 控制項頁面的「不明」＝有資源但缺資料（WARNING）；「無資料」＝CSPM 看不到任何資源。
-- 「已隱藏」只改**工作流程狀態**，合規狀態仍為 FAILED；資源設定再變動時，同一筆 finding 會更新並保留 SUPPRESSED。
+- 「已隱藏」只改**工作流程狀態**，finding 的合規狀態仍為 FAILED；資源設定再變動時，同一筆 finding 會更新並保留 SUPPRESSED。但**計算控制項狀態與安全分數時，SUPPRESSED 的 finding 不計入**（2026-11-20 實測：6 個控制項的 finding 全部 SUPPRESSED 後分數 100%；原先以為「隱藏不會提高分數」是錯的）→ 隱藏一定要有寫明的理由，否則就是在灌分數。
+
+**2026-11-19 FSBP 全面整理**（Prod，起點 86%、21 個控制項失敗 → **100%**，2026-11-20 確認）：
+
+| 處理 | 控制項 | 做法 |
+|---|---|---|
+| **刪除預設 VPC**（9 項） | `EC2.2`、`EC2.15`（3 個子網路）、`EC2.6`、`EC2.10`、`EC2.55`–`58` | 台北預設 VPC 沒有任何使用者（ENI、VPC 內 Lambda、endpoint、NAT、peering 皆 0）→ 拆 IGW、刪 3 個子網路、刪 VPC；**Dev 也同樣刪除**（兩個環境台北都沒有任何 VPC）。回復：`aws ec2 create-default-vpc`。BrewLine 全部是不需要 VPC 的託管服務（COST-011）→ 整類網路風險消失，而不是逐項加固（VPC endpoint 每個每月約 USD 7） |
+| **帳號設定**（5 項，免費） | `SSM.7`（重大）、`EC2.7`、`IAM.7`、`Account.1`、`ECR.1` | SSM 文件公開分享 `Disable`；EBS 預設加密；IAM 密碼政策（14 字元、大小寫數字符號、重複使用 24、90 天）；安全聯絡人（`account put-alternate-contact`，個資不進 repo）；ECR **登錄檔層級** BASIC scan-on-push（repo 層級 API 已淘汰，CDK bootstrap 範本 v33 沒有開掃描，改 repo 會造成 `CDKToolkit` drift）→ `ECR.1` 通過 |
+| **停用控制項**（2 項） | `Inspector.1`、`Inspector.2` | 沒有 EC2（COST-011、`scp-deny-expensive`）、沒有容器映像檔（Lambda 用 zip）；`batch-update-standards-control-associations` 附理由 |
+| **SUPPRESSED**（6 項 7 筆，各附理由） | `CloudTrail.2`（ADR-014）、`CloudTrail.5`（成本）、`Cognito.4`（ADR-022，Plus）、`Cognito.5`（ADR-022，MFA OPTIONAL）、`CloudFormation.4`（只有 `CDKToolkit`）、`S3.9`（溯源 bucket；CDK assets bucket） | 理由**針對資源**而不是控制項：同一個 `S3.9` 的兩個 bucket 理由不同 |
+
+- 教訓（2026-11-19）：批次隱藏時以為 `S3.9` 只有 1 筆，實際 2 筆（另一筆是 CDK assets bucket），迴圈把兩筆都套上溯源 bucket 的理由 → 逐筆列出資源後改正備註。批次修改後一定要列出**實際影響到的資源**。
+- 教訓（2026-11-19）：`batch-update-findings` 回報 `UnprocessedFindings = 0` 後立刻讀回仍是舊備註；先確認 finding ID 只有 1 筆且正確，等 30 秒再讀就是新的 → **最終一致**，不需要重做寫入。
 - CLI：`--note` 的文字含逗號時不可用簡寫語法（會被切成 list）→ 用 `jq -n` 產生 JSON。
 
 ---
@@ -893,6 +905,13 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 只走公開 API（ADR-011）；伺服器端 synthetic 保護（S2a）保證烘焙廠只看得到、改得到模擬訂單與模擬批次。
 - 費用：每天約多 50–150 次 API 呼叫與幾次 Lambda 執行，約 0。
 
+已驗證（2026-11-19～20，PR #75、#76，Deploy run `44452958914`）：
+- CI：Dev ✅ 512、Prod ✅ 503、0 ❌；roaster 在 `simulator-roastery`、沒有 tenant_id、不在 staff／咖啡廳群組（用真正的 `Username` 比對）；函數逾時 300 秒；告警仍是 10 個。
+- **Dev 端到端（2026-11-19 12:18，手動步驟）**：`schedule` → 1 筆訂單排烘、2 個批次（訂單有 2 個商品，一批只能烘一種豆）；`roast` → 2 批 `ROASTED`、訂單 `ROASTED`；S3 出現投影，公開頁可開啟；改掉最後一個字元 → 「找不到」。
+- **Prod 16:05 排烘（2026-11-19，排程自動）**：`confirm` 看到 4 筆 CREATED、確認 1 筆、3 筆留給逾時（前幾輪被雜湊判定不確認、累積到 48 小時取消）；`schedule` 22 筆訂單 → **9 個批次**（`batches_created` 9、沒有重播）；`restock` 1 個商品 +14 kg；沒有 `roast`／`ship`（反向）；違規 0。
+- **Prod 09:05 烘焙（2026-11-20，排程自動）**：`roast` → `batches_roasted` 9、訂單 `advanced` 22、`not_fully_allocated` 0、違規 0；S3 **9 個投影** → **Prod 第一批公開溯源頁**（`https://trace.brewline-demo.click/#<token>`）：商品「山脊雙重水洗」、肯亞 Nyeri、1800 m、SL28、水洗、杯測 87、烘焙日期 2026-11-20、淺焙、示範資料提示。從 16:05 排烘到 09:05 烘焙相隔 17 小時，狀態全在 DynamoDB，Lambda 無狀態。
+- **溯源模組 S2 完成**（ADR-031 D1–D9 全部實作；TRC-F-004 海運旅程等 P2 海運追蹤）。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -916,7 +935,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-028 | 未確認訂單的逾時取消（Step Functions） | Accepted（2026-11-13） | OrderCreated → Standard 工作流等待（Dev 10 分／Prod 48 小時）→ 仍是 CREATED 就取消並釋放；冪等靠條件寫入（§10.11） |
 | ADR-027 | 訂單狀態機與 staff 端點 | Accepted（2026-11-13） | 狀態以 DynamoDB 為準；一個交易＝訂單（樂觀鎖：原狀態）＋庫存；staff 函數不扮演租戶角色、無 Put／Delete（§10.9） |
 | ADR-026 | 事件層：Streams → Lambda → EventBridge | Accepted（2026-11-13） | 台北沒有 Pipes／Archive；自訂 bus、白名單 detail、`event_id` 去重、Logs 規則留存、DLQ SSE-SQS（§10.10） |
-| ADR-031 | 溯源（docs/04）範圍與設計（S2 決策 D1–D9） | Accepted（2026-11-18） | D1 S2＝生豆批次（8 個種子）＋烘焙批次＋QR＋公開頁＋staff 追溯＋召回＋模擬烘焙廠；航程（SHP）、天氣（PRC）、換批、召回寄信延後。D2 公開頁＝S3 預先產生的白名單 JSON 投影（事件觸發），讀取路徑沒有 Lambda／API／DynamoDB。D3 CloudFront 統一費率 **Free 方案**（WAF＋IP 速率限制＋DDoS，`AWS::PricingPlanManager::Subscription`）；快取用 `Cache-Control: max-age=300`；不合格時退回 pay-as-you-go 不掛 WAF。D4 us-east-1 `edge`（ACM、CLOUDFRONT web ACL）→ config → 台北 `trace`（bucket、OAC、distribution、方案訂閱）；describe-type 實測台北可建 Distribution／Subscription、不能建 ACM。D5 鄰接清單，不加 GSI2。D6 `brewline/roastery` scope＋`simulator-roastery` 群組，伺服器端 synthetic 保護。D7 補貨（樂觀鎖）。D8 模擬操作員節奏（同一輪確認 90%、16:05 排烘、隔天烘焙／出貨、2 天後完成）。D9 QR 128-bit、召回 admin only（§10.17） |
+| ADR-031 | 溯源（docs/04）範圍與設計（S2 決策 D1–D9） | Accepted（2026-11-18） | D1 S2＝生豆批次（8 個種子）＋烘焙批次＋QR＋公開頁＋staff 追溯＋召回＋模擬烘焙廠；航程（SHP）、天氣（PRC）、換批、召回寄信延後。D2 公開頁＝S3 預先產生的白名單 JSON 投影（事件觸發），讀取路徑沒有 Lambda／API／DynamoDB。D3 CloudFront 統一費率 **Free 方案**（WAF＋IP 速率限制＋DDoS，`AWS::PricingPlanManager::Subscription`）；快取用 `Cache-Control: max-age=300`；不合格時退回 pay-as-you-go 不掛 WAF。D4 us-east-1 `edge`（ACM、CLOUDFRONT web ACL）→ config → 台北 `trace`（bucket、OAC、distribution、方案訂閱）；describe-type 實測台北可建 Distribution／Subscription、不能建 ACM。D5 鄰接清單，不加 GSI2。D6 `brewline/roastery` scope＋`simulator-roastery` 群組，伺服器端 synthetic 保護。D7 補貨（樂觀鎖）。D8 模擬操作員節奏（同一輪確認 90%、16:05 排烘、隔天烘焙／出貨、2 天後完成）。D9 QR 128-bit、召回 admin only（§10.17）。**2026-11-20 全部實作完成**（S2a–S2d，§10.17–§10.20） |
 | ADR-030 | 模擬器（docs/07）範圍與設計（S1 決策 D1–D9） | Accepted（2026-11-17） | D1 S1＝租戶＋訂單＋重複下單異常；生豆／烘焙批次 → S2（溯源），貨櫃／DCSA／IFTSTA／EDI 異常 → S3（P2）。D2 專用 `simulator` app client（`ADMIN_USER_PASSWORD_AUTH`）＋每人隨機密碼存 SSM SecureString（CMK）；pre token 限制此 client 只發 scope 給 `simulator` 群組。D3 部署時 custom resource 建 40 個使用者（先啟用 30，每月依日期啟用 1–2）；執行函數只有 `AdminInitiateAuth`。D4 Dev、Prod 都跑（Prod 每天 5–40、Dev 2–6；每筆 1–3 個商品 × 1–5 kg；跳過庫存偏低）；首次部署 `paused`。D5 S1 不推進訂單（逾時取消），S2 再設計烘焙廠操作員。D6 `synthetic: true` 由伺服器依 `cognito:groups` 標記於訂單與事件。D7 `state` 參數只在首次建立時寫入（Dev 可由 Developer 切換）、`config` 由 CDK 管理；`scp-budget-lockdown` 加 `cognito-idp:AdminInitiateAuth`。D8 台北 08:05–19:05 每小時；冪等鍵＝hash(種子, 日期, 小時, 序號)；重現性以 dry-run 計畫雜湊驗證。D9 不建自訂指標；預期失敗即函數錯誤 → `Errors` 告警；每帳號告警 ≤ 10。前置：S0（RSK-017）完成 |
 
 | 風險 | 內容 | L | I | 緩解 |
@@ -979,7 +998,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 時間 | 事項 |
 |---|---|
 | 盡快 | 確認 5 個預算收件人 Email 皆為 Verified |
-| 盡快 | 查看 Prod 第一個 FSBP 分數 |
+| ✅ 2026-11-19 | 查看 Prod FSBP 分數：86% → 整理後 **100%**（§9） |
 | 盡快 | 管理帳號舊資源盤點與清理（台北 S3 bucket、Glue Data Catalog、2 個 CloudWatch 告警） |
 | 有空時 | break-glass 第二個 MFA 裝置、紙本備份 |
 | 有空時 | 手動建立的預算日後改由 CDK 管理（或匯入） |
@@ -998,7 +1017,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-13 | Lambda 併發配額：Dev、Prod 原為 **10**（新帳號預設），2026-11-12 申請 1000（Service Quotas `L-B99A9384`）→ 轉 Support 案件（`CASE_OPENED`）→ 2026-11-13 `CASE_CLOSED`，`get-account-settings` 實際值 **1000／Unreserved 1000**（兩個帳號）。A1b、A1c 需求 Dev ≥ 122、Prod ≥ 141 |
 | ✅ 2026-11-13 | 訂貨 A1b 身分層（§10.6，PR #14）、A1c 商品唯讀 API（§10.7，PR #15、#18）部署 Dev、Prod 並驗證 |
 | ✅ 2026-11-13 | Prod Config 記錄類型 8 → 57（`Config.1` 要求）；`Cognito.1` SUPPRESSED（ADR-022）；發現台北 Config 無法記錄 IAM、ApiGatewayV2（§2、§8、§9） |
-| 2026-11-14 | 確認 `Config.1` 重新評估後的剩餘原因；若只剩台北不支援的類型 → SUPPRESSED（備註引用 §2） |
+| ✅ 2026-11-19 | `Config.1` 重新評估：`PASSED`，不需要 SUPPRESSED（§9） |
 | ✅ 2026-11-13 | A2 決策：每租戶限流 → 只做路由限流並接受限制（D3）；聯絡人欄位層級加密 → 延到 A4（D5）；`LeadingKeys` 完全比對 → A2a 完成 |
 | ✅ 2026-11-13 | 訂貨 A2a：租戶存取角色、訂單 scope、token 15 分鐘，部署 Dev、Prod 並驗證（§10.6、§10.8，PR #20、#21） |
 | ✅ 2026-11-13 | 訂貨 A2b-1：訂單 API 部署 Dev、Prod 並驗證（§10.9，PR #23） |
@@ -1020,13 +1039,16 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-18 | 模擬器 Dev 觀察期：11/17 17–19 時與 11/18 10、11、14 時全部照計畫（共 5 筆 created、0 violation、DLQ 0、無告警） |
 | ✅ 2026-11-18 | minimatch 警示（PR #63）部署 Dev、Prod：Lambda 程式不變（只有每次部署的 custom resource 更新） |
 | ✅ 2026-11-18 | 模擬器 S1d：Prod `state` 改 `running`，16:05 排程自動下第一批 2 筆模擬訂單（§10.16）；**模擬器 S1 完成** |
-| P1 | 溯源 S2d（§10.20）：部署 Dev、Prod → Dev 手動 `schedule`／`roast` 端到端看到公開頁 → Prod 16:05 排烘、隔天 09:05 產生**第一個公開頁** |
+| ✅ 2026-11-20 | 溯源 S2d（§10.20，PR #75、#76）：Dev 端到端、Prod 16:05 排烘 9 批、09:05 烘焙 → 9 個公開頁；**溯源 S2 完成、P1 完成** |
+| ✅ 2026-11-19 | FSBP 全面整理（§9）：刪除 Dev／Prod 台北預設 VPC、5 項帳號設定、停用 Inspector.1/.2、6 項 SUPPRESSED → **100%**（2026-11-20） |
+| P2 | 下一步：資料湖基礎 → 海運追蹤（docs/06，補 TRC-F-004）→ 採購分析（docs/05） |
+| 有空時 | us-east-1 的預設 VPC（Dev、Prod）也刪除（edge stack 不用 VPC；不影響 FSBP，台北以外沒開 Security Hub） |
 | P1 | **告警已達免費額度 10 個（Dev、Prod）**：S2d 沒有新增；之後需要時付費（每個 USD 0.10／月）並修訂 ADR-030 D9，**不合併 DLQ**（§10.20） |
 | ✅ 2026-11-18 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`），Developer 可在 Dev 切換模擬器開關（§3） |
 | ✅ 2026-11-18 | Dependabot 安全警示 2 筆（`minimatch` < 11.0.1，Moderate，只在測試／synth 工具鏈）：PR #63 以 npm `overrides` 升到 11.0.9；`aws-cdk-lib` 內部打包（bundleDependencies）的一份要等新版 |
 | ✅ 2026-11-17 | D7②：`scp-budget-lockdown` 加上 `cognito-idp:AdminInitiateAuth`，掛 Dev OU 實測後移除（§4.4） |
 | nodejs26.x GA 後（預計 2026-11 底） | 評估 Lambda 升級到 Node 26（本機、CI、`Runtime`），移除 `LATEST_RUNTIME_ACK`（ADR-023 修訂） |
-| P1 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import） |
+| P3 | OIDC 角色改由 `infra/landing-zone` app 管理（`cdk import`；先確認資源類型支援 import）（2026-11-19 由 P1 移到 P3 強化） |
 | P3 | Config 新增 SQS、Step Functions 等類型（若 Security Hub 需要） |
 
 ---
