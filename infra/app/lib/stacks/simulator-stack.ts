@@ -79,7 +79,7 @@ export class SimulatorStack extends Stack {
 
     // --- 1) 產生器設定（CDK 管理）/ Generator config (CDK-managed) ---
     const { retainOnDelete: _retain, ...configValue } = sim;
-    new ssm.StringParameter(this, 'ConfigParam', {
+    const configParam = new ssm.StringParameter(this, 'ConfigParam', {
       parameterName: names.config,
       stringValue: JSON.stringify(configValue),
       tier: ssm.ParameterTier.STANDARD,
@@ -157,6 +157,11 @@ export class SimulatorStack extends Stack {
         API_ENDPOINT: param(`${ApiStack.parameterPrefix(envName)}/endpoint`),
       },
     });
+    // 先更新函數、再更新設定：新程式讀得懂舊設定（新欄位選填），舊程式（strict schema）讀不懂新設定。
+    // 沒有這個依賴時，CloudFormation 可能先改參數，期間觸發的排程會讓舊程式丟錯（run-errors 告警）。
+    // Update the function before the config: new code reads the old config (new fields are optional), but the old
+    // strict-schema code rejects the new one. Without this, a scheduled run between the two updates would throw.
+    configParam.node.addDependency(runFn);
     runFn.role.addToPolicy(
       new iam.PolicyStatement({
         sid: 'ReadSimulatorParameters',

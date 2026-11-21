@@ -46,7 +46,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   const { app, stack, template } = buildApp(envName);
   const cfg = ENVIRONMENTS[envName];
 
-  test('HTTP API with nineteen routes, all JWT + scope', () => {
+  test('HTTP API with twenty-two routes, all JWT + scope', () => {
     template.resourceCountIs('AWS::ApiGatewayV2::Api', 1);
     const routes = Object.fromEntries(resources(template, 'AWS::ApiGatewayV2::Route').map(([, r]) => [r.Properties.RouteKey, r.Properties]));
     expect(Object.keys(routes).sort()).toEqual([
@@ -55,7 +55,13 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
       'DELETE /replenishments/{id}', 'GET /replenishments', 'GET /tenant/contact', 'PATCH /admin/tenants/{tenantId}/orders/{orderId}',
       'POST /orders', 'POST /replenishments', 'PUT /tenant/contact',
       'POST /admin/roasts', 'PATCH /admin/roasts/{id}', 'POST /admin/roasts/{id}/recall', 'POST /admin/products/{id}/restock', 'GET /admin/trace',
+      'POST /admin/shipments', 'GET /admin/shipments', 'GET /admin/shipments/{id}',
     ].sort());
+    // P2b-1：訂艙由烘焙廠建立；查詢 staff 或烘焙廠 / Bookings by the roastery; reads by staff or roastery.
+    expect(routes['POST /admin/shipments']).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/roastery'] });
+    for (const k of ['GET /admin/shipments', 'GET /admin/shipments/{id}']) {
+      expect(routes[k]).toMatchObject({ AuthorizationType: 'JWT', AuthorizationScopes: ['brewline/admin', 'brewline/roastery'] });
+    }
     expect(routes['POST /replenishments']).toMatchObject({ AuthorizationScopes: ['brewline/orders.write'] });
     expect(routes['GET /replenishments']).toMatchObject({ AuthorizationScopes: ['brewline/orders.read'] });
     expect(routes['DELETE /replenishments/{id}']).toMatchObject({ AuthorizationScopes: ['brewline/orders.write'] });
@@ -275,6 +281,45 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
     }
   });
 
+  test('shipment functions (P2b-1): never orders-* roles; SHIP#/LOT#/VESSEL# only; edges pinned to edge attributes; no Delete/Update/Scan', () => {
+    const fnNames = ['create-shipment', 'get-shipment', 'list-shipments'].map((n) => `brewline-${envName}-ordering-${n}`);
+    for (const fnName of fnNames) {
+      const [[, fn]] = resources(template, 'AWS::Lambda::Function').filter(([, r]) => r.Properties.FunctionName === fnName) as [[string, Res]];
+      expect(fn.Properties.ReservedConcurrentExecutions).toBe(cfg.lambda.reservedConcurrency.api);
+      // 角色名稱由 CloudFormation 產生 → 不能扮演租戶角色 / Generated role name → cannot assume the tenant role.
+      expect(template.toJSON().Resources[fn.Properties.Role['Fn::GetAtt'][0]].Properties.RoleName).toBeUndefined();
+      const st = statementsFor(template, fnName);
+      expect(st).toContainEqual(expect.objectContaining({ Sid: 'DenyScan', Effect: 'Deny' }));
+      const allow = st.filter((x) => x.Effect === 'Allow');
+      const acts = allow.flatMap((x) => [].concat(x.Action)) as string[];
+      expect(acts.filter((a) => /dynamodb:(Delete|Scan|BatchWrite|Update)|sts:|s3:|events:/.test(a))).toEqual([]);
+      // 每個 DynamoDB 敘述都有 LeadingKeys，而且只在海運前綴 / Every DynamoDB statement is pinned to shipment prefixes.
+      for (const x of allow.filter((y) => [].concat(y.Action).some((a: string) => a.startsWith('dynamodb:')))) {
+        const keys = x.Condition['ForAllValues:StringLike']['dynamodb:LeadingKeys'] as string[];
+        expect(keys.every((k) => ['SHIP#*', 'LOT#*', 'VESSEL#*'].includes(k))).toBe(true);
+      }
+    }
+    const create = statementsFor(template, fnNames[0]!);
+    expect(create.find((x) => x.Sid === 'PutShipment')).toMatchObject({
+      Action: 'dynamodb:PutItem',
+      Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['SHIP#*'] } },
+    });
+    // 邊只能寫邊的欄位 → 不能覆寫 LOT#…/META（需要 producer_display_name 等欄位）/ Edges cannot overwrite a lot's META.
+    expect(create.find((x) => x.Sid === 'PutEdgesOnly')).toMatchObject({
+      Action: 'dynamodb:PutItem',
+      Condition: {
+        'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['LOT#*', 'VESSEL#*'] },
+        'ForAllValues:StringEquals': { 'dynamodb:Attributes': ['pk', 'sk', 'entity', 'shipment_id', 'planned_departure', 'pol', 'pod', 'status', 'synthetic'] },
+      },
+    });
+    expect(JSON.stringify(create)).not.toContain('producer_display_name');
+    // 讀取函數沒有任何寫入 / Read functions write nothing.
+    for (const n of [fnNames[1]!, fnNames[2]!]) {
+      const acts = statementsFor(template, n).filter((x) => x.Effect === 'Allow').flatMap((x) => [].concat(x.Action)) as string[];
+      expect(acts.filter((a) => /dynamodb:(Put|Update|Delete|BatchWrite)|kms:(Encrypt|GenerateDataKey)/.test(a))).toEqual([]);
+    }
+  });
+
   test('order timeout workflow (A3d): Standard, wait = config, retries, logging ALL, tracing', () => {
     const [[, sm]] = resources(template, 'AWS::StepFunctions::StateMachine') as [[string, Res]];
     expect(sm.Properties).toMatchObject({
@@ -374,7 +419,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
       expect(JSON.stringify(s.Properties.SimulatorClientId)).toContain('simulatorclientid');
       expect(s.DependsOn).toEqual(expect.arrayContaining(['CatalogSeed']));
       expect(s.DependsOn!.some((d) => d.startsWith('DefaultStage'))).toBe(true);
-      expect(s.DependsOn!.filter((d) => /^HttpApi(GET|POST|PUT|PATCH|DELETE)/.test(d) && !d.includes('Integration'))).toHaveLength(19);
+      expect(s.DependsOn!.filter((d) => /^HttpApi(GET|POST|PUT|PATCH|DELETE)/.test(d) && !d.includes('Integration'))).toHaveLength(22);
       // 只能管理這個 pool 的使用者 / User management limited to this pool.
       const st = statementsFor(template, `brewline-${envName}-ordering-smoke-a1`);
       const cognito = st.find((x) => x.Sid === 'ManageThrowawayUsers');
@@ -392,6 +437,11 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
           },
         },
       });
+      // P2b-1：清理 smoke 貨運只限測試批次、SHIP#、smoke 船（SIMV-98／99）/ Smoke shipment cleanup: test lot, SHIP#, smoke vessels.
+      expect(st.find((x) => x.Sid === 'CleanSmokeShipments')).toMatchObject({
+        Action: ['dynamodb:Query', 'dynamodb:DeleteItem'],
+        Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['LOT#L-9999-002', 'SHIP#*', 'VESSEL#SIMV-98', 'VESSEL#SIMV-99'] } },
+      });
       expect(st).toContainEqual(expect.objectContaining({ Sid: 'DenyScan', Effect: 'Deny' }));
     }
   });
@@ -399,7 +449,7 @@ describe.each(['dev', 'prod'] as const)('ApiStack (%s)', (envName) => {
   test('all first-party Lambdas follow the standard; provider framework functions are explicitly exempt', () => {
     const fns = resources(template, 'AWS::Lambda::Function');
     const ours = fns.filter(([, r]) => String(r.Properties.FunctionName ?? '').startsWith(`brewline-${envName}-`));
-    expect(ours).toHaveLength(22 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
+    expect(ours).toHaveLength(25 + (cfg.api.smokeTest ? 1 : 0) + (cfg.api.orderTests ? 1 : 0));
     for (const [, r] of ours) {
       expect(r.Properties).toMatchObject({ Runtime: 'nodejs24.x', Architectures: ['arm64'], TracingConfig: { Mode: 'Active' } });
     }

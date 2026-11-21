@@ -113,8 +113,16 @@ describe.each(['dev', 'prod'] as const)('SimulatorStack (%s)', (envName) => {
     expect(value).toMatchObject({
       poolSize: cfg.simulator.poolSize, ordersPerDay: cfg.simulator.ordersPerDay, seed: cfg.simulator.seed,
       activationStartMonth: '2026-11',
+      // P2b-1（E9／E12）：Dev ×24、Prod 真實時間；不回補 / Dev ×24, Prod real time; no backfill.
+      voyages: { timeScale: envName === 'dev' ? 24 : 1, startDate: cfg.simulator.voyages.startDate },
     });
     expect(value).not.toHaveProperty('retainOnDelete');
+    // 函數先更新、設定後更新（舊程式的 strict schema 不認得新欄位）/ The function updates before the config.
+    const fnId = Object.entries(template.findResources('AWS::Lambda::Function')).find(
+      ([, r]) => (r as Res).Properties.FunctionName === `brewline-${envName}-simulator-run`,
+    )![0];
+    const [param] = Object.values(template.findResources('AWS::SSM::Parameter')) as Array<Res & { DependsOn?: string[] }>;
+    expect(param!.DependsOn).toEqual(expect.arrayContaining([fnId]));
   });
 
   test('run function: standard settings, env from SSM, async retries 0 → DLQ', () => {

@@ -95,6 +95,12 @@ export interface SimulatorSettings {
   readonly activationStartMonth: string;
   /** 刪除 stack 時保留模擬帳號與密碼參數 / Keep accounts and the credentials parameter when the stack is deleted. */
   readonly retainOnDelete: boolean;
+  /**
+   * 模擬航程（P2b，ADR-032 補充 E9／E12）：timeScale Dev 24（壓縮）／Prod 1（真實時間）；startDate 之前開始訂艙的
+   * 貨運不產生（不回補）。P2b-1 只有 dry-run 使用。
+   * Simulated voyages: Dev ×24, Prod real time; nothing booked before startDate (no backfill). P2b-1: dry run only.
+   */
+  readonly voyages: { readonly timeScale: number; readonly startDate: string };
 }
 
 /**
@@ -253,6 +259,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       seed: 'brewline-dev-sim-2026',
       activationStartMonth: '2026-11',
       retainOnDelete: false,
+      voyages: { timeScale: 24, startDate: '2026-11-23' }, // E9：Dev ×24
     },
     mail: {
       domain: 'dev.brewline-demo.click',
@@ -321,6 +328,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       seed: 'brewline-prod-sim-2026',
       activationStartMonth: '2026-11',
       retainOnDelete: true,
+      voyages: { timeScale: 1, startDate: '2026-11-23' }, // E12：不回補 / no backfill
     },
     mail: {
       domain: 'brewline-demo.click',

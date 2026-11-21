@@ -270,6 +270,84 @@ export async function runChecks(cfg: Config, tokens: Record<Role, Tokens>, roast
   checks.push(...orders.checks);
   if (orders.orderId && orders.simOrderId) checks.push(...(await adminChecks(cfg, tokens, orders.orderId, orders.simOrderId, roaster)));
   else checks.push({ name: 'admin checks need both smoke orders', ok: false, detail: 'missing order ids' });
+  checks.push(...(await shipmentChecks(cfg, tokens, roaster)));
+  return checks;
+}
+
+/** Smoke 訂艙用的虛構船（api-stack 的 SMOKE_VESSELS；IAM 只允許清理這兩艘的邊）/ Smoke vessels (IAM-scoped cleanup). */
+export const SMOKE_VESSELS = { real: 'SIMV-98', synthetic: 'SIMV-99' } as const;
+
+/**
+ * P2b-1 訂艙（ADR-032 補充 E3／E10）：模擬烘焙廠建立模擬貨運、staff 建立真實貨運；POL／POD 由伺服器依批次決定；
+ * 冪等、TW 批次沒有海運、synthetic 隔離。測試批次 L-9999-002 → BRSSZ → TWKHH。
+ * Bookings: idempotency, server-side POL/POD, the domestic lot, synthetic isolation. Test lot → BRSSZ → TWKHH.
+ */
+export async function shipmentChecks(cfg: Config, tokens: Record<Role, Tokens>, roaster: Tokens): Promise<Check[]> {
+  const checks: Check[] = [];
+  const expect = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
+  const run = randomBytes(6).toString('hex');
+  const day = 86_400_000;
+  const dep = new Date(Math.ceil(Date.now() / day) * day + 2 * day).toISOString().replace('.000Z', 'Z');
+  const arr = new Date(Date.parse(dep) + 30 * day).toISOString().replace('.000Z', 'Z');
+  const body = (o: Record<string, unknown> = {}) => ({
+    lot_id: cfg.orderLotId, planned_departure: dep, planned_arrival: arr, carrier_voyage_number: 'D999E',
+    vessel_id: SMOKE_VESSELS.synthetic, vessel_name: 'Demo Smoke', ...o,
+  });
+  const post = (b: unknown, token?: string, key?: string) => call(cfg, '/admin/shipments', token, { body: b, key });
+  const kSim = `smk-ship-${run}-sim`;
+  const kReal = `smk-ship-${run}-real`;
+
+  let r = await post(body(), roaster.access, kSim);
+  const simId = typeof r.body?.shipment_id === 'string' ? (r.body.shipment_id as string) : undefined;
+  expect(
+    'roaster POST /admin/shipments → 201 synthetic, POL/POD from the lot (BRSSZ → TWKHH)',
+    r.status === 201 && r.body?.synthetic === true && r.body?.pol === 'BRSSZ' && r.body?.pod === 'TWKHH' && r.body?.status === 'PLANNED',
+    `got ${r.status} ${r.body?.pol}->${r.body?.pod}`,
+  );
+  expect(
+    'booking and container numbers are fictional (BLDEMO…, DMQU…)',
+    /^BLDEMO/.test(String(r.body?.carrier_booking_reference)) && /^DMQU\d{7}$/.test(String(r.body?.equipment?.[0]?.equipment_reference)),
+    'checked',
+  );
+  r = await post(body(), roaster.access, kSim);
+  expect('same Idempotency-Key → 200, same shipment', r.status === 200 && r.body?.shipment_id === simId, `got ${r.status}`);
+  r = await post(body({ vessel_name: 'Demo Other' }), roaster.access, kSim);
+  expect('same key, different body → 422', r.status === 422, `got ${r.status}`);
+  r = await post(body({ vessel_id: SMOKE_VESSELS.real }), tokens.staff.access, kReal);
+  const realId = typeof r.body?.shipment_id === 'string' ? (r.body.shipment_id as string) : undefined;
+  expect('staff POST → 201 real (synthetic false)', r.status === 201 && r.body?.synthetic === false, `got ${r.status}`);
+
+  // --- 反向 / Negative ---
+  r = await post(body({ lot_id: 'L-2026-008' }), roaster.access, `smk-ship-${run}-tw`);
+  expect('domestic lot L-2026-008 → 400 no_sea_route', r.status === 400 && r.body?.error?.code === 'no_sea_route', `got ${r.status} ${r.body?.error?.code}`);
+  r = await post(body({ lot_id: 'L-0000-000' }), roaster.access, `smk-ship-${run}-unk`);
+  expect('unknown lot → 400 lot_not_found', r.status === 400 && r.body?.error?.code === 'lot_not_found', `got ${r.status}`);
+  r = await post(body(), roaster.access);
+  expect('no Idempotency-Key → 400', r.status === 400, `got ${r.status}`);
+  r = await post(body({ synthetic: false }), roaster.access, `smk-ship-${run}-syn`);
+  expect('body with synthetic → 400 (never trust the client)', r.status === 400, `got ${r.status}`);
+  r = await post(body({ vessel_id: 'IMO1234567' }), roaster.access, `smk-ship-${run}-imo`);
+  expect('synthetic caller with a non-SIMV vessel → 400 invalid_vessel', r.status === 400 && r.body?.error?.code === 'invalid_vessel', `got ${r.status}`);
+  r = await post(body(), tokens.cafe.access, `smk-ship-${run}-cafe`);
+  expect('cafe POST /admin/shipments → 403', r.status === 403, `got ${r.status}`);
+  r = await post(body(), undefined, `smk-ship-${run}-anon`);
+  expect('no token → 401', r.status === 401, `got ${r.status}`);
+
+  // --- 讀取與 synthetic 隔離 / Reads and synthetic isolation ---
+  r = await call(cfg, `/admin/shipments/${simId}`, roaster.access);
+  expect('roaster GET own synthetic shipment → 200 with events/track', r.status === 200 && Array.isArray(r.body?.events) && Array.isArray(r.body?.track), `got ${r.status}`);
+  r = await call(cfg, `/admin/shipments/${realId}`, roaster.access);
+  expect('roaster GET a real shipment → 404', r.status === 404, `got ${r.status}`);
+  r = await call(cfg, `/admin/shipments/${realId}`, tokens.staff.access);
+  expect('staff GET a real shipment → 200', r.status === 200 && r.body?.shipment_id === realId, `got ${r.status}`);
+  r = await call(cfg, `/admin/shipments?lot=${cfg.orderLotId}`, tokens.staff.access);
+  const staffIds = Array.isArray(r.body?.items) ? r.body.items.map((i: any) => i.shipment_id) : [];
+  expect('staff lists both shipments of the lot', r.status === 200 && staffIds.includes(simId) && staffIds.includes(realId), `items ${staffIds.length}`);
+  r = await call(cfg, `/admin/shipments?lot=${cfg.orderLotId}`, roaster.access);
+  const roasterItems: any[] = Array.isArray(r.body?.items) ? r.body.items : [];
+  expect('roaster list shows synthetic shipments only', r.status === 200 && roasterItems.length > 0 && roasterItems.every((i) => i.synthetic === true), `items ${roasterItems.length}`);
+  r = await call(cfg, `/admin/shipments?lot=${cfg.orderLotId}`, tokens.simulator.access);
+  expect('simulator café GET /admin/shipments → 403', r.status === 403, `got ${r.status}`);
   return checks;
 }
 
@@ -766,6 +844,52 @@ async function cleanRoasts(tableName: string, lotId: string): Promise<number> {
   return deleted;
 }
 
+/**
+ * 刪除 smoke 的貨運：測試批次的 SHIP# 邊 → SHIP#<id> 的所有項目 → smoke 船的邊 → 批次邊（IAM 只限這些前綴）。
+ * Delete smoke shipments via the test lot's edges (IAM: the test lot, SHIP# and the smoke vessels only).
+ */
+async function cleanShipments(tableName: string, lotId: string): Promise<number> {
+  let deleted = 0;
+  const vessels = new Set<string>(Object.values(SMOKE_VESSELS));
+  const del = async (pk: unknown, sk: unknown) => {
+    await doc.send(new DeleteCommand({ TableName: tableName, Key: { pk, sk } }));
+    deleted++;
+  };
+  const edges =
+    (
+      await doc.send(
+        new QueryCommand({
+          TableName: tableName,
+          KeyConditionExpression: 'pk = :pk AND begins_with(sk, :p)',
+          ExpressionAttributeValues: { ':pk': `LOT#${lotId}`, ':p': 'SHIP#' },
+          ProjectionExpression: 'pk, sk, shipment_id, planned_departure',
+        }),
+      )
+    ).Items ?? [];
+  for (const edge of edges) {
+    const items =
+      (
+        await doc.send(
+          new QueryCommand({
+            TableName: tableName,
+            KeyConditionExpression: 'pk = :pk',
+            ExpressionAttributeValues: { ':pk': `SHIP#${String(edge.shipment_id)}` },
+            ProjectionExpression: 'pk, sk, vessel',
+          }),
+        )
+      ).Items ?? [];
+    for (const item of items) {
+      const vesselId = (item.vessel as { vessel_id?: string } | undefined)?.vessel_id;
+      if (item.sk === 'META' && vesselId && vessels.has(vesselId)) {
+        await del(`VESSEL#${vesselId}`, `VOY#${String(edge.planned_departure)}#${String(edge.shipment_id)}`);
+      }
+      await del(item.pk, item.sk);
+    }
+    await del(edge.pk, edge.sk);
+  }
+  return deleted;
+}
+
 async function deleteUsers(userPoolId: string, usernames: string[]): Promise<void> {
   for (const username of usernames) {
     try {
@@ -806,6 +930,7 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
   await deleteLeftovers(cfg.userPoolId);
   await cleanTenants(cfg.tableName, cfg.scheduleGroup);
   await cleanRoasts(cfg.tableName, cfg.orderLotId);
+  await cleanShipments(cfg.tableName, cfg.orderLotId);
   await resetStock(cfg.tableName, cfg.orderProductId);
   const runId = randomBytes(4).toString('hex');
   const created: string[] = [];
@@ -840,7 +965,11 @@ export const handler = async (event: CloudFormationCustomResourceEvent) => {
       logger.warn('Could not clean smoke roasts', { error: err.name });
       return -1;
     });
-    logger.info('Test tenant items deleted', { deleted, roastsDeleted });
+    const shipmentsDeleted = await cleanShipments(cfg.tableName, cfg.orderLotId).catch((err: Error) => {
+      logger.warn('Could not clean smoke shipments', { error: err.name });
+      return -1;
+    });
+    logger.info('Test tenant items deleted', { deleted, roastsDeleted, shipmentsDeleted });
   }
 
   const failed = checks.filter((c) => !c.ok);

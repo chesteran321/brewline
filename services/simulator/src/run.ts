@@ -6,6 +6,7 @@ import { Credentials, CredentialsSchema, SimulatorConfig, SimulatorConfigSchema,
 import { PlannedOrder, planDay, planHash, planHour, taipeiNow } from './generator';
 import { ROASTERY_STEPS, Roastery, RoasteryStep, StepSummary, stepsForHour } from './roastery';
 import { ROASTER_USERNAME, simUsername } from './tenants';
+import { VoyageDryRun, voyageDryRun } from './voyages';
 
 /**
  * 模擬器排程函數（ADR-030）。
@@ -267,11 +268,14 @@ export interface RunEvent {
   readonly probe?: boolean;
   readonly dryRun?: boolean;
   readonly date?: string;
+  /** P2b：`{"voyages": "dryRun", "date": "YYYY-MM-DD"}` → 當天訂艙與船位計畫的雜湊 / Voyage plan hash for a Taipei day. */
+  readonly voyages?: string;
 }
 
 export type RunOutcome =
   | { readonly outcome: 'paused' }
   | { readonly outcome: 'dry_run'; readonly date: string; readonly orders: number; readonly perHour: number[]; readonly hash: string }
+  | ({ readonly outcome: 'voyages_dry_run' } & VoyageDryRun)
   | ({ readonly outcome: 'probe_ok'; readonly state: SimulatorState } & ProbeResult)
   | ({ readonly outcome: 'simulated'; readonly roastery: readonly StepSummary[] } & HourSummary)
   | { readonly outcome: 'roastery'; readonly roastery: readonly StepSummary[] };
@@ -303,6 +307,19 @@ export const handler = async (event: RunEvent = {}): Promise<RunOutcome> => {
     const perHour = Array.from({ length: 12 }, (_, i) => plan.filter((o) => o.hour === i + 8).length);
     const out = { outcome: 'dry_run' as const, date, orders: plan.length, perHour, hash: planHash(plan) };
     logger.info('dry run', out);
+    return out;
+  }
+
+  // P2b-1：航程計畫的重現性（SIM-F-009）；同樣不看開關、不登入、不寫 S3、不下訂艙
+  // Voyage plan reproducibility: no switch, no sign-in, no S3 write, no booking.
+  if (event.voyages !== undefined) {
+    if (event.voyages !== 'dryRun') throw new Error('unknown voyages action; P2b-1 supports only "dryRun"');
+    const cfg = await readConfig(env);
+    if (!cfg.voyages) throw new Error('config has no voyages settings');
+    const date = event.date ?? taipeiNow(clock()).date;
+    const out = { outcome: 'voyages_dry_run' as const, ...voyageDryRun(cfg.seed, cfg.voyages, date) };
+    // 只記錄數量與雜湊（船 ID 只在回傳值）/ Log counts and the hash only.
+    logger.info('voyages dry run', { date, timeScale: out.timeScale, bookings: out.bookings.length, positions: out.positions, hash: out.hash });
     return out;
   }
 

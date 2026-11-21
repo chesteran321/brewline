@@ -1,0 +1,15 @@
+{
+  "attribution": "Self-designed: which export port and Taiwan port each green lot ships through. Lots not listed (L-2026-008, Alishan, Taiwan) have no sea leg.",
+  "cycleDays": 28,
+  "lots": [
+    { "lot_id": "L-2026-001", "route": "DJJIB-TWKEL" },
+    { "lot_id": "L-2026-002", "route": "DJJIB-TWKHH" },
+    { "lot_id": "L-2026-003", "route": "KEMBA-TWKEL" },
+    { "lot_id": "L-2026-004", "route": "COBUN-TWKHH" },
+    { "lot_id": "L-2026-005", "route": "GTPRQ-TWKEL" },
+    { "lot_id": "L-2026-006", "route": "PABLB-TWKHH" },
+    { "lot_id": "L-2026-007", "route": "IDBLW-TWKEL" },
+    { "lot_id": "L-9999-001", "route": "BRSSZ-TWKHH", "test": true },
+    { "lot_id": "L-9999-002", "route": "BRSSZ-TWKHH", "test": true }
+  ]
+}

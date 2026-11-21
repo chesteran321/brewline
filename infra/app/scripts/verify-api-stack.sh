@@ -46,7 +46,7 @@ aws sts get-caller-identity --query Arn --output text
 # --- 路由與授權 / Routes and authorization ---
 routes=$(aws apigatewayv2 get-routes --api-id "$api_id" --region "$region" --output json)
 check "Routes" "$(jq -c '[.Items[].RouteKey] | sort' <<<"$routes")" \
-  '["DELETE /replenishments/{id}","GET /admin/orders","GET /admin/products/{id}/stock","GET /admin/tenants/{tenantId}/orders/{orderId}","GET /admin/trace","GET /orders","GET /orders/{id}","GET /products","GET /products/{id}","GET /replenishments","GET /tenant/contact","PATCH /admin/roasts/{id}","PATCH /admin/tenants/{tenantId}/orders/{orderId}","POST /admin/products/{id}/restock","POST /admin/roasts","POST /admin/roasts/{id}/recall","POST /orders","POST /replenishments","PUT /tenant/contact"]'
+  '["DELETE /replenishments/{id}","GET /admin/orders","GET /admin/products/{id}/stock","GET /admin/shipments","GET /admin/shipments/{id}","GET /admin/tenants/{tenantId}/orders/{orderId}","GET /admin/trace","GET /orders","GET /orders/{id}","GET /products","GET /products/{id}","GET /replenishments","GET /tenant/contact","PATCH /admin/roasts/{id}","PATCH /admin/tenants/{tenantId}/orders/{orderId}","POST /admin/products/{id}/restock","POST /admin/roasts","POST /admin/roasts/{id}/recall","POST /admin/shipments","POST /orders","POST /replenishments","PUT /tenant/contact"]'
 check "Routes without JWT" "$(jq -r '[.Items[] | select(.AuthorizationType != "JWT")] | length' <<<"$routes")" "0"
 check "Routes without a scope" "$(jq -r '[.Items[] | select((.AuthorizationScopes // []) | length == 0)] | length' <<<"$routes")" "0"
 scope_of() { jq -c --arg k "$1" '.Items[] | select(.RouteKey == $k) | .AuthorizationScopes' <<<"$routes"; }
@@ -64,6 +64,10 @@ check "PATCH /admin/roasts/{id} scope"   "$(scope_of 'PATCH /admin/roasts/{id}')
 check "POST restock scope"               "$(scope_of 'POST /admin/products/{id}/restock')" '["brewline/roastery"]'
 check "POST recall scope (admin only)"   "$(scope_of 'POST /admin/roasts/{id}/recall')" '["brewline/admin"]'
 check "GET /admin/trace scope"           "$(scope_of 'GET /admin/trace')" '["brewline/admin","brewline/roastery"]'
+# P2b-1（ADR-032 補充 E3）：訂艙由烘焙廠建立；查詢 staff 或烘焙廠 / Bookings by the roastery; reads by staff or roastery.
+check "POST /admin/shipments scope"      "$(scope_of 'POST /admin/shipments')" '["brewline/roastery"]'
+check "GET /admin/shipments scope"       "$(scope_of 'GET /admin/shipments')" '["brewline/admin","brewline/roastery"]'
+check "GET /admin/shipments/{id} scope"  "$(scope_of 'GET /admin/shipments/{id}')" '["brewline/admin","brewline/roastery"]'
 check "GET /tenant/contact scope" "$(scope_of 'GET /tenant/contact')" '["brewline/profile.read"]'
 check "PUT /tenant/contact scope" "$(scope_of 'PUT /tenant/contact')" '["brewline/profile.write"]'
 check "POST /replenishments scope" "$(scope_of 'POST /replenishments')" '["brewline/orders.write"]'
@@ -91,7 +95,7 @@ check "No CORS configured"   "$(aws apigatewayv2 get-api --api-id "$api_id" --re
 
 # --- Lambda ---
 IFS=',' read -r -a fns <<<"$(out FunctionNames)"
-check "API function count" "${#fns[@]}" "19"
+check "API function count" "${#fns[@]}" "22"
 for fn in "${fns[@]}"; do
   cfg=$(aws lambda get-function-configuration --function-name "$fn" --region "$region" --output json)
   short=${fn#brewline-${env_name}-ordering-}
@@ -199,6 +203,39 @@ check "POST /admin/roasts without token"       "$(http_status POST /admin/roasts
 check "POST recall with forged admin JWT" \
   "$(http_status POST /admin/roasts/r_01AAAAAAAAAAAAAAAAAAAAAAAA/recall "Bearer ${forged}")" "401"
 check "GET /admin/trace without token"        "$(http_status GET '/admin/trace?lot=L-2026-001')" "401"
+check "POST /admin/shipments without token"    "$(http_status POST /admin/shipments)" "401"
+check "POST /admin/shipments with forged JWT"  "$(http_status POST /admin/shipments "Bearer ${forged}")" "401"
+check "GET /admin/shipments without token"     "$(http_status GET '/admin/shipments?lot=L-2026-001')" "401"
+
+# --- 訂艙函數的 IAM（政策模擬，只算身分政策）/ Booking function IAM (policy simulation, identity policies only) ---
+# 邊只能寫邊的欄位 → 寫不了 LOT#…/META；沒有 Delete／Update；Scan 明確拒絕。
+# Edges are pinned to edge attributes (a lot's META is safe); no Delete/Update; Scan explicitly denied.
+table_arn=$(aws ssm get-parameter --name "/brewline/${env_name}/data/table-arn" --region "$region" --query Parameter.Value --output text)
+ship_role=$(aws lambda get-function-configuration --function-name "brewline-${env_name}-ordering-create-shipment" --region "$region" --query Role --output text)
+ship_sim() { # ship_sim <label> <expected> <action> <leading key> [attributes,comma,separated]
+  local label=$1 want=$2 action=$3 key=$4 attrs=${5:-}
+  local ctx=("ContextKeyName=dynamodb:LeadingKeys,ContextKeyValues=${key},ContextKeyType=stringList")
+  [[ -n "$attrs" ]] && ctx+=("ContextKeyName=dynamodb:Attributes,ContextKeyValues=${attrs},ContextKeyType=stringList")
+  local res
+  if ! res=$(aws iam simulate-principal-policy --policy-source-arn "$ship_role" --action-names "$action" \
+        --resource-arns "$table_arn" --context-entries "${ctx[@]}" \
+        --query 'EvaluationResults[0].EvalDecision' --output json 2>&1); then
+    if grep -q 'AccessDenied' <<<"$res"; then echo "⚠️  $label: cannot call iam:SimulatePrincipalPolicy (skipped)"; return; fi
+    echo "❌ $label: ${res:0:120}"; fail=1; return
+  fi
+  check "$label" "$(jq -r '.' <<<"$res")" "$want"
+}
+edge_attrs="pk,sk,entity,shipment_id,planned_departure,pol,pod,status,synthetic"
+lot_meta_attrs="pk,sk,entity,lot_id,producer_display_name,origin_country,region,altitude_m,variety,process,cup_score,harvest"
+ship_sim "create-shipment Put SHIP# META"          allowed      dynamodb:PutItem    "SHIP#sh_x"
+ship_sim "create-shipment Put lot edge"            allowed      dynamodb:PutItem    "LOT#L-2026-001"  "$edge_attrs"
+ship_sim "create-shipment Put vessel edge"         allowed      dynamodb:PutItem    "VESSEL#SIMV-01"  "$edge_attrs"
+ship_sim "create-shipment overwrite LOT# META"     implicitDeny dynamodb:PutItem    "LOT#L-2026-001"  "$lot_meta_attrs"
+ship_sim "create-shipment Put PRODUCT#"            implicitDeny dynamodb:PutItem    "PRODUCT#p-0001"
+ship_sim "create-shipment Put TENANT#"             implicitDeny dynamodb:PutItem    "TENANT#t_01AAAAAAAAAAAAAAAAAAAAAAAA"
+ship_sim "create-shipment Delete SHIP#"            implicitDeny dynamodb:DeleteItem "SHIP#sh_x"
+ship_sim "create-shipment Update SHIP#"            implicitDeny dynamodb:UpdateItem "SHIP#sh_x"
+ship_sim "create-shipment Scan"                    explicitDeny dynamodb:Scan       "SHIP#sh_x"
 
 # --- 反向：唯讀角色讀不到資料內容（表層 CMK）/ Negative: read-only role cannot read item contents (CMK) ---
 table=$(aws ssm get-parameter --name "/brewline/${env_name}/data/table-name" --region "$region" --query Parameter.Value --output text)
