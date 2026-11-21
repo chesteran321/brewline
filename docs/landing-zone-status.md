@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0、P1 完成；P2a 資料湖基礎完成**——CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1、溯源 S2a–S2d（公開溯源頁＋模擬烘焙廠，Prod 2026-11-20 起自動產生）、資料湖基礎 P2a（§10.21，ADR-032）；FSBP 100%；下一步 **P2a-2 訂單事件 → 資料湖**，之後海運追蹤 → 採購分析 / P0, P1 and P2a complete; next: P2a-2（2026-11-20）
+> 狀態 Status：**P0、P1 完成；P2a 資料湖基礎＋P2a-2 訂單事件完成**——CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1、溯源 S2a–S2d（公開溯源頁＋模擬烘焙廠，Prod 2026-11-20 起自動產生）、資料湖基礎 P2a 與訂單事件 P2a-2（§10.21，ADR-032）；FSBP 100%；下一步 **P2b 海運追蹤**（docs/06），之後採購分析 / P0, P1, P2a and P2a-2 complete; next: P2b shipment tracking（2026-11-20）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -897,6 +897,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - 從網際網路：`/`、`app.js`、`robots.txt` 200；HSTS、`nosniff`、`SAMEORIGIN`、`Cache-Control: public, max-age=300`；反向：亂數 token、未知路徑、POST 都是**同一個** 404、HTTP → 301、直連 S3 403、TLS 1.1 被拒。
 - **Dev 端到端**：smoke test 烘焙的批次已自動投影；經 CloudFront 讀取 200，欄位剛好是白名單、沒有租戶／訂單／Email。Prod 尚無烘焙批次（`⏭`，S2d 之後才有）。
 - 告警：Dev、Prod 都是 **10 個**（當時以為是每帳號的免費額度上限；2026-11-20 確認免費額度是**全組織**共用，§5、ADR-030 D9 修訂）。
+- **Free 方案帳單證據**（2026-11-20，管理帳號 Cost Explorer，`SERVICE = AWS WAF`，每日＋`USAGE_TYPE`）：Dev 11-18 USD 0.165、11-19 USD 0.011、11-20 **0**；Prod 11-18 USD 0.160、11-19 USD 0.022、11-20 **0**。用 `UsageQuantity` 反推：11-19 的 `Global-WebACLV2` Dev 0.00139 月（× 720 ≈ **1 小時**）、Prod 0.00278 月（≈ 2 小時，Prod 晚 1 小時訂閱，與 #73 部署順序一致）；`Global-RuleV2` 3 條 × 1/720 同樣是 1 小時。→ 訂閱後 web ACL 與規則**不再按時計費**；訂閱前的一次性費用兩個環境合計約 USD 0.36。Cost Explorer 的日期是 **UTC**，且會回頭補前幾天的金額（`Estimated: True` 表示尚未結算）。
 
 - 教訓（2026-11-19）：**第一次 Dev 部署成功，但 `verify-ops-stack.sh` 擋下：Dev 告警 11 個（免費額度 10，ADR-030 D9）**，Prod 被跳過。原本投影函數有 DLQ 與 Errors 兩個告警；失敗重試後一定進 DLQ，Errors 告警是重複的 → 移除。Dev 現在剛好 10 個：**之後新增告警前要先合併或移除既有的**（status §13）。
 - 教訓（2026-11-19）：第二次 Dev 部署 **trace 驗證 39 項中 38 ✅、1 ❌**：`POST rejected = 404 (expected 403)`。CloudFront 對只允許 GET／HEAD 的行為回 403，但我們設定的「403 → 404」錯誤回應同樣套用在它上面 → 回 404。這是期望的行為（所有拒絕都長得一樣），是驗證的預期值寫錯；改成檢查 404 且內容與亂數 token 相同。
@@ -958,6 +959,35 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - （2026-11-20）Athena 的 AccessDenied 不會說明是 identity-based 還是 explicit deny（只有 `not authorized`）；S3 會。T4（沒有 Allow）與 T5（bucket policy 明確 Deny）錯誤訊息不同，可分辨是哪一層擋下。
 - （2026-11-20）CloudShell 屬於開啟它的主控台工作階段：入口網站切換帳號後，舊分頁仍是原身分 → T7 第一次在 Dev 執行；之後指令區塊一律先比對帳號 ID，不符就停止。
 
+#### P2a-2 訂單事件進資料湖 / Order Events to the Lake（2026-11-20，ADR-032 D6，PR #80、#81）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| 規則 | `brewline-dev-lake-order-events`（bus `brewline-dev`）：`source=brewline.ordering`、**只有** `OrderCreated`、`OrderStatusChanged`（E2）；重試 3 次／2 小時；DLQ＝`lake-dlq`（不新增告警，E4） | `brewline-prod-lake-order-events` |
+| Input transformer（E1-A） | `{"id":<id>,"detail_type":<detail_type>,"source":<source>,"time":<time>,"detail":<detail>}` ＋ **`\n`**：Firehose 不會在記錄之間加換行，由規則輸出一行一筆；`detail-type` 改名 `detail_type`（Athena 欄位不能有 `-`）；不用 `<aws.events.event.json>`（文件規定只能當 JSON 欄位值） | 同左 |
+| Firehose | `brewline-dev-order-events`：DirectPut、串流 AWS 擁有的金鑰（免費）、`raw/events/dt=!{timestamp:yyyy-MM-dd}/`（UTC）、錯誤前綴 `raw/events-errors/…`、GZIP、5 MiB／300 秒、物件以資料層 CMK 加密（通過 `DenyWrongKmsKey`）、錯誤日誌 `/aws/kinesisfirehose/…`（7 天）；**沒有資料處理、沒有 Lambda** | 錯誤日誌 30 天 |
+| Firehose 角色 | `brewline-dev-order-events-firehose`：信任 `firehose.amazonaws.com`＋`aws:SourceAccount`＋`aws:SourceArn`；`PutObject` 只限 `raw/events/*`、`raw/events-errors/*`；KMS 只限 `kms:ViaService = s3`＋`kms:EncryptionContext:aws:s3:arn = <bucket ARN>`；沒有 Get／Delete | 同左（prod） |
+| Glue 表（E5） | `brewline_raw.order_events`：JSON SerDe（`ignore.malformed.json=false`）、`detail` 為 struct、projection `2026-11-20,NOW`、`synthetic=mixed` | 同左 |
+| SSM | 新增 `order-events-stream-{name,arn}`（共 11 個） | 同左 |
+
+- 規則與 Firehose 放在 lake stack（E3）：lake 新增依賴 events（SSM bus 名稱）；規則的 DLQ 權限在同一個 stack 產生。Bus 資源政策不需改（規則投遞不是 `PutEvents`）。
+- Developer 許可集**不需要改**：`LakeRead` 已涵蓋 `raw/events/`、`LakeGlueRead` 已涵蓋 `brewline_*`。
+- 費用（估）：每環境每月 < USD 0.05（Firehose 以 5 KB 計、S3 PUT 依「有資料的 5 分鐘時段」數）；告警 0。
+
+已驗證（2026-11-20，Deploy run `44701904005`，merge `b99aa04`）：**Dev ✅ 595、Prod ✅ 587、0 ❌**——
+- CI `cdk diff`（#80）：lake 11 個 `[+]`、2 個就地 `[~]`（`lake-dlq` queue policy 加 1 條、SSM `bucket-name` 說明），其他 stack 只有 commit 欄位。
+- `verify-lake-stack.sh` 新增 30 項：Firehose 設定、規則與 input transformer（以 `}\n` 結尾）、Glue 表、Firehose 角色政策模擬（正向 2：寫 `raw/events/`、`raw/events-errors/`；反向 6：`raw/other/`、`curated/`、Get、Delete、KMS 沒有 ViaService、KMS 別的 bucket）、信任政策、錯誤前綴 0 個物件、`DeliveryToS3.Success`（Dev = 1；Prod 部署當下尚無事件 → ⏭）。
+- **手動 M1–M4（Dev，Developer，16:01 的物件）**：**`wc -l` 14 ＝ `jq` 14 ＝ Athena 14**（`OrderCreated` 2、`OrderStatusChanged` 12）→ E1 的結尾換行在執行時有保留；`synthetic = true` 8 筆（其餘是 smoke test 租戶）；內容 `@`／`TENANT#`／`idempotency`／`created_by` 皆 0；`detail_type` 以外的類型 0；Developer 寫 `raw/events/` → `AccessDenied`（`no identity-based policy allows`）。
+- **M5（Prod，Admin，只讀，不跑 Athena）**：2026-11-20 17:05 那一輪計畫 0 筆（dry-run `[0,2,4,7,1,2,5,2,2,0,2,0]`，17 時＝0），烘焙廠 `confirm` 的 7 筆 CREATED 依雜湊全部留給逾時 → bus、規則（`Invocations 0`／`FailedInvocations 0`）、Firehose（`IncomingRecords 0`）、`lake-dlq`（0）**一致為 0**，不是故障。2026-11-21 12:36 檢查 `dt=2026-11-21`：**5 個物件**（台北 08:05–12:05 每個整點一個，各在 :10 寫出＝300 秒緩衝）；**`wc -l` 31 ＝ `jq` 31**；**`synthetic = true` 31 ／ 31**（Prod 只有模擬流量）；`OrderCreated` 4、`OrderStatusChanged` 27；`@`／`TENANT#`／`idempotency` 皆 0；錯誤前綴 0 個物件。
+
+教訓 / Lessons：
+- （2026-11-20）**開了 S3 Bucket Key 之後，KMS 加密內容（`kms:EncryptionContext:aws:s3:arn`）是 bucket ARN，不是物件 ARN**。寫成物件 ARN 時 `GenerateDataKey` 被拒，Firehose 會重試 24 小時後**丟棄資料**；單元測試（故意改成物件 ARN → 失敗）與部署驗證（政策模擬）一起把關。
+- （2026-11-20）「服務執行時的行為」只能在真實環境驗證：單元測試只能確認 template 有 `\n`，EventBridge 會不會保留要用 M1 兩種對換行反應不同的數法（`wc -l` 只數換行、`jq` 不管換行）＋Athena 交叉比對 → 因此 Dev 驗證前先不核准 Prod。
+- （2026-11-20）**驗證腳本不要用 `--output text` 做比對**（#81）：空結果印 `None`（`KeyCount`）；`--max-items 1` 在有第二個物件時多印一行 `None`（分頁），鍵名被污染 → `NoSuchKey` 被誤判成「允許」。#79 時 lake 只有 1 個物件所以沒出現。一律 `--output json`＋`jq`；反向檢查只有 `AccessDenied` 算通過，`NoSuchKey` 是腳本錯誤。離線替身也要模擬這些 CLI 行為（修正前重現 2 個 ❌）。
+- （2026-11-20）驗證失敗 → Prod 自動跳過 → 修驗證的 PR 合併後的部署**一併**把功能送到 Prod，不需要手動補部署（#80 → #81）。
+- （2026-11-20）Firehose 用 L1：L2 的 S3 目的地會給角色整個 bucket 的讀寫；規則 ARN 以名稱組出，避免「規則 ↔ 角色信任政策」循環依賴。
+- （2026-11-20）資料流沒有結果時，**依序看每一關的計數**（bus 稽核日誌 → 規則 `Invocations`／`FailedInvocations` → Firehose `IncomingRecords`／`DeliveryToS3.Records` → DLQ）：「全部為 0」是源頭沒有事件，「前一關有、後一關 0」才是斷掉。決定性的模擬器可以用 dry-run 事先算出下一個事件的時段，不必碰運氣等待。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -982,7 +1012,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-027 | 訂單狀態機與 staff 端點 | Accepted（2026-11-13） | 狀態以 DynamoDB 為準；一個交易＝訂單（樂觀鎖：原狀態）＋庫存；staff 函數不扮演租戶角色、無 Put／Delete（§10.9） |
 | ADR-026 | 事件層：Streams → Lambda → EventBridge | Accepted（2026-11-13） | 台北沒有 Pipes／Archive；自訂 bus、白名單 detail、`event_id` 去重、Logs 規則留存、DLQ SSE-SQS（§10.10） |
 | ADR-031 | 溯源（docs/04）範圍與設計（S2 決策 D1–D9） | Accepted（2026-11-18） | D1 S2＝生豆批次（8 個種子）＋烘焙批次＋QR＋公開頁＋staff 追溯＋召回＋模擬烘焙廠；航程（SHP）、天氣（PRC）、換批、召回寄信延後。D2 公開頁＝S3 預先產生的白名單 JSON 投影（事件觸發），讀取路徑沒有 Lambda／API／DynamoDB。D3 CloudFront 統一費率 **Free 方案**（WAF＋IP 速率限制＋DDoS，`AWS::PricingPlanManager::Subscription`）；快取用 `Cache-Control: max-age=300`；不合格時退回 pay-as-you-go 不掛 WAF。D4 us-east-1 `edge`（ACM、CLOUDFRONT web ACL）→ config → 台北 `trace`（bucket、OAC、distribution、方案訂閱）；describe-type 實測台北可建 Distribution／Subscription、不能建 ACM。D5 鄰接清單，不加 GSI2。D6 `brewline/roastery` scope＋`simulator-roastery` 群組，伺服器端 synthetic 保護。D7 補貨（樂觀鎖）。D8 模擬操作員節奏（同一輪確認 90%、16:05 排烘、隔天烘焙／出貨、2 天後完成）。D9 QR 128-bit、召回 admin only（§10.17）。**2026-11-20 全部實作完成**（S2a–S2d，§10.17–§10.20） |
-| ADR-032 | P2 資料設計（D1–D12）與資料湖基礎 | Accepted（2026-11-20；P2a 已實作） | D1 公開頁海運旅程用模擬航程（真實港口、虛構船名與貨櫃號、`demo`）；D2 aisstream 只在 Dev spike 7 天、不進 Prod；D3 raw → curated 用 Athena UNLOAD（Step Functions Standard，先清分區）；D4 Glue 由 CDK 定義、partition projection、不用 crawler、不開 Lake Formation；D5 SSE-KMS 沿用資料層 CMK＋Bucket Key；D6 訂單事件經 Firehose 進 `raw/events/`；D7 專用 workgroup（強制設定、Prod 1 GB／Dev 100 MB）；**D8（修訂）每模組一個 DLQ＋告警**（lake／shipment／procurement）；D9 aisstream spike 每 30 分、256 MB、120 秒；D10 儀表板預先計算；D11 溯源頁航跡同源 SVG；D12 EDI（IFTSTA）依 UNECE 公開目錄自行設計。另：Glue 目錄不加密（帳號層級單例）；bucket policy 用 `Null`＋`StringNotEquals`；`describe-type` 判讀規則（§2）。詳見 docs/14（§10.21） |
+| ADR-032 | P2 資料設計（D1–D12）與資料湖基礎 | Accepted（2026-11-20；P2a、P2a-2 已實作） | D1 公開頁海運旅程用模擬航程（真實港口、虛構船名與貨櫃號、`demo`）；D2 aisstream 只在 Dev spike 7 天、不進 Prod；D3 raw → curated 用 Athena UNLOAD（Step Functions Standard，先清分區）；D4 Glue 由 CDK 定義、partition projection、不用 crawler、不開 Lake Formation；D5 SSE-KMS 沿用資料層 CMK＋Bucket Key；D6 訂單事件經 Firehose 進 `raw/events/`；D7 專用 workgroup（強制設定、Prod 1 GB／Dev 100 MB）；**D8（修訂）每模組一個 DLQ＋告警**（lake／shipment／procurement）；D9 aisstream spike 每 30 分、256 MB、120 秒；D10 儀表板預先計算；D11 溯源頁航跡同源 SVG；D12 EDI（IFTSTA）依 UNECE 公開目錄自行設計。另：Glue 目錄不加密（帳號層級單例）；bucket policy 用 `Null`＋`StringNotEquals`；`describe-type` 判讀規則（§2）。P2a-2：input transformer 結尾 `\n`（Dev 實測通過）、只收兩種訂單事件、不新增告警、Bucket Key 的 KMS 加密內容＝bucket ARN。詳見 docs/14（§10.21） |
 | ADR-030 | 模擬器（docs/07）範圍與設計（S1 決策 D1–D9） | Accepted（2026-11-17） | D1 S1＝租戶＋訂單＋重複下單異常；生豆／烘焙批次 → S2（溯源），貨櫃／DCSA／IFTSTA／EDI 異常 → S3（P2）。D2 專用 `simulator` app client（`ADMIN_USER_PASSWORD_AUTH`）＋每人隨機密碼存 SSM SecureString（CMK）；pre token 限制此 client 只發 scope 給 `simulator` 群組。D3 部署時 custom resource 建 40 個使用者（先啟用 30，每月依日期啟用 1–2）；執行函數只有 `AdminInitiateAuth`。D4 Dev、Prod 都跑（Prod 每天 5–40、Dev 2–6；每筆 1–3 個商品 × 1–5 kg；跳過庫存偏低）；首次部署 `paused`。D5 S1 不推進訂單（逾時取消），S2 再設計烘焙廠操作員。D6 `synthetic: true` 由伺服器依 `cognito:groups` 標記於訂單與事件。D7 `state` 參數只在首次建立時寫入（Dev 可由 Developer 切換）、`config` 由 CDK 管理；`scp-budget-lockdown` 加 `cognito-idp:AdminInitiateAuth`。D8 台北 08:05–19:05 每小時；冪等鍵＝hash(種子, 日期, 小時, 序號)；重現性以 dry-run 計畫雜湊驗證。D9 不建自訂指標；預期失敗即函數錯誤 → `Errors` 告警；每帳號告警 ≤ 10。前置：S0（RSK-017）完成。**D9 修訂（2026-11-20）**：CloudWatch 告警免費額度 10 個是**全組織**共用（含管理帳號；Free Tier 頁 `Global-CW:AlarmMonitorUsage` 實測），每帳號 ≤ 10 的前提不成立 → 改為管控組織總數、告警費預算 ≤ USD 2／月、每環境 ≤ 13（P2 每模組一個 DLQ 告警，ADR-032 D8）；**不合併 DLQ**（§10.20） |
 
 | 風險 | 內容 | L | I | 緩解 |
@@ -1055,6 +1085,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-20 | 管理帳號舊資源盤點與清理：S3 bucket 0、台北 Glue 資料庫 0；終止停機的 `ml-api-server` 並清理 SG、IAM 角色／profile、key pair、2 個告警（§7） |
 | ✅ 2026-11-20 | Dev 月預算 USD 5 → 10（§5） |
 | ✅ 2026-11-20 | P2a 資料湖基礎部署 Dev、Prod；Developer 許可集新增 Athena／Glue／lake；手動 T1–T7 通過（§3、§10.21，PR #78） |
+| ✅ 2026-11-20 | P2a-2 訂單事件 → Firehose → `raw/events/` 部署 Dev、Prod；Dev M1–M4（換行 14＝14＝14）、Prod M5（31＝31，全部 synthetic）通過；驗證腳本修正 #81（§10.21，PR #80、#81） |
+| ✅ 2026-11-20 | WAF 帳單確認：Free 方案訂閱後不再按時計費（§10.19） |
 | 有空時 | break-glass 第二個 MFA 裝置、紙本備份 |
 | 有空時 | 手動建立的預算日後改由 CDK 管理（或匯入） |
 | **2026-12-04** | 試用期決策點：GuardDuty、Security Hub CSPM 用量頁；確認管理帳號 EBS Malware 費用為 0；依 11 §7 定案 ADR-008；**依 12 月實際費用評估降低 Dev AWS Config 費用**（排除 `AWS::Lambda::Function` 或關閉 Dev Config） |
@@ -1096,7 +1128,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-18 | 模擬器 S1d：Prod `state` 改 `running`，16:05 排程自動下第一批 2 筆模擬訂單（§10.16）；**模擬器 S1 完成** |
 | ✅ 2026-11-20 | 溯源 S2d（§10.20，PR #75、#76）：Dev 端到端、Prod 16:05 排烘 9 批、09:05 烘焙 → 9 個公開頁；**溯源 S2 完成、P1 完成** |
 | ✅ 2026-11-19 | FSBP 全面整理（§9）：刪除 Dev／Prod 台北預設 VPC、5 項帳號設定、停用 Inspector.1/.2、6 項 SUPPRESSED → **100%**（2026-11-20） |
-| P2 | 下一步：**P2a-2 訂單事件 → Firehose → `raw/events/`**（ADR-032 D6）→ 海運追蹤（docs/06，補 TRC-F-004；`shipment-dlq`）→ 採購分析（docs/05；`procurement-dlq`）；開始 P2a-2 前先看 Dev 各服務費用 |
+| P2 | 下一步：**P2b 海運追蹤**（docs/06，補 TRC-F-004；航次模型＋模擬航程＋DCSA＋`shipment-dlq`，ADR-032 D1／D11）→ P2b-spike aisstream（Dev 7 天）→ P2c–P2d → 採購分析 P2e–P2f（docs/05；`procurement-dlq`）；curate 工作流（Athena UNLOAD，D3）在 P2e 第一個使用者出現時建立
 | P2b-spike 前 | aisstream API key（需本人以 GitHub 登入建立）→ 密碼管理器；spike 時存 Dev SSM SecureString |
 | 有空時 | 管理帳號 Secrets Manager 的 USD 0.00003 是否只是 API 呼叫（若有 secret 會是每個每月 USD 0.40） |
 | 有空時 | us-east-1 的預設 VPC（Dev、Prod）也刪除（edge stack 不用 VPC；不影響 FSBP，台北以外沒開 Security Hub） |
