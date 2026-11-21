@@ -196,6 +196,14 @@ describe.each(['dev', 'prod'] as const)('LakeStack (%s)', (envName) => {
     t.hasOutput('WorkgroupName', { Value: `brewline-${envName}-analytics` });
   });
 
+  test('P2b-2 (E5): lake bucket sends events to EventBridge via the L1 property — no notifications custom resource', () => {
+    const [, lake] = bucketByName('lake');
+    expect(lake.Properties.NotificationConfiguration).toEqual({ EventBridgeConfiguration: { EventBridgeEnabled: true } });
+    const [, results] = bucketByName('athena-results');
+    expect(results.Properties.NotificationConfiguration).toBeUndefined();
+    expect(Object.keys(t.findResources('Custom::S3BucketNotifications'))).toEqual([]);
+  });
+
   test('no Lambda at all (no autoDeleteObjects / custom resources) and no synth errors', () => {
     t.resourceCountIs('AWS::Lambda::Function', 0);
     expect(Object.keys(t.findResources('Custom::S3AutoDeleteObjects'))).toEqual([]);

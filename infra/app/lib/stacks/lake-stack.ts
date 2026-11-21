@@ -60,7 +60,7 @@ export const LAKE_PARAMETERS = {
 /** 前綴慣例（S3 沒有資料夾，不建立物件）/ Prefix convention; S3 has no folders, so nothing is created. */
 export const LAKE_PREFIX_CONVENTION =
   'raw/<source>/dt=YYYY-MM-DD/, curated/<table>/..., analytics/<table>/..., analytics/serving/, ' +
-  'quarantine/<source>/dt=.../, edi/{inbound,archive,quarantine}/, raw/events/ + raw/events-errors/ (Firehose), raw/_smoke/ (Dev only)';
+  'quarantine/<source>/dt=.../, edi/{inbound,archive,quarantine}/, raw/events/ + raw/events-errors/ (Firehose), raw/positions/source={sim,ais}/ (P2b-2), raw/_smoke/ (Dev only)';
 
 /**
  * 資料湖基礎（P2a，ADR-032 草案，P2 設計 D3–D8）。
@@ -118,6 +118,12 @@ export class LakeStack extends Stack {
         { id: 'noncurrent-and-multipart', noncurrentVersionExpiration: Duration.days(30), abortIncompleteMultipartUploadAfter: Duration.days(7) },
       ],
     });
+    // P2b-2（ADR-032 補充 E5）：新物件送到 EventBridge（預設 bus），各模組自己加規則訂閱（例如 shipment 的 raw/positions/）。
+    // 用 L1 原生屬性：L2 的 eventBridgeEnabled 會部署 BucketNotifications custom resource Lambda（違反 Lambda 標準）。
+    // Send object events to EventBridge (default bus); modules subscribe with their own rules. L1 on purpose: the L2
+    // eventBridgeEnabled flag deploys a BucketNotifications custom-resource Lambda.
+    (bucket.node.defaultChild as s3.CfnBucket).notificationConfiguration = { eventBridgeConfiguration: { eventBridgeEnabled: true } };
+
     // 預設加密會套用 CMK，但呼叫端可以自己指定別的金鑰（例如 aws/s3）或 SSE-S3 → 擋掉。
     // 只在標頭「存在」時判斷（Null = false），沒帶標頭的上傳交給預設加密（CMK）。
     // Default encryption applies the CMK, but a caller may name another key (e.g. aws/s3) or SSE-S3: deny those.

@@ -90,6 +90,17 @@ check "Scheduler role SourceArn = schedule group" \
   "$(jq -r '[.Statement[].Condition.StringEquals["aws:SourceArn"]] | flatten | first' <<<"$trust")" \
   "arn:aws:scheduler:${region}:${account}:schedule-group/brewline-${env_name}-simulator"
 
+# --- 位置檔排程（P2b-2，E4）/ Positions schedule ---
+vsched=$(aws scheduler get-schedule --group-name "$(out ScheduleGroupName)" --name "$(out VoyagesScheduleName)" --region "$region" --output json)
+check "Voyages schedule state"      "$(jq -r .State <<<"$vsched")" "ENABLED"
+check "Voyages schedule expression" "$(jq -r .ScheduleExpression <<<"$vsched")" "cron(20,50 * * * ? *)"
+check "Voyages schedule timezone"   "$(jq -r .ScheduleExpressionTimezone <<<"$vsched")" "Asia/Taipei"
+check "Voyages schedule target = run function" "$(jq -r .Target.Arn <<<"$vsched")" "$run_arn"
+check "Voyages schedule input segment" "$(jq -r '.Target.Input | fromjson | .segment' <<<"$vsched")" "positions"
+check "Voyages schedule retries" "$(jq -r .Target.RetryPolicy.MaximumRetryAttempts <<<"$vsched")" "0"
+check "Voyages schedule DLQ" "$(jq -r '.Target.DeadLetterConfig.Arn // "none"' <<<"$vsched")" \
+  "arn:aws:sqs:${region}:${account}:brewline-${env_name}-simulator-dlq"
+
 # --- 執行函數 / Run function ---
 cfg=$(aws lambda get-function-configuration --function-name "$run_fn" --region "$region" --output json)
 check "Run function timeout (s, cafés + roastery)" "$(jq -r .Timeout <<<"$cfg")" "300"
@@ -116,6 +127,13 @@ check "Run role → AdminSetUserPassword (neg)" "$(sim cognito-idp:AdminSetUserP
 check "Run role → write state (neg)"        "$(sim ssm:PutParameter "$(ssm_arn "${prefix}/state")")" "implicitDeny"
 check "Run role → other parameter (neg)"    "$(sim ssm:GetParameter "$(ssm_arn "/brewline/${env_name}/data/kms-key-arn")")" "implicitDeny"
 check "Run role → DynamoDB PutItem (neg)"   "$(sim dynamodb:PutItem "$table_arn")" "implicitDeny"
+# P2b-2（E3）：只能寫 raw/positions/source=sim/ / Positions: source=sim only, write only.
+lake_arn="arn:aws:s3:::$(aws ssm get-parameter --name "/brewline/${env_name}/lake/bucket-name" --region "$region" --query Parameter.Value --output text)"
+check "Run role → PutObject positions source=sim" "$(sim s3:PutObject "${lake_arn}/raw/positions/source=sim/dt=2026-11-23/0020.jsonl.gz")" "allowed"
+check "Run role → PutObject source=ais (neg)"     "$(sim s3:PutObject "${lake_arn}/raw/positions/source=ais/dt=2026-11-23/x.jsonl.gz")" "implicitDeny"
+check "Run role → PutObject raw/events (neg)"     "$(sim s3:PutObject "${lake_arn}/raw/events/x.gz")" "implicitDeny"
+check "Run role → GetObject positions (neg)"      "$(sim s3:GetObject "${lake_arn}/raw/positions/source=sim/x")" "implicitDeny"
+check "Run role → DeleteObject positions (neg)"   "$(sim s3:DeleteObject "${lake_arn}/raw/positions/source=sim/x")" "implicitDeny"
 
 # --- 告警與 DLQ / Alarms and DLQ ---
 alarms=$(aws cloudwatch describe-alarms --alarm-name-prefix "brewline-${env_name}-simulator-" --region "$region" --output json)

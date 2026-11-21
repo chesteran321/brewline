@@ -1,5 +1,6 @@
 import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import { BatchGetCommand, DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import type { AdvanceResult, TrackPoint } from './detector-core';
 import {
   CreateShipmentRequest,
   DcsaTransportEvent,
@@ -11,6 +12,7 @@ import {
   ShipmentItem,
   ShipmentItemSchema,
   TrackItemSchema,
+  VESSEL_VOY_EDGE_PREFIX,
   bookingReference,
   equipmentFor,
   lotPk,
@@ -219,5 +221,97 @@ export class ShipmentRepo {
       keys = res.UnprocessedKeys?.[this.tableName]?.Keys as Record<string, unknown>[] | undefined;
     }
     return found.sort((a, b) => b.planned_departure.localeCompare(a.planned_departure));
+  }
+
+  // --- P2b-2 偵測器 / Detector ---
+
+  /**
+   * 船的候選貨運：船邊（VESSEL#/VOY#…）中未抵港的，再讀 META（強一致）。只看最近 120 天開航的。
+   * Candidate shipments of a vessel: its not-yet-arrived voyage edges, then their META (strongly consistent).
+   */
+  async vesselShipments(vesselId: string, sinceIso: string): Promise<ShipmentItem[]> {
+    const out = await this.doc.send(
+      new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'pk = :pk AND sk >= :from',
+        ExpressionAttributeValues: { ':pk': vesselPk(vesselId), ':from': `${VESSEL_VOY_EDGE_PREFIX}${sinceIso}` },
+        Limit: 50,
+      }),
+    );
+    const ids = (out.Items ?? []).flatMap((raw) => {
+      const p = ShipmentEdgeSchema.safeParse(raw);
+      return p.success && p.data.status !== 'ARRIVED' ? [p.data.shipment_id] : [];
+    });
+    const found: ShipmentItem[] = [];
+    for (const id of ids) {
+      const s = await this.getShipment(id, true);
+      if (s) found.push(s);
+    }
+    return found;
+  }
+
+  async getTrack(id: string): Promise<TrackPoint[]> {
+    const out = await this.doc.send(new GetCommand({ TableName: this.tableName, Key: { pk: shipPk(id), sk: 'TRACK' }, ConsistentRead: true }));
+    const p = TrackItemSchema.safeParse(out.Item);
+    return p.success ? (p.data.points as TrackPoint[]) : [];
+  }
+
+  /**
+   * 一個交易寫入偵測結果：META（樂觀鎖 version）＋新的運輸事件（attribute_not_exists）＋航跡＋（狀態改變時）兩條邊的狀態。
+   * 版本衝突 → 丟錯讓 Lambda 重試（重讀後只會處理比 last_position_at 新的點）。
+   * One transaction: META (optimistic lock) + new transport events + track + edge statuses on a status change.
+   * A version conflict throws so Lambda retries with a fresh read.
+   */
+  async applyAdvance(s: ShipmentItem, r: AdvanceResult, track: TrackPoint[] | undefined, now: Date): Promise<void> {
+    const at = now.toISOString();
+    const set = ['#st = :st', '#tr = :tr', '#v = :next', '#u = :at'];
+    const values: Record<string, unknown> = { ':st': r.status, ':tr': r.tracking, ':next': s.version + 1, ':at': at, ':v': s.version };
+    for (const [k, v] of [['atd', r.atd], ['ata', r.ata], ['eta', r.eta]] as const) {
+      if (v !== undefined) {
+        set.push(`${k} = :${k}`);
+        values[`:${k}`] = v;
+      }
+    }
+    const statusChanged = r.status !== s.status;
+    const edgeUpdate = (pk: string, sk: string) => ({
+      Update: {
+        TableName: this.tableName,
+        Key: { pk, sk },
+        UpdateExpression: 'SET #st = :st',
+        ConditionExpression: 'attribute_exists(pk)',
+        ExpressionAttributeNames: { '#st': 'status' },
+        ExpressionAttributeValues: { ':st': r.status },
+      },
+    });
+    await this.doc.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: { pk: shipPk(s.shipment_id), sk: META_SK },
+              UpdateExpression: `SET ${set.join(', ')}`,
+              ConditionExpression: '#v = :v',
+              ExpressionAttributeNames: { '#st': 'status', '#tr': 'tracking', '#v': 'version', '#u': 'updated_at' },
+              ExpressionAttributeValues: values,
+            },
+          },
+          ...r.events.map((e) => ({
+            Put: {
+              TableName: this.tableName,
+              Item: { pk: shipPk(s.shipment_id), sk: `EVT#${e.eventDateTime}#${e.eventID}`, entity: 'TransportEvent', event: e },
+              ConditionExpression: 'attribute_not_exists(pk)',
+            },
+          })),
+          ...(track ? [{ Put: { TableName: this.tableName, Item: { pk: shipPk(s.shipment_id), sk: 'TRACK', entity: 'Track', points: track } } }] : []),
+          ...(statusChanged
+            ? [
+                edgeUpdate(lotPk(s.lot_id), lotShipEdgeSk(s.planned_departure, s.shipment_id)),
+                edgeUpdate(vesselPk(s.vessel.vessel_id), vesselVoyEdgeSk(s.planned_departure, s.shipment_id)),
+              ]
+            : []),
+        ],
+      }),
+    );
   }
 }

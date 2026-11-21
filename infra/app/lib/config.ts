@@ -69,6 +69,8 @@ export interface LambdaSettings {
     readonly simulator: number;
     /** 溯源投影（S2c；事件量很小，節流由 EventBridge 重試）/ Trace projector (low volume; throttles retried). */
     readonly traceProjector: number;
+    /** 航次偵測（P2b-2；1 = 依序處理位置檔，同一艘船不會被兩個檔案同時更新）/ Voyage detector (1 = files in sequence). */
+    readonly voyageDetector: number;
   };
 }
 
@@ -237,7 +239,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 7, // COST-007
-      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2, simulator: 1, traceProjector: 2 },
+      reservedConcurrency: { preTokenGeneration: 5, api: 5, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2, simulator: 1, traceProjector: 2, voyageDetector: 1 },
     },
     api: {
       throttleRateLimit: 10,
@@ -306,7 +308,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     lambda: {
       logRetentionDays: 30, // COST-007
-      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2, simulator: 1, traceProjector: 2 },
+      reservedConcurrency: { preTokenGeneration: 10, api: 10, customResource: 1, streamPublisher: 2, notifier: 1, replenish: 2, simulator: 1, traceProjector: 2, voyageDetector: 1 },
     },
     api: {
       throttleRateLimit: 50,

@@ -114,6 +114,7 @@ S3 has no folders, so nothing is pre-created; the same convention is in the SSM 
 |---|---|---|
 | `raw/<source>/dt=YYYY-MM-DD/` | 原始資料（JSON，gzip） | Prod 90 天轉 Glacier IR、730 天刪除；Dev 30 天刪除 |
 | `raw/events/dt=YYYY-MM-DD/` | 訂單事件（Firehose，JSON Lines，gzip；`brewline_raw.order_events`，P2a-2） | 同 `raw/` |
+| `raw/positions/source={sim,ais}/dt=YYYY-MM-DD/` | 船舶位置（模擬器每 30 分一檔，JSON Lines，gzip；`brewline_raw.positions`；新物件 → EventBridge → 航程偵測，P2b-2） | 同 `raw/` |
 | `raw/events-errors/` | Firehose 錯誤輸出（正常情況應為空） | 同 `raw/` |
 | `curated/<table>/…` | Parquet（Athena UNLOAD） | 730 天 |
 | `analytics/<table>/…`、`analytics/serving/` | 彙總、儀表板 JSON | 730 天 |

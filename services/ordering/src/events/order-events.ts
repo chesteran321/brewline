@@ -13,6 +13,8 @@ import type { DynamoDBRecord } from 'aws-lambda';
  * | StockLow            | MODIFY，sk = STOCK，available_kg 從 ≥ 門檻 **跌破** 門檻（只在跨越時發一次） |
  * | RoastBatchRoasted   | MODIFY，entity = RoastBatch，status 變成 ROASTED（S2c，source `brewline.traceability`） |
  * | RoastBatchRecalled  | MODIFY，entity = RoastBatch，第一次出現 recall（S2c）                    |
+ * | VesselDeparted      | MODIFY，entity = Shipment，status PLANNED → DEPARTED（P2b-2，source `brewline.shipment`） |
+ * | VesselArrived       | MODIFY，entity = Shipment，status DEPARTED → ARRIVED（P2b-2）            |
  *
  * detail 一律白名單：不含 created_by（使用者 sub）、pk／sk、冪等鍵。模擬器的訂單另有 `synthetic: true`。
  * Details are allow-listed: never the user's sub, keys, or idempotency key.
@@ -21,8 +23,16 @@ import type { DynamoDBRecord } from 'aws-lambda';
 
 export const EVENT_SOURCE = 'brewline.ordering';
 export const TRACE_EVENT_SOURCE = 'brewline.traceability';
+export const SHIPMENT_EVENT_SOURCE = 'brewline.shipment';
 
-export type DetailType = 'OrderCreated' | 'OrderStatusChanged' | 'StockLow' | 'RoastBatchRoasted' | 'RoastBatchRecalled';
+export type DetailType =
+  | 'OrderCreated'
+  | 'OrderStatusChanged'
+  | 'StockLow'
+  | 'RoastBatchRoasted'
+  | 'RoastBatchRecalled'
+  | 'VesselDeparted'
+  | 'VesselArrived';
 
 export interface DomainEvent {
   readonly source: string;
@@ -110,6 +120,26 @@ export function toDomainEvent(record: DynamoDBRecord): DomainEvent | undefined {
     }
     if (!old.recall && now.recall) {
       return { source: TRACE_EVENT_SOURCE, detailType: 'RoastBatchRecalled', time, detail: { ...base, ...roast } };
+    }
+    return undefined;
+  }
+
+  // P2b-2（ADR-032 補充 E6）：偵測器只寫 DynamoDB，事件由 Streams 發布（Outbox）。detail 白名單：
+  // 不含貨櫃號、訂艙號、船 ID（E10）/ Allow-listed detail: no container, booking or vessel identifiers.
+  if (now?.entity === 'Shipment' && record.eventName === 'MODIFY' && old && old.status !== now.status) {
+    const ship = {
+      shipment_id: str(now.shipment_id),
+      lot_id: str(now.lot_id),
+      pol: str(now.pol),
+      pod: str(now.pod),
+      ...(now.synthetic === true ? { synthetic: true } : {}),
+    };
+    if (!ship.shipment_id || !ship.lot_id || !ship.pol || !ship.pod) return undefined;
+    if (old.status === 'PLANNED' && now.status === 'DEPARTED' && str(now.atd)) {
+      return { source: SHIPMENT_EVENT_SOURCE, detailType: 'VesselDeparted', time, detail: { ...base, ...ship, at: str(now.atd) } };
+    }
+    if (old.status === 'DEPARTED' && now.status === 'ARRIVED' && str(now.ata)) {
+      return { source: SHIPMENT_EVENT_SOURCE, detailType: 'VesselArrived', time, detail: { ...base, ...ship, at: str(now.ata) } };
     }
     return undefined;
   }
