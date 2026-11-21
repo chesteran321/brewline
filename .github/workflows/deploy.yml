@@ -73,7 +73,7 @@ jobs:
 
       - name: cdk deploy (Dev)
         run: >
-          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data brewline-dev-auth brewline-dev-ops brewline-dev-events brewline-dev-api brewline-dev-notify brewline-dev-simulator brewline-dev-edge brewline-dev-trace brewline-dev-lake
+          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data brewline-dev-auth brewline-dev-ops brewline-dev-events brewline-dev-api brewline-dev-notify brewline-dev-simulator brewline-dev-edge brewline-dev-trace brewline-dev-lake brewline-dev-shipment
           -c env=dev -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -190,6 +190,14 @@ jobs:
           { echo "### Lake stack (Dev)"; echo '```'; cat verify-lake.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
 
+      - name: Verify shipment stack (voyage detector, positions rule, DLQ + alarm, positions table, negative IAM simulations)
+        run: |
+          set +e
+          scripts/verify-shipment-stack.sh dev outputs.json | tee verify-shipment.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### Shipment stack (Dev)"; echo '```'; cat verify-shipment.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
   deploy-prod:
     name: Deploy Prod
     needs: deploy-dev
@@ -239,7 +247,7 @@ jobs:
 
       - name: cdk deploy (Prod)
         run: >
-          npx cdk deploy brewline-prod-pipeline-check brewline-prod-data brewline-prod-auth brewline-prod-ops brewline-prod-events brewline-prod-api brewline-prod-notify brewline-prod-simulator brewline-prod-edge brewline-prod-trace brewline-prod-lake
+          npx cdk deploy brewline-prod-pipeline-check brewline-prod-data brewline-prod-auth brewline-prod-ops brewline-prod-events brewline-prod-api brewline-prod-notify brewline-prod-simulator brewline-prod-edge brewline-prod-trace brewline-prod-lake brewline-prod-shipment
           -c env=prod -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -352,4 +360,12 @@ jobs:
           scripts/verify-lake-stack.sh prod outputs.json | tee verify-lake.txt
           rc=${PIPESTATUS[0]}
           { echo "### Lake stack (Prod)"; echo '```'; cat verify-lake.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Verify shipment stack (voyage detector, positions rule, DLQ + alarm, positions table, negative IAM simulations)
+        run: |
+          set +e
+          scripts/verify-shipment-stack.sh prod outputs.json | tee verify-shipment.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### Shipment stack (Prod)"; echo '```'; cat verify-shipment.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc

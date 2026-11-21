@@ -97,3 +97,52 @@ export function within(at: LatLon, centre: LatLon, radiusKm: number): boolean {
 }
 
 export const knotsToKmh = (kn: number) => kn * KM_PER_NM;
+
+/**
+ * 航跡簡化（Douglas–Peucker，保留首尾）：容許誤差從小到大加倍，直到點數 ≤ maxPoints。
+ * 以經緯度平面近似計算偏離距離（航跡摘要只用來畫示意圖，不需要測地精度）。
+ * Track simplification (Douglas–Peucker, endpoints kept), doubling the tolerance until ≤ maxPoints. Planar lat/lon
+ * distances are fine for a display-only summary.
+ */
+export function simplify<T extends readonly [number, number, ...unknown[]]>(points: readonly T[], maxPoints: number): T[] {
+  if (maxPoints < 2) throw new Error('maxPoints must be ≥ 2');
+  if (points.length <= maxPoints) return [...points];
+  const perp = (p: T, a: T, b: T) => {
+    const [x, y] = [p[1], p[0]];
+    const [x1, y1, x2, y2] = [a[1], a[0], b[1], b[0]];
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len = Math.hypot(dx, dy);
+    return len === 0 ? Math.hypot(x - x1, y - y1) : Math.abs(dy * x - dx * y + x2 * y1 - y2 * x1) / len;
+  };
+  const run = (eps: number): T[] => {
+    const keep = new Uint8Array(points.length);
+    keep[0] = 1;
+    keep[points.length - 1] = 1;
+    const stack: Array<[number, number]> = [[0, points.length - 1]];
+    while (stack.length > 0) {
+      const [s, e] = stack.pop()!;
+      let best = -1;
+      let bestD = 0;
+      for (let i = s + 1; i < e; i++) {
+        const d = perp(points[i]!, points[s]!, points[e]!);
+        if (d > bestD) {
+          bestD = d;
+          best = i;
+        }
+      }
+      if (best > 0 && bestD > eps) {
+        keep[best] = 1;
+        stack.push([s, best], [best, e]);
+      }
+    }
+    return points.filter((_, i) => keep[i] === 1);
+  };
+  let eps = 0.001;
+  let out = run(eps);
+  while (out.length > maxPoints) {
+    eps *= 2;
+    out = run(eps);
+  }
+  return out;
+}

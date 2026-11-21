@@ -14,6 +14,7 @@ import { EdgeStack } from '../lib/stacks/edge-stack';
 import { EventsStack } from '../lib/stacks/events-stack';
 import { LakeStack } from '../lib/stacks/lake-stack';
 import { NotifyStack } from '../lib/stacks/notify-stack';
+import { ShipmentStack } from '../lib/stacks/shipment-stack';
 import { SimulatorStack } from '../lib/stacks/simulator-stack';
 import { OpsStack } from '../lib/stacks/ops-stack';
 import { PipelineCheckStack } from '../lib/stacks/pipeline-check-stack';
@@ -195,3 +196,19 @@ lakeStack.addStackDependency(dataStack, 'CMK ARN for SSE-KMS (SSM)');
 lakeStack.addStackDependency(opsStack, 'DLQ alarm publishes to the ops topic (SSM)');
 lakeStack.addStackDependency(eventsStack, 'order-events rule on the brewline-<env> bus (SSM bus name, P2a-2)');
 Tags.of(lakeStack).add('module', 'data-lake', { priority: 200 });
+// P2b-2：模擬器把位置檔寫進 lake（SSM bucket 名稱／ARN）→ lake 要先部署 / The simulator writes position files to the lake.
+simulatorStack.addStackDependency(lakeStack, 'writes raw/positions/source=sim/ to the lake bucket (SSM, P2b-2)');
+
+// 海運追蹤（P2b-2，ADR-032）：偵測函數、預設 bus 規則、shipment-dlq＋告警、Glue 表 positions。
+// Shipment tracking: detector, default-bus rule, DLQ + alarm, the positions Glue table.
+const shipmentStack = new ShipmentStack(app, `brewline-${env.name}-shipment`, {
+  envName: env.name,
+  lambda: env.lambda,
+  env: { account: env.account, region: env.region },
+  description: 'BrewLine shipment tracking (P2b, ADR-032): voyage detector, positions rule, shipment DLQ, positions table',
+  terminationProtection: env.name === 'prod',
+});
+shipmentStack.addStackDependency(dataStack, 'table and CMK (SSM)');
+shipmentStack.addStackDependency(opsStack, 'DLQ alarm publishes to the ops topic (SSM)');
+shipmentStack.addStackDependency(lakeStack, 'lake bucket with EventBridge notifications and the brewline_raw database (SSM)');
+Tags.of(shipmentStack).add('module', 'shipment', { priority: 200 });

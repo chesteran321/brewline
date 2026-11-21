@@ -135,6 +135,15 @@ export const ShipmentItemSchema = z.object({
   atd: UtcTimestampSchema.optional(),
   ata: UtcTimestampSchema.optional(),
   status: ShipmentStatusSchema,
+  /** 偵測器的進度（P2b-2）：最後處理的位置時刻、是否看過船在 POL、最近 6 小時的點（算平均航速）/ Detector state. */
+  tracking: z
+    .object({
+      last_position_at: UtcTimestampSchema.optional(),
+      at_pol_seen: z.boolean().optional(),
+      last_moored_at: UtcTimestampSchema.optional(),
+      recent: z.array(z.tuple([z.string(), z.number(), z.number()])).max(30).optional(),
+    })
+    .optional(),
   request_hash: z.string(),
   version: z.number().int().min(1),
   created_by: z.string(),
@@ -219,3 +228,19 @@ export function toAdminShipment(s: ShipmentItem) {
     synthetic: s.synthetic === true,
   };
 }
+
+// --- 位置記錄（P2b-2，E3：模擬器與 aisstream spike 共用的入口格式）/ Position records (shared entry format) ---
+export const PositionRecordSchema = z.object({
+  source: z.enum(['sim', 'ais']),
+  vessel_id: VesselIdSchema,
+  vessel_name: z.string().max(60).optional(),
+  ts: UtcTimestampSchema,
+  lat: z.number().min(-90).max(90),
+  lon: z.number().min(-180).max(180),
+  sog: z.number().min(0).max(60),
+  cog: z.number().min(0).max(360).optional(),
+  nav_status: z.number().int().min(0).max(15).optional(),
+  destination: z.string().max(20).optional(),
+  synthetic: z.boolean().optional(),
+});
+export type PositionRecord = z.infer<typeof PositionRecordSchema>;

@@ -176,6 +176,12 @@ export class EventsStack extends Stack {
           eventName: lambda.FilterRule.isEqual('MODIFY'),
           dynamodb: { NewImage: { entity: { S: lambda.FilterRule.isEqual('RoastBatch') } } },
         }),
+        // P2b-2（ADR-032 補充 E6）：貨運 META 的修改 → VesselDeparted／VesselArrived（狀態改變時才發事件，由函數判斷）
+        // Shipment META modifications; the function emits only on status changes.
+        lambda.FilterCriteria.filter({
+          eventName: lambda.FilterRule.isEqual('MODIFY'),
+          dynamodb: { NewImage: { entity: { S: lambda.FilterRule.isEqual('Shipment') } } },
+        }),
       ],
     });
     // 建立對應時 Lambda 會檢查角色能否讀 stream → 先建好政策 / The mapping validates stream permissions on create.

@@ -52,6 +52,9 @@ for b in "$lake" "$results"; do
 done
 
 check "[lake] versioning" "$(aws s3api get-bucket-versioning --bucket "$lake" --region "$region" --query Status --output text)" "Enabled"
+# P2b-2（E5）：S3 → EventBridge 開啟（偵測函數的觸發來源）/ EventBridge notifications on (detector trigger).
+check "[lake] EventBridge notifications" "$(aws s3api get-bucket-notification-configuration --bucket "$lake" --region "$region" \
+  --output json | jq -r 'has("EventBridgeConfiguration")')" "true"
 # 從未開啟時 API 沒有 Status（印出 None）/ Never enabled → no Status.
 check "[results] versioning not Enabled" "$(aws s3api get-bucket-versioning --bucket "$results" --region "$region" --query Status --output text | grep -qx Enabled && echo false || echo true)" "true"
 

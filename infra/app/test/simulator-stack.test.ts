@@ -125,6 +125,39 @@ describe.each(['dev', 'prod'] as const)('SimulatorStack (%s)', (envName) => {
     expect(param!.DependsOn).toEqual(expect.arrayContaining([fnId]));
   });
 
+  test('P2b-2 (E4): positions schedule every 30 min (:20/:50) Asia/Taipei, segment=positions, same function/group/DLQ, no retries', () => {
+    template.hasResourceProperties('AWS::Scheduler::Schedule', {
+      Name: `brewline-${envName}-simulator-voyages`,
+      GroupName: `brewline-${envName}-simulator`,
+      ScheduleExpression: 'cron(20,50 * * * ? *)',
+      ScheduleExpressionTimezone: 'Asia/Taipei',
+      FlexibleTimeWindow: { Mode: 'OFF' },
+      State: 'ENABLED',
+      Target: Match.objectLike({
+        Input: JSON.stringify({ source: 'schedule', segment: 'positions' }),
+        RetryPolicy: { MaximumRetryAttempts: 0 },
+        DeadLetterConfig: { Arn: { 'Fn::GetAtt': [Match.stringLikeRegexp('^Dlq'), 'Arn'] } },
+      }),
+    });
+    const scheds = resources(template, 'AWS::Scheduler::Schedule').map((r) => r.Properties);
+    expect(scheds).toHaveLength(2);
+    expect(JSON.stringify(scheds[0]!.Target.Arn)).toEqual(JSON.stringify(scheds[1]!.Target.Arn)); // 同一個函數 / same function
+  });
+
+  test('P2b-2 (E3): run role writes raw/positions/source=sim/ only; KMS GenerateDataKey via S3 with the lake bucket context; no read/delete', () => {
+    const st = roleStatements(template, 'RunRole');
+    const put = st.find((x) => x.Sid === 'WriteSimulatedPositions');
+    expect(put.Action).toBe('s3:PutObject');
+    expect(JSON.stringify(put.Resource)).toContain('/raw/positions/source=sim/*');
+    const kms = st.find((x) => x.Sid === 'EncryptPositionsViaS3');
+    expect(kms.Action).toBe('kms:GenerateDataKey');
+    expect(kms.Condition.StringEquals['kms:ViaService']).toBe('s3.ap-east-2.amazonaws.com');
+    expect(JSON.stringify(kms.Condition.StringEquals['kms:EncryptionContext:aws:s3:arn'])).toContain('lakebucketarn');
+    const acts = actionsOf(st);
+    for (const a of ['s3:GetObject', 's3:DeleteObject', 's3:ListBucket', 's3:*']) expect(acts).not.toContain(a);
+    expect(JSON.stringify(st)).not.toContain('source=ais');
+  });
+
   test('run function: standard settings, env from SSM, async retries 0 → DLQ', () => {
     template.hasResourceProperties('AWS::Lambda::Function', {
       FunctionName: `brewline-${envName}-simulator-run`,
@@ -135,6 +168,7 @@ describe.each(['dev', 'prod'] as const)('SimulatorStack (%s)', (envName) => {
           STATE_PARAM: `${prefix}/state`,
           API_ENDPOINT: { Ref: Match.stringLikeRegexp('apiendpoint') },
           SIMULATOR_CLIENT_ID: { Ref: Match.stringLikeRegexp('simulatorclientid') },
+          LAKE_BUCKET: { Ref: Match.stringLikeRegexp('lakebucketname') },
         }),
       },
     });

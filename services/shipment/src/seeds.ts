@@ -24,6 +24,8 @@ const PortSchema = z.strictObject({
   lat: Lat,
   lon: Lon,
   role: z.enum(['origin', 'destination', 'spike_only']),
+  /** World Port Index 編號（coordinates_status = wpi 時必填）/ WPI number, required once coordinates come from WPI. */
+  wpi: z.number().int().positive().optional(),
 });
 export type Port = z.infer<typeof PortSchema>;
 
@@ -76,6 +78,9 @@ export function buildSeeds(raw: { ports: unknown; routes: unknown; lotRoutes: un
   const pf = PortsFileSchema.parse(raw.ports);
   const rf = RoutesFileSchema.parse(raw.routes);
   const lf = LotRoutesFileSchema.parse(raw.lotRoutes);
+  if (pf.attribution.coordinates_status === 'wpi' && pf.ports.some((p) => p.wpi === undefined)) {
+    throw new Error('coordinates_status is wpi but a port has no WPI number');
+  }
 
   const ports = new Map<string, Port>();
   for (const p of pf.ports) {

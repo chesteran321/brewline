@@ -88,6 +88,31 @@ describe('toDomainEvent', () => {
     expect(toDomainEvent(rec('INSERT', roast('SCHEDULED')))).toBeUndefined();
     expect(toDomainEvent(rec('MODIFY', roast('ROASTED'), roast('SCHEDULED')))!.detail).not.toHaveProperty('synthetic');
   });
+  const ship = (status: string, extra: object = {}) => ({
+    pk: 'SHIP#sh_X', sk: 'META', entity: 'Shipment', shipment_id: `sh_${'3'.repeat(26)}`, lot_id: 'L-2026-001', pol: 'DJJIB', pod: 'TWKEL',
+    status, carrier_booking_reference: 'BLDEMO0123456789', equipment: [{ equipment_reference: 'DMQU0000013', iso_equipment_code: '22G1' }],
+    vessel: { vessel_id: 'SIMV-01', vessel_name: 'Demo Kestrel' }, created_by: 'roastery-sub-secret', ...extra,
+  });
+  test('shipment PLANNED → DEPARTED / DEPARTED → ARRIVED (source brewline.shipment) without booking, container or vessel ids', () => {
+    const dep = toDomainEvent(rec('MODIFY', ship('DEPARTED', { atd: '2026-11-25T03:40:00Z', synthetic: true }), ship('PLANNED', { synthetic: true })))!;
+    expect(dep).toMatchObject({
+      source: 'brewline.shipment',
+      detailType: 'VesselDeparted',
+      detail: { shipment_id: `sh_${'3'.repeat(26)}`, lot_id: 'L-2026-001', pol: 'DJJIB', pod: 'TWKEL', at: '2026-11-25T03:40:00Z', synthetic: true },
+    });
+    const arr = toDomainEvent(rec('MODIFY', ship('ARRIVED', { atd: 'a', ata: '2026-12-12T10:00:00Z' }), ship('DEPARTED', { atd: 'a' })))!;
+    expect(arr).toMatchObject({ detailType: 'VesselArrived', detail: { at: '2026-12-12T10:00:00Z' } });
+    expect(arr.detail).not.toHaveProperty('synthetic');
+    for (const e of [dep, arr]) {
+      const json = JSON.stringify(e.detail);
+      for (const f of ['BLDEMO', 'DMQU', 'SIMV-', 'Demo Kestrel', 'roastery-sub-secret', 'SHIP#']) expect(json).not.toContain(f);
+    }
+    // 反向：建立（INSERT）、狀態沒變（ETA／航跡更新）、跳級、缺時間 → 不發 / Negative cases.
+    expect(toDomainEvent(rec('INSERT', ship('PLANNED')))).toBeUndefined();
+    expect(toDomainEvent(rec('MODIFY', ship('DEPARTED', { atd: 'a', eta: 'x' }), ship('DEPARTED', { atd: 'a' })))).toBeUndefined();
+    expect(toDomainEvent(rec('MODIFY', ship('ARRIVED', { ata: 'b' }), ship('PLANNED')))).toBeUndefined();
+    expect(toDomainEvent(rec('MODIFY', ship('DEPARTED'), ship('PLANNED')))).toBeUndefined();
+  });
   test('order events keep source brewline.ordering', () => {
     expect(toDomainEvent(rec('INSERT', order('CREATED')))!.source).toBe('brewline.ordering');
   });

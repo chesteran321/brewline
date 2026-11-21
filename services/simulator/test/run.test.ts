@@ -5,7 +5,11 @@ import { SimulatorConfig } from '../src/config';
 import { HOURS, planDay, planHour } from '../src/generator';
 import { PACE_MS, SEED_PRODUCT_IDS, handler, setDepsForTesting } from '../src/run';
 import { ROASTER_USERNAME, simUsers } from '../src/tenants';
-import { voyageDryRun } from '../src/voyages';
+import { gunzipSync } from 'node:zlib';
+import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { seeds as shipmentSeeds } from '../../shipment/src/seeds';
+import { assertCoordinatesFinal } from '../src/run';
+import { bookingBody, bookingsDue, positionsForWindow, voyageDryRun } from '../src/voyages';
 
 const cog = mockClient(CognitoIdentityProviderClient);
 const ssm = mockClient(SSMClient);
@@ -293,4 +297,78 @@ test('negative: roaster token without synthetic claim → roastery violation, ca
   }));
   await expect(handler({})).rejects.toThrow(/roastery 1/);
   expect(adminReqs()).toHaveLength(0);
+});
+
+// --- P2b-2：位置段與訂艙段 / Positions and shipments segments ---
+describe('P2b-2 segments', () => {
+  const s3m = mockClient(S3Client);
+  const voyages = { timeScale: 24, startDate: '2026-11-23' };
+  const cfgV = { ...CONFIG, voyages };
+  const provisional = () => ({ ...shipmentSeeds(), coordinatesStatus: 'provisional' as const });
+  // 找一個「有訂艙該建立」的整點 / An hour at which bookings are due.
+  const dueAt = (() => {
+    for (let t = Date.parse('2026-12-01T00:05:00Z'); ; t += 3_600_000) if (bookingsDue(CONFIG.seed, voyages, t).length > 0) return t;
+  })();
+  beforeEach(() => {
+    s3m.reset();
+    s3m.on(PutObjectCommand).resolves({});
+    ssm.on(GetParameterCommand, { Name: '/c' }).resolves({ Parameter: { Value: JSON.stringify(cfgV) } });
+    process.env.LAKE_BUCKET = 'lake-bucket';
+    setDepsForTesting({ s3: new S3Client({ region: 'ap-east-2' }), shipmentSeeds: shipmentSeeds, now: () => new Date(dueAt) });
+  });
+  afterEach(() => {
+    delete process.env.LAKE_BUCKET;
+    setDepsForTesting({ now: () => NOW, shipmentSeeds: shipmentSeeds });
+  });
+
+  test('positions: writes the previous 30-minute window as gzip JSON Lines to raw/positions/source=sim/; no sign-in, no API', async () => {
+    state('running');
+    const at = Date.parse('2026-12-03T05:20:00Z');
+    setDepsForTesting({ now: () => new Date(at) });
+    const out = (await handler({ segment: 'positions' })) as any;
+    expect(out).toMatchObject({ outcome: 'positions', key: 'raw/positions/source=sim/dt=2026-12-03/0430.jsonl.gz', written: true });
+    const put = s3m.commandCalls(PutObjectCommand)[0]!.args[0].input;
+    expect(put).toMatchObject({ Bucket: 'lake-bucket', Key: out.key });
+    expect(put.ServerSideEncryption).toBeUndefined(); // 預設加密套用 CMK / default encryption applies the CMK
+    const lines = gunzipSync(put.Body as Buffer).toString('utf8').trim().split('\n');
+    expect(lines).toHaveLength(out.records);
+    expect(lines.map((l) => JSON.parse(l))).toEqual(positionsForWindow(CONFIG.seed, voyages, at - 30 * 60_000 - (at % (30 * 60_000)), at - (at % (30 * 60_000))));
+    expect(cog.commandCalls(AdminInitiateAuthCommand)).toHaveLength(0);
+    expect(reqs).toHaveLength(0);
+    // 指定 at：寫那個時間窗（補寫）/ With `at`: that window.
+    const back = (await handler({ segment: 'positions', at: '2026-12-03T04:00:00Z' })) as any;
+    expect(back.key).toBe('raw/positions/source=sim/dt=2026-12-03/0400.jsonl.gz');
+  });
+  test('negative: positions while paused → nothing written; provisional coordinates → throws, nothing written; unknown segment → throws', async () => {
+    state('paused');
+    expect(await handler({ segment: 'positions' })).toEqual({ outcome: 'paused' });
+    state('running');
+    setDepsForTesting({ shipmentSeeds: provisional });
+    await expect(handler({ segment: 'positions' })).rejects.toThrow(/provisional/);
+    await expect(handler({ segment: 'nope' })).rejects.toThrow(/unknown segment/);
+    expect(s3m.commandCalls(PutObjectCommand)).toHaveLength(0);
+    expect(() => assertCoordinatesFinal(provisional())).toThrow();
+    expect(() => assertCoordinatesFinal(shipmentSeeds())).not.toThrow();
+  });
+  test('shipments: due bookings go through POST /admin/shipments as the simulated roaster (201 / 200 are fine)', async () => {
+    state('running');
+    let n = 0;
+    adminResponder = (req) => (req.path === '/admin/shipments' ? { status: n++ === 0 ? 201 : 200, body: {} } : { status: 200, body: { items: [] } });
+    const out = (await handler({ segment: 'shipments' })) as any;
+    const due = bookingsDue(CONFIG.seed, voyages, dueAt);
+    expect(out).toMatchObject({ outcome: 'shipments', due: due.length, violations: [] });
+    const posts = reqs.filter((r) => r.path === '/admin/shipments');
+    expect(posts.map((r) => r.key)).toEqual(due.map((p) => p.idempotencyKey));
+    expect(posts.every((r) => userOf(r.token) === ROASTER_USERNAME)).toBe(true);
+    expect(posts[0]!.body).toEqual(bookingBody(due[0]!));
+  });
+  test('negative: a booking answered 400/422 is a violation (→ throws → run-errors alarm); provisional coordinates book nothing', async () => {
+    state('running');
+    adminResponder = (req) => (req.path === '/admin/shipments' ? { status: 422, body: { error: { code: 'idempotency_key_reused' } } } : { status: 200, body: { items: [] } });
+    await expect(handler({ segment: 'shipments' })).rejects.toThrow(/idempotency_key_reused/);
+    reqs = [];
+    setDepsForTesting({ shipmentSeeds: provisional });
+    await expect(handler({ segment: 'shipments' })).rejects.toThrow(/provisional/);
+    expect(reqs.filter((r) => r.path === '/admin/shipments')).toHaveLength(0);
+  });
 });

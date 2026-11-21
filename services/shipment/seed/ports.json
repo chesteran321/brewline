@@ -1,19 +1,99 @@
 {
   "attribution": {
-    "locodes": "UN/LOCODE (UNECE). Only the codes listed here are used (DS-09). Cross-checked 2026-11-21 against public port references; to be confirmed against the latest UNECE release.",
-    "coordinates": "PROVISIONAL (2026-11-21): rounded harbour positions cross-checked from several public port references. To be replaced with NGA World Port Index (Pub 150, U.S. Government work, public domain, DS-10) values before the P2b-2 detector goes live.",
-    "coordinates_status": "provisional"
+    "locodes": "UN/LOCODE (UNECE). Only the codes listed here are used (DS-09). Each code matches the UN/LOCODE column of the same WPI row (2026-11-21).",
+    "coordinates": "NGA World Port Index (Pub 150), UpdatedPub150.csv (U.S. Government work, public domain, DS-10). Retrieved 2026-11-21 from the official NGA MSI site (https://msi.nga.mil/apology_objects/WPI.zip, Last-Modified 2026-11-20T19:40:47Z, zip entry dated 2026-11-05). zip sha256 bd6e0eeb647d3fc79ab7d390720c60fc5d361edca9553e9ebe2c4fd8d530b53e; csv 3,493,655 bytes, 3,809 rows, sha256 8c90ee8a2bfd051b986a672fa55fcc5754f29002e95fb4f41dba46330bd5bcb8. Values rounded to 6 decimals.",
+    "coordinates_status": "wpi"
   },
   "ports": [
-    { "locode": "DJJIB", "name": "Djibouti", "country": "DJ", "lat": 11.60, "lon": 43.14, "role": "origin" },
-    { "locode": "KEMBA", "name": "Mombasa", "country": "KE", "lat": -4.07, "lon": 39.66, "role": "origin" },
-    { "locode": "COBUN", "name": "Buenaventura", "country": "CO", "lat": 3.89, "lon": -77.07, "role": "origin" },
-    { "locode": "GTPRQ", "name": "Puerto Quetzal", "country": "GT", "lat": 13.92, "lon": -90.79, "role": "origin" },
-    { "locode": "PABLB", "name": "Balboa", "country": "PA", "lat": 8.95, "lon": -79.57, "role": "origin" },
-    { "locode": "IDBLW", "name": "Belawan", "country": "ID", "lat": 3.78, "lon": 98.69, "role": "origin" },
-    { "locode": "BRSSZ", "name": "Santos", "country": "BR", "lat": -23.96, "lon": -46.30, "role": "origin" },
-    { "locode": "TWKEL", "name": "Keelung", "country": "TW", "lat": 25.15, "lon": 121.75, "role": "destination" },
-    { "locode": "TWKHH", "name": "Kaohsiung", "country": "TW", "lat": 22.61, "lon": 120.28, "role": "destination" },
-    { "locode": "VNSGN", "name": "Ho Chi Minh City", "country": "VN", "lat": 10.76, "lon": 106.79, "role": "spike_only" }
+    {
+      "locode": "DJJIB",
+      "name": "Djibouti",
+      "country": "DJ",
+      "lat": 11.6,
+      "lon": 43.133333,
+      "role": "origin",
+      "wpi": 47850
+    },
+    {
+      "locode": "KEMBA",
+      "name": "Mombasa",
+      "country": "KE",
+      "lat": -4.066667,
+      "lon": 39.666667,
+      "role": "origin",
+      "wpi": 47100
+    },
+    {
+      "locode": "COBUN",
+      "name": "Buenaventura",
+      "country": "CO",
+      "lat": 3.883333,
+      "lon": -77.066667,
+      "role": "origin",
+      "wpi": 15370
+    },
+    {
+      "locode": "GTPRQ",
+      "name": "Puerto Quetzal",
+      "country": "GT",
+      "lat": 13.916667,
+      "lon": -90.8,
+      "role": "origin",
+      "wpi": 15660
+    },
+    {
+      "locode": "PABLB",
+      "name": "Balboa",
+      "country": "PA",
+      "lat": 8.95,
+      "lon": -79.566667,
+      "role": "origin",
+      "wpi": 15410
+    },
+    {
+      "locode": "IDBLW",
+      "name": "Belawan",
+      "country": "ID",
+      "lat": 3.783333,
+      "lon": 98.683333,
+      "role": "origin",
+      "wpi": 50730
+    },
+    {
+      "locode": "BRSSZ",
+      "name": "Santos",
+      "country": "BR",
+      "lat": -23.95,
+      "lon": -46.3,
+      "role": "origin",
+      "wpi": 12970
+    },
+    {
+      "locode": "TWKEL",
+      "name": "Keelung",
+      "country": "TW",
+      "lat": 25.133333,
+      "lon": 121.766667,
+      "role": "destination",
+      "wpi": 57890
+    },
+    {
+      "locode": "TWKHH",
+      "name": "Kaohsiung",
+      "country": "TW",
+      "lat": 22.616667,
+      "lon": 120.25,
+      "role": "destination",
+      "wpi": 57920
+    },
+    {
+      "locode": "VNSGN",
+      "name": "Ho Chi Minh City",
+      "country": "VN",
+      "lat": 10.766667,
+      "lon": 106.716667,
+      "role": "spike_only",
+      "wpi": 57580
+    }
   ]
 }

@@ -14,6 +14,7 @@ import { BrewlineFunction, LATEST_RUNTIME_ACK } from '../constructs/brewline-fun
 import { ApiStack } from './api-stack';
 import { AuthStack } from './auth-stack';
 import { DataStack } from './data-stack';
+import { LakeStack } from './lake-stack';
 import { notifyAlarms } from './ops-stack';
 
 export interface SimulatorStackProps extends StackProps {
@@ -49,6 +50,9 @@ export class SimulatorStack extends Stack {
   /** 台北 08:05–19:05 每小時（ADR-030 D8）/ Hourly 08:05–19:05 Taipei. */
   public static readonly SCHEDULE_EXPRESSION = 'cron(5 8-19 * * ? *)';
   public static readonly SCHEDULE_TIMEZONE = 'Asia/Taipei';
+  /** P2b-2（E4）：每 30 分，避開整點 :05 的下單輪 / Every 30 minutes, clear of the :05 order run. */
+  public static readonly VOYAGES_SCHEDULE_EXPRESSION = 'cron(20,50 * * * ? *)';
+  public static readonly POSITIONS_PREFIX = 'raw/positions/source=sim/';
 
   constructor(scope: Construct, id: string, props: SimulatorStackProps) {
     super(scope, id, props);
@@ -155,6 +159,8 @@ export class SimulatorStack extends Stack {
         USER_POOL_ID: param(`${authPrefix}/user-pool-id`),
         SIMULATOR_CLIENT_ID: param(`${authPrefix}/simulator-client-id`),
         API_ENDPOINT: param(`${ApiStack.parameterPrefix(envName)}/endpoint`),
+        // P2b-2：位置檔寫入的 lake bucket（E3）/ Lake bucket for position files.
+        LAKE_BUCKET: param(`${LakeStack.parameterPrefix(envName)}/bucket-name`),
       },
     });
     // 先更新函數、再更新設定：新程式讀得懂舊設定（新欄位選填），舊程式（strict schema）讀不懂新設定。
@@ -175,6 +181,24 @@ export class SimulatorStack extends Stack {
       new iam.PolicyStatement({ sid: 'SignInOnly', actions: ['cognito-idp:AdminInitiateAuth'], resources: [userPoolArn] }),
     );
     runFn.function.node.addDependency(accounts); // 帳號與開關先就緒 / Accounts and the switch exist first.
+    // P2b-2（E3）：只能寫 raw/positions/source=sim/*（不能寫 source=ais/、不能讀或刪）；KMS 只經 S3、加密內容＝bucket ARN。
+    // Write raw/positions/source=sim/* only (not source=ais/, no read/delete); KMS via S3 with the bucket ARN context.
+    const lakeBucketArn = param(`${LakeStack.parameterPrefix(envName)}/bucket-arn`);
+    runFn.role.addToPolicy(
+      new iam.PolicyStatement({ sid: 'WriteSimulatedPositions', actions: ['s3:PutObject'], resources: [`${lakeBucketArn}/${SimulatorStack.POSITIONS_PREFIX}*`] }),
+    );
+    runFn.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'EncryptPositionsViaS3',
+        actions: ['kms:GenerateDataKey'],
+        resources: [param(`${DataStack.parameterPrefix(envName)}/kms-key-arn`)],
+        conditions: { StringEquals: { 'kms:ViaService': `s3.${this.region}.amazonaws.com`, 'kms:EncryptionContext:aws:s3:arn': lakeBucketArn } },
+      }),
+    );
+    Validations.of(runFn.role).acknowledge({
+      id: `AwsSolutions-IAM5[Resource::<SsmParameterValuebrewline${envName}lakebucketarnC96584B6F00A464EAD1953AFF4B05118Parameter>/${SimulatorStack.POSITIONS_PREFIX}*]`,
+      reason: 'One object per 30-minute window under raw/positions/source=sim/; keys are dated, so the prefix cannot be narrower.',
+    });
 
     // --- 4) DLQ ---
     const dlq = new sqs.Queue(this, 'Dlq', {
@@ -228,6 +252,25 @@ export class SimulatorStack extends Stack {
       },
     });
     schedule.addDependency(group);
+    // P2b-2（E4）：位置檔排程，24 小時每 30 分（:20／:50，避開 :05 的下單輪）；同一個函數、同一個開關、同一個 DLQ。
+    // Positions schedule: every 30 minutes around the clock, same function, switch and DLQ.
+    const voyages = new scheduler.CfnSchedule(this, 'VoyagesSchedule', {
+      name: `brewline-${envName}-simulator-voyages`,
+      groupName,
+      description: 'Simulated vessel positions every 30 minutes (raw/positions/source=sim/); the run function checks the SSM state first',
+      scheduleExpression: SimulatorStack.VOYAGES_SCHEDULE_EXPRESSION,
+      scheduleExpressionTimezone: SimulatorStack.SCHEDULE_TIMEZONE,
+      flexibleTimeWindow: { mode: 'OFF' },
+      state: 'ENABLED',
+      target: {
+        arn: runFn.function.functionArn,
+        roleArn: schedulerRole.roleArn,
+        input: JSON.stringify({ source: 'schedule', segment: 'positions' }),
+        retryPolicy: { maximumRetryAttempts: 0 },
+        deadLetterConfig: { arn: dlq.queueArn },
+      },
+    });
+    voyages.addDependency(group);
 
     // --- 6) 告警（D9）/ Alarms ---
     new cloudwatch.Alarm(this, 'RunErrorsAlarm', {
@@ -253,6 +296,7 @@ export class SimulatorStack extends Stack {
     new CfnOutput(this, 'RunFunctionName', { value: runFn.function.functionName });
     new CfnOutput(this, 'ProvisionFunctionName', { value: provisioner.function.functionName });
     new CfnOutput(this, 'ScheduleName', { value: schedule.name! });
+    new CfnOutput(this, 'VoyagesScheduleName', { value: voyages.name! });
     new CfnOutput(this, 'ScheduleGroupName', { value: groupName });
     new CfnOutput(this, 'DlqUrl', { value: dlq.queueUrl });
     new CfnOutput(this, 'AccountCount', { value: accounts.getAttString('Users') });
