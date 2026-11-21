@@ -357,6 +357,10 @@
     - Lake bucket policy：`DenyWrongKmsKey`／`DenyNonKmsSse` 寫成 `Null: false`＋`StringNotEquals`（「標頭存在且不等於」）。實作規格原寫 `StringNotEqualsIfExists`，但 `…IfExists` 在鍵不存在時為 true → 會擋掉所有沒帶加密標頭、依預設加密寫入的上傳。寫入者指定金鑰時一律用 SSM 的 CMK **ARN**（金鑰 ID 也會被拒）。
     - Dev bucket 不用 `autoDeleteObjects`（會多一個 custom resource Lambda）；P2a stack 沒有任何 Lambda。
     - `describe-type` 判讀規則：`FULLY_MUTABLE`／`IMMUTABLE`＋`LIVE` → 可用；`NON_PROVISIONABLE`／`TypeNotFound` → Dev 測試 stack create → 讀回 → delete 後再下結論；每次附對照組與反向組（status §2）。
+  - **實作補充（P2a-2，2026-11-20，PR #80、#81）**：
+    - E1：換行由規則的 **input transformer** 產生（列出 `id`、`detail_type`、`source`、`time`、`detail` 並以 `\n` 結尾），不用 Firehose 資料處理或 Lambda；Dev 實測物件行數＝`jq` 物件數＝Athena 筆數（14＝14＝14）。備案（未使用）：Firehose `AppendDelimiterToRecord`。
+    - E2：只收 `OrderCreated`、`OrderStatusChanged`（`StockLow`、`ReplenishmentFailed` 是維運訊號，已有通知）。E3：規則與 Firehose 在 lake stack。E4：不新增告警（規則失敗 → `lake-dlq`；Firehose 失敗由錯誤日誌與部署驗證 `DeliveryToS3.Success` 偵測），保留每環境 ≤ 13 的額度給 `shipment-dlq`、`procurement-dlq`。E5：`brewline_raw.order_events` 在 Dev、Prod 都建。
+    - Firehose 角色的 KMS 條件：開了 Bucket Key 時加密內容是 **bucket ARN**。
 - **後果 Consequences**：
   - 告警：P2a 後每環境 11、P2b 後 12、P2e 後 13；組織合計 P2 完成後約 26（每月約 USD 1.6）。ADR-030 D9 改為管控組織總數、告警費 ≤ USD 2／月，`verify-ops-stack.sh` 與 `verify-simulator-stack.sh` 上限 ≤ 13（不變條件，不寫死目前數量）。
   - P2a 本身幾乎不增加費用（告警 +USD 0.10／月／環境）；P2a-2（Firehose）之後增加，開始前先看 Dev 費用（Dev 月預算 2026-11-20 起 USD 10）。
