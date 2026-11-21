@@ -1,0 +1,19 @@
+{
+  "attribution": {
+    "locodes": "UN/LOCODE (UNECE). Only the codes listed here are used (DS-09). Cross-checked 2026-11-21 against public port references; to be confirmed against the latest UNECE release.",
+    "coordinates": "PROVISIONAL (2026-11-21): rounded harbour positions cross-checked from several public port references. To be replaced with NGA World Port Index (Pub 150, U.S. Government work, public domain, DS-10) values before the P2b-2 detector goes live.",
+    "coordinates_status": "provisional"
+  },
+  "ports": [
+    { "locode": "DJJIB", "name": "Djibouti", "country": "DJ", "lat": 11.60, "lon": 43.14, "role": "origin" },
+    { "locode": "KEMBA", "name": "Mombasa", "country": "KE", "lat": -4.07, "lon": 39.66, "role": "origin" },
+    { "locode": "COBUN", "name": "Buenaventura", "country": "CO", "lat": 3.89, "lon": -77.07, "role": "origin" },
+    { "locode": "GTPRQ", "name": "Puerto Quetzal", "country": "GT", "lat": 13.92, "lon": -90.79, "role": "origin" },
+    { "locode": "PABLB", "name": "Balboa", "country": "PA", "lat": 8.95, "lon": -79.57, "role": "origin" },
+    { "locode": "IDBLW", "name": "Belawan", "country": "ID", "lat": 3.78, "lon": 98.69, "role": "origin" },
+    { "locode": "BRSSZ", "name": "Santos", "country": "BR", "lat": -23.96, "lon": -46.30, "role": "origin" },
+    { "locode": "TWKEL", "name": "Keelung", "country": "TW", "lat": 25.15, "lon": 121.75, "role": "destination" },
+    { "locode": "TWKHH", "name": "Kaohsiung", "country": "TW", "lat": 22.61, "lon": 120.28, "role": "destination" },
+    { "locode": "VNSGN", "name": "Ho Chi Minh City", "country": "VN", "lat": 10.76, "lon": 106.79, "role": "spike_only" }
+  ]
+}

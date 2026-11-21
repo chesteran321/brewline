@@ -12,6 +12,7 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import { SCOPES } from '../../../../services/identity/src/scopes';
+import { EDGE_ATTRIBUTES } from '../../../../services/shipment/src/edge-attributes';
 import { LambdaGuardrailsChecker } from '../aspects/lambda-guardrails';
 import { ApiSettings, EnvName, LambdaSettings } from '../config';
 import { BrewlineFunction, LATEST_RUNTIME_ACK, SERVICES_ROOT } from '../constructs/brewline-function';
@@ -37,6 +38,8 @@ const SMOKE_PRODUCT_ID = 'p-0001';
 const SMOKE_ORDER_PRODUCT_ID = 'p-9002';
 /** p-9002 的生豆批次（seed/test-lots.json）/ The test product's green lot. */
 const SMOKE_ORDER_LOT_ID = 'L-9999-002';
+/** Smoke test 訂艙用的虛構船（與模擬器的 SIMV-01…24 分開）/ Fictional vessels for smoke bookings (apart from the simulator's). */
+const SMOKE_VESSELS = ['SIMV-98', 'SIMV-99'];
 /** Smoke test 的固定測試租戶（services/ordering/src/custom-resources/smoke-test.ts）/ Fixed smoke-test tenants. */
 const SMOKE_TENANTS = ['t_01SMKTEST000000000000000A1', 't_01SMKTEST000000000000000B1'];
 /** 訂單測試（A2b-2）的商品與租戶（services/ordering/src/order-tests/run.ts）/ Order-test fixtures. */
@@ -285,6 +288,45 @@ export class ApiStack extends Stack {
         new iam.PolicyStatement({ sid: 'QueryEdges', actions: ['dynamodb:Query', 'dynamodb:BatchGetItem'], resources: [tableArn], conditions: roastOrLotKeys }),
       ]);
 
+    // --- 3e) 訂艙（P2b-1，ADR-032 補充 E3／E10）/ Shipment bookings ---
+    // 不扮演租戶角色；只在 SHIP#／LOT#／VESSEL#。邊的寫入以 dynamodb:Attributes 限定邊的欄位 → 寫不了 LOT#…/META。
+    // Never the tenant role; SHIP#/LOT#/VESSEL# only. Edge writes are pinned to the edge attributes, so a lot's META is safe.
+    const shipKeys = { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['SHIP#*'] } };
+    const createShipment = fn('CreateShipment', 'create-shipment', 'shipment/src/handlers/create-shipment.ts',
+      'POST /admin/shipments: booking = shipment META + lot and vessel edges in one transaction (roastery)', [
+        new iam.PolicyStatement({
+          sid: 'ReadLotAndShipment',
+          actions: ['dynamodb:GetItem'],
+          resources: [tableArn],
+          conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['LOT#*', 'SHIP#*'] } },
+        }),
+        new iam.PolicyStatement({ sid: 'PutShipment', actions: ['dynamodb:PutItem'], resources: [tableArn], conditions: shipKeys }),
+        new iam.PolicyStatement({
+          sid: 'PutEdgesOnly',
+          actions: ['dynamodb:PutItem'],
+          resources: [tableArn],
+          conditions: {
+            'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['LOT#*', 'VESSEL#*'] },
+            'ForAllValues:StringEquals': { 'dynamodb:Attributes': [...EDGE_ATTRIBUTES] },
+          },
+        }),
+        kmsViaDynamo(['kms:Encrypt', 'kms:GenerateDataKey']),
+      ]);
+    const getShipment = fn('GetShipment', 'get-shipment', 'shipment/src/handlers/get-shipment.ts',
+      'GET /admin/shipments/{id}: shipment with DCSA transport events and track (staff and roastery)', [
+        new iam.PolicyStatement({ sid: 'QueryShipment', actions: ['dynamodb:Query'], resources: [tableArn], conditions: shipKeys }),
+      ]);
+    const listShipments = fn('ListShipments', 'list-shipments', 'shipment/src/handlers/list-shipments.ts',
+      "GET /admin/shipments?lot=: a lot's shipments, newest first (staff and roastery)", [
+        new iam.PolicyStatement({
+          sid: 'QueryLotEdges',
+          actions: ['dynamodb:Query'],
+          resources: [tableArn],
+          conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['LOT#*'] } },
+        }),
+        new iam.PolicyStatement({ sid: 'BatchGetShipments', actions: ['dynamodb:BatchGetItem'], resources: [tableArn], conditions: shipKeys }),
+      ]);
+
     // --- 4) HTTP API ---
     this.httpApi = new apigwv2.HttpApi(this, 'HttpApi', {
       apiName: `brewline-${envName}-api`,
@@ -354,6 +396,10 @@ export class ApiStack extends Stack {
       [apigwv2.HttpMethod.POST, '/admin/roasts/{id}/recall', recallRoast, SCOPES.admin],
       [apigwv2.HttpMethod.POST, '/admin/products/{id}/restock', restock, SCOPES.roastery],
       [apigwv2.HttpMethod.GET, '/admin/trace', trace, staffOrRoastery],
+      // P2b-1：訂艙由烘焙廠（模擬烘焙廠）建立；查詢 staff 或烘焙廠 / Bookings by the roastery; reads by staff or roastery.
+      [apigwv2.HttpMethod.POST, '/admin/shipments', createShipment, SCOPES.roastery],
+      [apigwv2.HttpMethod.GET, '/admin/shipments', listShipments, staffOrRoastery],
+      [apigwv2.HttpMethod.GET, '/admin/shipments/{id}', getShipment, staffOrRoastery],
     ];
     const routeConstructs: Construct[] = [];
     for (const [method, routePath, f, scope] of routes) {
@@ -489,6 +535,20 @@ export class ApiStack extends Stack {
           conditions: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': [`LOT#${SMOKE_ORDER_LOT_ID}`, 'ROAST#*'] } },
         }),
       );
+      // P2b-1：清掉 smoke 建立的貨運（測試批次的邊 → SHIP#<id> 的所有項目＋smoke 船的邊；船 ID 只限 SIMV-98／99）
+      // Clean up smoke shipments: test-lot edges → SHIP#<id> items and the smoke vessels' edges (SIMV-98/99 only).
+      smokeFn.role.addToPolicy(
+        new iam.PolicyStatement({
+          sid: 'CleanSmokeShipments',
+          actions: ['dynamodb:Query', 'dynamodb:DeleteItem'],
+          resources: [tableArn],
+          conditions: {
+            'ForAllValues:StringLike': {
+              'dynamodb:LeadingKeys': [`LOT#${SMOKE_ORDER_LOT_ID}`, 'SHIP#*', ...SMOKE_VESSELS.map((v) => `VESSEL#${v}`)],
+            },
+          },
+        }),
+      );
       smokeFn.role.addToPolicy(denyScan);
       smokeFn.role.addToPolicy(kmsViaDynamo(['kms:Decrypt', 'kms:Encrypt', 'kms:GenerateDataKey']));
       const smoke = new CustomResource(this, 'SmokeTestRun', {
@@ -604,7 +664,7 @@ export class ApiStack extends Stack {
     new CfnOutput(this, 'FunctionNames', {
       value: [listProducts, getProduct, getStock, createOrder, listOrders, getOrder, getContact, putContact,
         replenishment.createFn, replenishment.listFn, replenishment.deleteFn, adminList, adminGet, adminUpdate,
-        createRoast, updateRoast, recallRoast, restock, trace]
+        createRoast, updateRoast, recallRoast, restock, trace, createShipment, getShipment, listShipments]
         .map((f) => f.function.functionName)
         .join(','),
     });

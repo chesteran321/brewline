@@ -5,6 +5,7 @@ import { SimulatorConfig } from '../src/config';
 import { HOURS, planDay, planHour } from '../src/generator';
 import { PACE_MS, SEED_PRODUCT_IDS, handler, setDepsForTesting } from '../src/run';
 import { ROASTER_USERNAME, simUsers } from '../src/tenants';
+import { voyageDryRun } from '../src/voyages';
 
 const cog = mockClient(CognitoIdentityProviderClient);
 const ssm = mockClient(SSMClient);
@@ -211,6 +212,28 @@ test('dry run: plan hash for a date, no switch, no sign-in, no API; same input �
   expect(a.orders).toBe(planDay(CONFIG, '2027-03-15', SEED_PRODUCT_IDS).length);
   expect(a.perHour).toHaveLength(HOURS.length);
   expect(a.perHour.reduce((x: number, y: number) => x + y, 0)).toBe(a.orders);
+  expect(cog.commandCalls(AdminInitiateAuthCommand)).toHaveLength(0);
+  expect(reqs).toHaveLength(0);
+});
+
+// --- P2b-1：航程 dry run（SIM-F-009）/ Voyage dry run ---
+test('voyages dry run: hash equals the local generator, no switch, no sign-in, no API, no S3', async () => {
+  state('paused');
+  const voyages = { timeScale: 24, startDate: '2026-11-22' };
+  ssm.on(GetParameterCommand, { Name: '/c' }).resolves({ Parameter: { Value: JSON.stringify({ ...CONFIG, voyages }) } });
+  const a = (await handler({ voyages: 'dryRun', date: '2026-11-30' })) as any;
+  expect(a).toEqual({ outcome: 'voyages_dry_run', ...voyageDryRun(CONFIG.seed, voyages, '2026-11-30') });
+  expect(a.positions).toBeGreaterThan(0);
+  expect(cog.commandCalls(AdminInitiateAuthCommand)).toHaveLength(0);
+  expect(reqs).toHaveLength(0);
+});
+
+test('negative: voyages actions other than dryRun are rejected in P2b-1; config without voyages fails loudly', async () => {
+  state('running');
+  await expect(handler({ voyages: 'positions' })).rejects.toThrow(/dryRun/);
+  await expect(handler({ voyages: 'dryRun', date: '2026-11-30' })).rejects.toThrow(/voyages settings/);
+  ssm.on(GetParameterCommand, { Name: '/c' }).resolves({ Parameter: { Value: JSON.stringify({ ...CONFIG, voyages: { timeScale: 0, startDate: '2026-11-22' } }) } });
+  await expect(handler({ voyages: 'dryRun' })).rejects.toThrow();
   expect(cog.commandCalls(AdminInitiateAuthCommand)).toHaveLength(0);
   expect(reqs).toHaveLength(0);
 });

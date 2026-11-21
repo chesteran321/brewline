@@ -19,6 +19,17 @@ export const SimulatorConfigSchema = z.strictObject({
   seed: z.string().min(1).max(64),
   /** 從這個月（YYYY-MM）之後，每月多啟用 1–2 家（SIM-F-001）/ Month after which 1–2 more cafés activate monthly. */
   activationStartMonth: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
+  /**
+   * 模擬航程（P2b，ADR-032 補充 E9／E12）：timeScale 1＝真實時間（Prod）、24＝Dev 壓縮；
+   * startDate 之前開始訂艙的貨運不產生（不回補）。
+   * Simulated voyages: timeScale 1 = real time, 24 = Dev compression; no shipments before startDate (no backfill).
+   */
+  voyages: z
+    .strictObject({
+      timeScale: z.number().int().min(1).max(48),
+      startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    })
+    .optional(),
 });
 export type SimulatorConfig = z.infer<typeof SimulatorConfigSchema>;
 

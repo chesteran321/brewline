@@ -503,6 +503,88 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /admin/shipments:
+    post:
+      operationId: createShipment
+      summary: 建立貨運（訂艙）（烘焙廠）/ Create a shipment booking (roastery)
+      description: |
+        P2b-1（ADR-032 補充 E3）：一個交易＝貨運 META＋批次邊＋船邊。POL／POD 由伺服器依批次決定（body 不能指定）；
+        訂艙號（BLDEMO…）與貨櫃號（ISO 6346，DMQU…）由伺服器指派，一律虛構。貨運 ID 由 Idempotency-Key 決定：
+        重送相同內容 → 200，內容不同 → 422。沒有海運的批次（台灣國產）→ 400 `no_sea_route`。
+        模擬烘焙廠建立的是模擬貨運，且必須用 `SIMV-nn` 船；它看不到真實貨運。
+        One transaction: shipment META + lot edge + vessel edge. POL/POD come from the lot; booking and container numbers are
+        fictional and assigned by the server. The shipment id derives from the Idempotency-Key.
+      security:
+        - cognito: [brewline/roastery]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[A-Za-z0-9_-]{16,64}$' }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateShipmentRequest' } } }
+      responses:
+        '201': { description: 已建立 / Created, content: { application/json: { schema: { $ref: '#/components/schemas/Shipment' } } } }
+        '200': { description: 重送 / Replay, content: { application/json: { schema: { $ref: '#/components/schemas/Shipment' } } } }
+        '400':
+          description: '`invalid_request`、`missing_idempotency_key`、`invalid_departure`、`invalid_vessel`、`lot_not_found`、`no_sea_route`'
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: '`conflict`'
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422':
+          description: Idempotency-Key 已用於不同內容 / Key reused with a different body
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    get:
+      operationId: listShipments
+      summary: 批次的貨運（新到舊）/ A lot's shipments, newest first
+      security:
+        - cognito: [brewline/admin]
+        - cognito: [brewline/roastery]
+      parameters:
+        - { name: lot, in: query, required: true, schema: { type: string, pattern: '^L-\d{4}-\d{3}$' } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+      responses:
+        '200':
+          description: OK（模擬烘焙廠只看到模擬貨運）/ A synthetic caller sees synthetic shipments only
+          content:
+            application/json:
+              schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Shipment' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/shipments/{id}:
+    get:
+      operationId: getShipment
+      summary: 貨運＋DCSA 運輸事件＋航跡 / Shipment with DCSA transport events and track
+      security:
+        - cognito: [brewline/admin]
+        - cognito: [brewline/roastery]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: '^sh_[0-9A-HJKMNP-TV-Z]{26}$' } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Shipment'
+                  - type: object
+                    properties:
+                      events: { type: array, items: { $ref: '#/components/schemas/DcsaTransportEvent' } }
+                      track:
+                        type: array
+                        maxItems: 200
+                        description: '[lon, lat, timestamp]（P2b-2 之後才有）/ filled from P2b-2'
+                        items: { type: array }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 components:
   securitySchemes:
     cognito:
@@ -518,7 +600,7 @@ components:
             brewline/orders.write: 為自己租戶下單（cafe、simulator）
             brewline/profile.read: 讀自己租戶的聯絡人（只有 cafe）
             brewline/profile.write: 更新自己租戶的聯絡人（只有 cafe）
-            brewline/roastery: 烘焙廠作業：烘焙批次、推進訂單、補貨（staff、simulator-roastery；S2a）
+            brewline/roastery: 烘焙廠作業：烘焙批次、推進訂單、補貨、訂艙（staff、simulator-roastery；S2a、P2b-1）
   parameters:
     RoastId:
       name: id
@@ -734,6 +816,62 @@ components:
         items: { $ref: '#/components/schemas/CreateOrderRequest/properties/items' }
         run_at: { type: string, example: '09:00 Asia/Taipei' }
         created_at: { type: string, format: date-time }
+    CreateShipmentRequest:
+      type: object
+      additionalProperties: false
+      required: [lot_id, planned_departure, planned_arrival, carrier_voyage_number, vessel_id, vessel_name]
+      properties:
+        lot_id: { type: string, pattern: '^L-\d{4}-\d{3}$' }
+        planned_departure: { type: string, format: date-time, description: UTC，結尾 Z；昨天到 120 天後 / UTC, yesterday to 120 days ahead }
+        planned_arrival: { type: string, format: date-time, description: 晚於開航、航程 ≤ 60 天 / after departure, ≤ 60 days }
+        carrier_voyage_number: { type: string, pattern: '^[A-Z0-9]{2,10}$' }
+        vessel_id: { type: string, pattern: '^[A-Z0-9][A-Z0-9-]{2,19}$', description: 模擬貨運必須是 SIMV-nn（不用 MMSI／IMO）/ SIMV-nn for synthetic }
+        vessel_name: { type: string, minLength: 2, maxLength: 50 }
+    Shipment:
+      type: object
+      required: [shipment_id, lot_id, pol, pod, status, synthetic]
+      properties:
+        shipment_id: { type: string }
+        lot_id: { type: string }
+        pol: { type: string, description: UN/LOCODE（裝貨港 / port of loading） }
+        pod: { type: string, description: UN/LOCODE（卸貨港 / port of discharge） }
+        carrier_booking_reference: { type: string, description: 虛構 BLDEMO… / fictional }
+        carrier_voyage_number: { type: string }
+        vessel: { type: object, properties: { vessel_id: { type: string }, vessel_name: { type: string } } }
+        equipment:
+          type: array
+          items:
+            type: object
+            properties:
+              equipment_reference: { type: string, description: ISO 6346（DMQU…，虛構）/ fictional }
+              iso_equipment_code: { type: string, enum: ['22G1'] }
+        planned_departure: { type: string, format: date-time }
+        planned_arrival: { type: string, format: date-time }
+        eta: { type: string, format: date-time, description: P2b-2 偵測器計算 / computed by the P2b-2 detector }
+        atd: { type: string, format: date-time }
+        ata: { type: string, format: date-time }
+        status: { type: string, enum: [PLANNED, DEPARTED, ARRIVED] }
+        created_at: { type: string, format: date-time }
+        synthetic: { type: boolean }
+    DcsaTransportEvent:
+      type: object
+      description: DCSA Track & Trace 2.2.0 運輸事件（子集）/ DCSA T&T 2.2.0 transport event (subset)
+      properties:
+        eventID: { type: string }
+        eventType: { type: string, enum: [TRANSPORT] }
+        eventClassifierCode: { type: string, enum: [ACT, EST, PLN] }
+        transportEventTypeCode: { type: string, enum: [ARRI, DEPA] }
+        eventDateTime: { type: string, format: date-time }
+        eventCreatedDateTime: { type: string, format: date-time }
+        documentReferences: { type: array, items: { type: object, properties: { documentReferenceType: { type: string }, documentReferenceValue: { type: string } } } }
+        transportCall:
+          type: object
+          properties:
+            UNLocationCode: { type: string }
+            modeOfTransport: { type: string, enum: [VESSEL] }
+            facilityTypeCode: { type: string, enum: [POTE] }
+            carrierVoyageNumber: { type: string }
+            vessel: { type: object, properties: { vesselName: { type: string } } }
     Error:
       type: object
       properties:
