@@ -67,8 +67,12 @@ describe('seeds', () => {
     expect(routeForLot('L-9999-002')?.id).toBe('BRSSZ-TWKHH');
     expect(s.ports.get('VNSGN')?.role).toBe('spike_only');
   });
-  test('coordinates are still provisional until the WPI values replace them', () => {
-    expect(s.coordinatesStatus).toBe('provisional');
+  test('coordinates come from the World Port Index; every port carries its WPI number', () => {
+    expect(s.coordinatesStatus).toBe('wpi');
+    expect([...s.ports.values()].map((p) => [p.locode, p.wpi])).toEqual([
+      ['DJJIB', 47850], ['KEMBA', 47100], ['COBUN', 15370], ['GTPRQ', 15660], ['PABLB', 15410],
+      ['IDBLW', 50730], ['BRSSZ', 12970], ['TWKEL', 57890], ['TWKHH', 57920], ['VNSGN', 57580],
+    ]);
   });
   test('rejects inconsistent seeds', () => {
     const bad = (mut: (x: { ports: any; routes: any; lotRoutes: any }) => void) => {
@@ -81,6 +85,7 @@ describe('seeds', () => {
     expect(bad((r) => r.routes.routes.push({ ...r.routes.routes[0], id: 'TWKHH-DJJIB', pol: 'TWKHH', pod: 'DJJIB' }))).toThrow();
     expect(bad((r) => r.ports.ports.push(r.ports.ports[0]))).toThrow();
     expect(bad((r) => (r.ports.ports[0].locode = 'dj1ib'))).toThrow();
+    expect(bad((r) => delete r.ports.ports[0].wpi)).toThrow(); // wpi 狀態下每個港口都要有 WPI 編號 / WPI number required
   });
 
   // 粗略的陸地框：抽樣航線上的點不得落在框內（港口 30 km 內除外）。不是精確的海岸線，只抓明顯畫錯的航點。
