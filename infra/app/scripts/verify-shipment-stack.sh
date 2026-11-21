@@ -43,7 +43,13 @@ check "Detector runtime"      "$(jq -r .Runtime <<<"$cfg")" "nodejs24.x"
 check "Detector architecture" "$(jq -c .Architectures <<<"$cfg")" '["arm64"]'
 check "Detector tracing"      "$(jq -r .TracingConfig.Mode <<<"$cfg")" "Active"
 check "Detector timeout (s)"  "$(jq -r .Timeout <<<"$cfg")" "60"
-check "Detector env LAKE_BUCKET" "$(jq -r .Environment.Variables.LAKE_BUCKET <<<"$cfg")" "$lake"
+# 唯讀驗證角色看不到環境變數的值（回傳 null，同 verify-notify-stack.sh）→ 只在看得到時判定；
+# 讀取範圍由下方的 IAM 政策模擬（只能 GetObject 這個 bucket 的 raw/positions/）把關。
+# The read-only verify role does not see environment values (null); judge only when visible.
+# The enforced control is the IAM simulation below (GetObject on this bucket's raw/positions/ only).
+lake_env=$(jq -r '.Environment.Variables.LAKE_BUCKET // empty' <<<"$cfg")
+if [[ -n "$lake_env" ]]; then check "Detector env LAKE_BUCKET" "$lake_env" "$lake"
+else echo "ℹ️  Detector env LAKE_BUCKET: environment not visible to this role (enforced by the ReadPositions simulation below)"; fi
 check "Detector reserved concurrency (files in sequence)" "$(aws lambda get-function-concurrency --function-name "$fn" --region "$region" \
   --query ReservedConcurrentExecutions --output text)" "1"
 eic=$(aws lambda get-function-event-invoke-config --function-name "$fn" --region "$region" --output json)
