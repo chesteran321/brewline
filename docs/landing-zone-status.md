@@ -1023,6 +1023,8 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
   - `verify-lake-stack.sh`：`EventBridge notifications = true`；`verify-events-stack.sh`：過濾 4、`Shipment filter present`；`verify-simulator-stack.sh`：新排程 7 項、執行角色正向 1（`source=sim`）＋反向 4（`source=ais`、`raw/events/`、Get、Delete）。
   - 手動（Dev Admin，2026-11-21 23:3x）：環境變數 `LAKE_BUCKET`＝lake bucket（反向：不存在的變數 → `None`）；V1 dry-run 改用 WPI 座標後 Dev `711e4977…ac1b`（6、508）、Prod `3003ebf2…eb45`（1、192）＝本機計算值（訂艙與筆數同 P2b-1，只有座標改變）；手動 `{"segment":"positions"}` → `records 0`、`written false`（`startDate` 之前）；`raw/positions/` 0 個物件；`shipment-dlq`、`simulator-dlq` 皆 0（Dev、Prod）。
   - 2026-11-23 09:40（Dev Admin）：當天 08:05、09:05 兩輪 `shipments` 皆 `due 0`、`created 0`、`violations []`；`VESSEL#SIMV-15` 0 筆（第一筆 17:32 才開放訂艙）。
+  - **V8**（2026-11-23 09:51，Dev Developer）：寫 `raw/positions/source=sim/…` → `AccessDenied`（`no identity-based policy allows`）；對照組寫 `raw/_smoke/…` → 成功。
+  - **V7**（2026-11-23，Dev Admin）：09:51:58 上傳第 2 行不是 JSON 的 `…/dt=2026-11-23/v7-bad-test.jsonl.gz`（第 1 行是沒有貨運的 `SIMV-97`）→ 偵測函數 3 次錯誤 `line 2 is not JSON`（09:51:59、09:52:57、09:54:48，同一個 requestId＝非同步重試 2 次）→ `shipment-dlq` 1 → 約 10:05 告警 `ALARM`、收到 ALARM 信 → `purge-queue`、刪除測試檔（`raw/positions/` 目前版本 0 個）→ 10:21 `OK`。從上傳到告警約 13 分鐘（重試約 3 分鐘＋SQS 指標與 5 分鐘評估）；錯誤日誌不含內容。
 
 #### 運行觀察 / Operational Observation（Dev，進行中）
 
