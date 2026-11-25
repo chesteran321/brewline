@@ -1059,6 +1059,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - （2026-11-23）**Developer 許可集沒有 `cloudwatch:DescribeAlarms`**（`ViewOnlyAccess` 不含）→ 健康檢查的告警用 Dev Admin。是否補進 Developer 待決（§13）。
 - （2026-11-25）V6 冪等測試的干擾：偵測每小時 `:20`／`:50` 處理新檔，`version` 本來就會增加 → 只在 `:00–:12`、`:30–:42` 開始，「前後相同」才只代表冪等。
 - （2026-11-23）反向測試先確認**執行者**：第一次 SSM 解密反向測試在 Admin 分頁執行 → 解密成功、`grep` 過濾後沒有輸出，看起來像「沒被拒」。之後一律檢查角色（`AWSReservedSSO_Developer_`）並讓任何結果都看得見。
+- （2026-11-25）**#88 合併後 Prod 驗證失敗（系統正常）**：`verify-trace-stack.sh` 取最新投影用 `--max-items 50 --output text`；Prod 的投影（模擬烘焙廠每天數批）超過 50 個後，CLI 多印一行分頁 token → 鍵名含換行 → `curl` exit 3（URL 格式錯誤）→ `set -e` 中止，之後 Prod 的 lake、shipment 驗證被跳過。與 #81 同一類（`--output text` 加分頁）。修正：`--output json`＋`jq` 取最新鍵；鍵名不是單一個 `v1/*.json` 時判為 ❌，不默默略過。Dev 每天只有 2–6 筆模擬訂單、批次少，所以只有 Prod 先超過 50 個——**會隨時間累積的資料，驗證腳本要用「數量很多」的情況測過**。
 
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
