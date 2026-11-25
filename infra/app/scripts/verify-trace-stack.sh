@@ -94,9 +94,15 @@ check "TLS 1.1 handshake" "$tls11" "rejected"
 
 # --- 投影（Dev smoke test 會產生）：允許的欄位剛好是白名單 / Projection fields are exactly the allow-list ---
 # 不印出 token（token 就是公開頁的網址）/ Never print the token.
-key=$(aws s3api list-objects-v2 --bucket "$bucket" --prefix v1/ --max-items 50 \
-  --query 'reverse(sort_by(Contents || `[]`, &LastModified))[0].Key' --output text 2>/dev/null || true)
-if [[ -n "$key" && "$key" != "None" ]]; then
+# 不用 `--max-items N --output text`：物件超過 N 個時 CLI 會多印一行分頁 token，鍵名被污染 → curl exit 3（URL 格式錯誤）。
+# Prod 在 2026-11-25 超過 50 個投影時發生（#81 同類教訓）。改成 JSON：CLI 自動分頁合併後，jq 取最新的鍵（沒有物件 → 空字串）。
+# Never `--max-items N --output text`: past N objects the pagination token is printed as an extra line and pollutes the key.
+key=$(aws s3api list-objects-v2 --bucket "$bucket" --prefix v1/ --output json 2>/dev/null \
+  | jq -r '(.Contents // []) | sort_by(.LastModified) | last | .Key // empty' || true)
+if [[ -n "$key" && ( "$key" == *$'\n'* || "$key" != v1/*.json ) ]]; then
+  # 鍵名不是單一個 v1/*.json → 腳本錯誤，要失敗而不是略過 / A malformed key is a script error: fail, do not skip.
+  check "Latest projection key is a single v1/*.json" "malformed" "ok"
+elif [[ -n "$key" ]]; then
   body=$(curl -s --max-time 15 "$base/$key")
   check "Projection via CloudFront" "$(code "$base/$key")" "200"
   check "Projection top-level keys (recall optional)" "$(jq -c 'keys - ["recall"]' <<<"$body")" '["demo","generated_at","lot","product","roast","schema"]'
