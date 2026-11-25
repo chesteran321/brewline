@@ -1,6 +1,6 @@
 # Landing Zone 實際狀態 / Landing Zone As-Built Status
 
-> 狀態 Status：**P0、P1 完成；P2a 資料湖基礎＋P2a-2 訂單事件完成**——CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1、溯源 S2a–S2d（公開溯源頁＋模擬烘焙廠，Prod 2026-11-20 起自動產生）、資料湖基礎 P2a 與訂單事件 P2a-2（§10.21，ADR-032）；FSBP 100%；下一步 **P2b 海運追蹤**（docs/06），之後採購分析 / P0, P1, P2a and P2a-2 complete; next: P2b shipment tracking（2026-11-20）
+> 狀態 Status：**P0、P1 完成；P2a 資料湖基礎、P2a-2 訂單事件、P2b 海運追蹤（訂艙、模擬航程、航程偵測）完成**——CI/CD、共用資料基礎、訂貨模組 A1–A4、模擬器 S1、溯源 S2a–S2d、資料湖基礎 P2a 與訂單事件 P2a-2（§10.21）、海運追蹤 P2b-1／P2b-2（§10.22，ADR-032 補充 E1–E12；Dev 運行觀察 11-23～25 完成）；FSBP 100%；下一步 **P2b-spike aisstream**（Dev 7 天）→ P2c 公開頁旅程（TRC-F-004）→ P2d IFTSTA，之後採購分析 / P0, P1, P2a, P2a-2 and P2b complete; next: P2b-spike（2026-11-23）
 > 作者 Author：Chester Huang
 > **優先順序 Precedence：本文件記錄實際建置結果。與 `docs/00`–`docs/14`（v0.1 初稿）衝突時，以本文件為準。**
 > This document records what was actually built. Where it conflicts with the v0.1 drafts in `docs/00`–`docs/14`, this document wins.
@@ -61,6 +61,10 @@
     - 測試 stack `p2-glue-probe`（台北）：`AWS::Glue::Database`＋`AWS::Glue::Table`（`EXTERNAL_TABLE`）→ **`CREATE_COMPLETE`**；`glue get-table` 讀回正確；`delete-stack` 後 `get-database` → `EntityNotFoundException`（無殘留）。附帶：Glue 建表不檢查 `Location` 的 bucket 是否存在。
     - 結論：**台北 `NON_PROVISIONABLE` ≠ CloudFormation 建不出來**（推論：舊版類型在台北沒有登錄新的 registry handler，CloudFormation 仍以內部 provider 建立；AWS 文件未說明）。判讀規則：① `FULLY_MUTABLE`／`IMMUTABLE`＋`LIVE` → 可用（仍以首次部署驗證）；② `NON_PROVISIONABLE`／`TypeNotFound` → Dev 測試 stack 實測後再下結論；③ 每次都要有對照組（已知類型、同類型在 us-east-1）與反向組（不存在的類型）。
     - P2a 實際部署（2026-11-20，PR #78）：Glue Database ×3、Table ×1 在 Dev、Prod 皆建立成功；aws-cdk-lib 2.277.0 對這些類型**沒有** F3006（不需 acknowledge）。
+  - ✅ P2b（2026-11-21，PR #83、#84）：只用既有資源類型（Lambda、`AWS::Events::Rule`〔預設 bus〕、SQS、`AWS::Glue::Table`、`AWS::Scheduler::Schedule`）；S3 → EventBridge 以 `AWS::S3::Bucket` 的 `NotificationConfiguration.EventBridgeConfiguration` 開啟（就地更新）。aws-cdk-lib 對這些類型沒有 F3006。
+- **港口代碼與座標（P2b，2026-11-21，DS-09／DS-10）**：10 個 UN/LOCODE 只用種子檔列出的代碼；座標取自 **NGA World Port Index（Pub. 150）** `UpdatedPub150.csv`（美國政府作品、公有領域）。官方網站維護中（HTTP 503），由官方維護頁提供的 `https://msi.nga.mil/apology_objects/WPI.zip` 下載（Last-Modified 2026-11-20T19:40:47Z、zip 內檔案日期 2026-11-05）：zip sha256 `bd6e0eeb647d3fc79ab7d390720c60fc5d361edca9553e9ebe2c4fd8d530b53e`、csv 3,493,655 bytes／3,809 列、sha256 `8c90ee8a2bfd051b986a672fa55fcc5754f29002e95fb4f41dba46330bd5bcb8`。
+  - 交叉比對：每個代碼都等於同一列 WPI 的 UN/LOCODE 欄位（WPI 有 `TW KHH` 與 `COBUN` 兩種寫法 → 去空白後比對）；WPI 編號 DJJIB 47850、KEMBA 47100、COBUN 15370、GTPRQ 15660、PABLB 15410、IDBLW 50730、BRSSZ 12970、TWKEL 57890、TWKHH 57920、VNSGN 57580（寫在 `ports.json`）。
+  - 與 P2b-1 暫定座標相比移動 0.4–3.2 km（VNSGN 8.0 km，`spike_only`，模擬不使用），都小於 geofence 半徑 15 km；`coordinates_status` 由 `provisional` 改為 `wpi`。
 
 ---
 
@@ -264,7 +268,7 @@
 - 分帳號預算以 **CLI 建立**（新帳號尚無帳單資料時，主控台的 Linked account 清單選不到）。
 - 2026-09-30 之後新增的預算收件人**必須驗證 Email** 才收得到通知。驗證狀態**只能在主控台的預算詳細頁**查看（沒有 CLI）；5 個預算的收件人 2026-11-20 皆 **Verified**（BillingViewer）。
 - **Dev 月預算 USD 5 → 10**（2026-11-20，管理帳號主控台只改金額）：11-01～11-19 Dev USD 2.17，其中 AWS Config 1.19（Dev 每日記錄，隨部署量增加；11-17 單日 0.86）、Route 53 0.50、KMS 0.24、WAF 0.12（S2b→S2c 之間，一次性）；照最近一週推算月底約 USD 5.8 → 會觸發 Dev Budget Action（實際 100% AUTOMATIC 鎖定）。12 月估 USD 4–8（Config、GuardDuty 12-09 試用結束、告警、P2）。Budget Action 與通知是百分比門檻 → 自動變成 USD 10 的 80%／100%。驗證：`describe-budget` → `10.0 USD`、動作仍 `100.0 PERCENTAGE AUTOMATIC STANDBY`、通知前後一致、其他 4 個預算金額未變。降低 Dev Config 費用（排除 Lambda 類型或關閉）留到 2026-12-04 決策點（§13）。
-- **免費額度是組織層級**（2026-11-20 實測，管理帳號 BillingViewer，Free Tier 頁）：`Global-CW:AlarmMonitorUsage`、`Global-Lambda-GB-Second`、`Global-Request`、`Global-StateTransition` 整個組織各只有一列（含管理帳號）→ CloudWatch 告警的 10 個免費額度是**全組織共用**，不是每帳號。告警總數：2026-11-20 管理帳號 2 個舊告警刪除後 Dev 10＋Prod 10 = 20；P2a 後 **22**（每月約 USD 1.2）；P2 全部完成後預估 26（約 USD 1.6／月，ADR-030 D9 修訂：告警費 ≤ USD 2／月）。Lambda、Step Functions 用量遠低於免費額度。
+- **免費額度是組織層級**（2026-11-20 實測，管理帳號 BillingViewer，Free Tier 頁）：`Global-CW:AlarmMonitorUsage`、`Global-Lambda-GB-Second`、`Global-Request`、`Global-StateTransition` 整個組織各只有一列（含管理帳號）→ CloudWatch 告警的 10 個免費額度是**全組織共用**，不是每帳號。告警總數：2026-11-20 管理帳號 2 個舊告警刪除後 Dev 10＋Prod 10 = 20；P2a 後 22；**P2b 後 24**（Dev 12、Prod 12，2026-11-21 `verify-*` 實測；每月約 USD 1.4）；P2 全部完成後預估 26（約 USD 1.6／月，ADR-030 D9 修訂：告警費 ≤ USD 2／月）。Lambda、Step Functions 用量遠低於免費額度。
 - 預測注意：`get-cost-forecast` 對新帳號回 `DataUnavailableException`；手動推算時固定費用（Route 53、KMS）在月初入帳、部署日 Config 尖峰，不能用線性推估。
 
 | Budget Action | 門檻 | 動作 | 目標 | 核准 | Action ID |
@@ -373,7 +377,7 @@
 
 | 處理 | 控制項 | 做法 |
 |---|---|---|
-| **刪除預設 VPC**（9 項） | `EC2.2`、`EC2.15`（3 個子網路）、`EC2.6`、`EC2.10`、`EC2.55`–`58` | 台北預設 VPC 沒有任何使用者（ENI、VPC 內 Lambda、endpoint、NAT、peering 皆 0）→ 拆 IGW、刪 3 個子網路、刪 VPC；**Dev 也同樣刪除**（兩個環境台北都沒有任何 VPC）。回復：`aws ec2 create-default-vpc`。BrewLine 全部是不需要 VPC 的託管服務（COST-011）→ 整類網路風險消失，而不是逐項加固（VPC endpoint 每個每月約 USD 7） |
+| **刪除預設 VPC**（9 項） | `EC2.2`、`EC2.15`（3 個子網路）、`EC2.6`、`EC2.10`、`EC2.55`–`58` | 台北預設 VPC 沒有任何使用者（ENI、VPC 內 Lambda、endpoint、NAT、peering 皆 0）→ 拆 IGW、刪 3 個子網路、刪 VPC；**Dev 也同樣刪除**（兩個環境台北都沒有任何 VPC）。回復：`aws ec2 create-default-vpc`。**2026-11-23 us-east-1 也刪除（Dev、Prod）**：盤點 ENI、EC2、endpoint、NAT、peering、VPN、非預設 SG／路由表／NACL、EIP、VPC 內 Lambda 皆 0 → IGW 卸離並刪除、6 個子網路、VPC；反向 `InvalidVpcID.NotFound`；edge stack 與 `CDKToolkit` 狀態不變 → 兩個環境在 ap-east-2、us-east-1 都沒有 VPC。BrewLine 全部是不需要 VPC 的託管服務（COST-011）→ 整類網路風險消失，而不是逐項加固（VPC endpoint 每個每月約 USD 7） |
 | **帳號設定**（5 項，免費） | `SSM.7`（重大）、`EC2.7`、`IAM.7`、`Account.1`、`ECR.1` | SSM 文件公開分享 `Disable`；EBS 預設加密；IAM 密碼政策（14 字元、大小寫數字符號、重複使用 24、90 天）；安全聯絡人（`account put-alternate-contact`，個資不進 repo）；ECR **登錄檔層級** BASIC scan-on-push（repo 層級 API 已淘汰，CDK bootstrap 範本 v33 沒有開掃描，改 repo 會造成 `CDKToolkit` drift）→ `ECR.1` 通過 |
 | **停用控制項**（2 項） | `Inspector.1`、`Inspector.2` | 沒有 EC2（COST-011、`scp-deny-expensive`）、沒有容器映像檔（Lambda 用 zip）；`batch-update-standards-control-associations` 附理由 |
 | **SUPPRESSED**（6 項 7 筆，各附理由） | `CloudTrail.2`（ADR-014）、`CloudTrail.5`（成本）、`Cognito.4`（ADR-022，Plus）、`Cognito.5`（ADR-022，MFA OPTIONAL）、`CloudFormation.4`（只有 `CDKToolkit`）、`S3.9`（溯源 bucket；CDK assets bucket） | 理由**針對資源**而不是控制項：同一個 `S3.9` 的兩個 bucket 理由不同 |
@@ -988,6 +992,74 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 - （2026-11-20）Firehose 用 L1：L2 的 S3 目的地會給角色整個 bucket 的讀寫；規則 ARN 以名稱組出，避免「規則 ↔ 角色信任政策」循環依賴。
 - （2026-11-20）資料流沒有結果時，**依序看每一關的計數**（bus 稽核日誌 → 規則 `Invocations`／`FailedInvocations` → Firehose `IncomingRecords`／`DeliveryToS3.Records` → DLQ）：「全部為 0」是源頭沒有事件，「前一關有、後一關 0」才是斷掉。決定性的模擬器可以用 dry-run 事先算出下一個事件的時段，不必碰運氣等待。
 
+### 10.22 海運追蹤 P2b：訂艙、模擬航程、航程偵測 / Shipment Tracking P2b（P2，2026-11-21，ADR-032 補充 E1–E12，PR #83、#84、#85）
+
+| 項目 | Dev | Prod |
+|---|---|---|
+| 訂艙 API（P2b-1，api stack） | `POST /admin/shipments`（`brewline/roastery`、`Idempotency-Key`；201／重送 200／內容不同 422；TW 批次 400 `no_sea_route`）、`GET /admin/shipments?lot=`、`GET /admin/shipments/{id}`（`brewline/admin` 或 `roastery`）；函數 `brewline-dev-ordering-{create-shipment,get-shipment,list-shipments}`；路由、函數 19 → **22** | 同左 |
+| 資料（單表，**不加 GSI**） | `SHIP#<id>/META`（`entity=Shipment`、POL／POD、`planned_departure`／`planned_arrival`、`eta`／`atd`／`ata`、`status` `PLANNED`→`DEPARTED`→`ARRIVED`、`tracking`、`version`）、`SHIP#<id>/EVT#<時間>#<eventID>`（DCSA T&T 2.2.0 運輸事件 `DEPA`／`ARRI`，ACT）、`SHIP#<id>/TRACK`（≤ 200 點）、邊 `LOT#<lot>/SHIP#<出發>#<id>`、`VESSEL#<船>/VOY#<出發>#<id>`；META 不放 `product_id` | 同左 |
+| 訂艙函數 IAM | `PutShipment`（`SHIP#*`）＋`PutEdgesOnly`（`LOT#*`、`VESSEL#*`，`dynamodb:Attributes` 限 9 個邊欄位，清單在 `services/shipment/src/edge-attributes.ts`，CDK 共用）→ 寫不了 `LOT#…/META`；讀取函數沒有寫入；Scan 明確 Deny | 同左 |
+| 種子（`services/shipment/seed/`） | 港口 10 個（E1）：DJJIB、KEMBA、COBUN、GTPRQ、PABLB、IDBLW、BRSSZ（Dev 測試批次）、TWKEL、TWKHH、VNSGN（`spike_only`）；座標 **World Port Index**（§2）；geofence 進 15 km／出 20 km；航線 8 條（自訂航點，直航，E8）；批次每 **28 天**一櫃（E2）；TW 批次沒有海運 | 同左 |
+| 虛構識別碼（E10） | 船 `SIMV-01`～`24`、`Demo <鳥名>`；訂艙號 `BLDEMO…`；航次號 `D<nnn>E`；貨櫃號 `DMQU`＋6 碼＋ISO 6346 檢查碼（備用 `XBWU`）；smoke 船 `SIMV-98`／`99` | 同左 |
+| Stack `brewline-dev-shipment`（P2b-2，module `shipment`） | 偵測函數 `brewline-dev-shipment-voyage-detector`（`BrewlineFunction`、保留併發 **1**、60 秒；非同步重試 2 → `shipment-dlq`）；規則 `brewline-dev-shipment-positions`（**預設 bus**：`aws.s3` `Object Created`、lake bucket、前綴 `raw/positions/`；重試 3／2 小時、DLQ＝`shipment-dlq`）；`shipment-dlq`（SSE-SQS、TLS、14 天）＋告警 `brewline-dev-shipment-dlq-not-empty` → `ops-alerts`；Glue 表 `brewline_raw.positions`（JSON SerDe、`ignore.malformed.json=false`、projection `source`〔`sim,ais`〕× `dt`〔`2026-11-21,NOW`〕、`synthetic=mixed`）；SSM `/brewline/dev/shipment/{dlq-arn,dlq-url,detector-function-name}` | `brewline-prod-shipment`（**終止保護**） |
+| 偵測函數 IAM | `GetObject` 只限 `raw/positions/*`；KMS `Decrypt` 經 S3（加密內容＝bucket ARN）與經 DynamoDB；`Query` `VESSEL#*`；`GetItem`／`PutItem`／`UpdateItem` `SHIP#*`；邊（`LOT#*`、`VESSEL#*`）`UpdateItem` 且 `dynamodb:Attributes` 只限 `pk`、`sk`、`status`；Scan 明確 Deny；沒有 Delete、沒有 `events:PutEvents` | 同左 |
+| Lake（E5） | bucket 以 L1 `NotificationConfiguration.EventBridgeConfiguration` 開啟（就地更新；**沒有** `Custom::S3BucketNotifications` Lambda） | 同左 |
+| Events（E6） | stream 過濾 3 → **4**（`MODIFY`＋`entity=Shipment`）；既有發布函數把 `PLANNED→DEPARTED`、`DEPARTED→ARRIVED` 發成 `VesselDeparted`／`VesselArrived`（`source=brewline.shipment`）；detail 白名單 `event_id`、`occurred_at`、`shipment_id`、`lot_id`、`pol`、`pod`、`at`、`synthetic`（**不含**貨櫃號、訂艙號、船 ID）；bus 白名單不變 | 同左 |
+| 模擬器（E3、E4） | 同一個 `simulator-run`：每小時那一輪加 `shipments` 段（`sim-roaster` 呼叫 `POST /admin/shipments`）；新排程 `brewline-dev-simulator-voyages` `cron(20,50 * * * ? *)` Asia/Taipei、payload `{"segment":"positions"}`、重試 0、DLQ＝`simulator-dlq`；寫入上一個 30 分鐘時間窗 `raw/positions/source=sim/dt=YYYY-MM-DD/HHmm.jsonl.gz`（空時間窗不寫）；`coordinates_status = provisional` 時拒絕訂艙與寫檔 | 同左 |
+| 模擬器執行角色（新增） | `s3:PutObject` **只限** `raw/positions/source=sim/*`；`kms:GenerateDataKey` 經 S3＋加密內容＝lake bucket ARN；沒有 Get／Delete、不能寫 `source=ais/` | 同左 |
+| 時間（E9、E12） | ×**24**（停泊 12 小時不壓縮）、`startDate 2026-11-23` | ×1、`startDate 2026-11-23`（不回補） |
+
+- 部署順序：… → api → **lake** → **shipment** → simulator → trace（simulator 新增依賴 lake；`deploy.yml` 清單與驗證步驟一起改）。
+- 偵測邏輯（`services/shipment/src/detector-core.ts`，純函數 `advance()`）：`PLANNED` 時在 POL 15 km 內 → `at_pol_seen`；之後超過 20 km → `DEPA`，`atd`＝最後一筆在 POL 內且航速 < 1 節的時間（沒有就用偵測時間）；`DEPARTED` 時在 POD 15 km 內且航速 < 1 節 → `ARRI`；ETA＝沿航點剩餘距離 ÷ 最近 6 小時平均航速（< 5 節用計畫航速）；航跡 Douglas–Peucker ≤ 200 點；以 `tracking.last_position_at` 去重；船對應貨運的時間窗＝計畫出發前 2 天到計畫抵達後 2 天。日誌不記座標。
+- 一個交易：META（`version` 條件）＋事件項目（`attribute_not_exists`）＋`TRACK`＋狀態改變時的兩條邊。格式錯誤的檔案（任一行）→ 丟錯 → 重試 → `shipment-dlq`；沒有對應貨運的船 → 只計數。
+- 航程（14–18 節，實際航點長度）：IDBLW→TWKEL 5.1–6.6 天、DJJIB→TWKHH 12.5–16.1、DJJIB→TWKEL 13.0–16.8、KEMBA→TWKEL 13.9–17.8、GTPRQ→TWKEL 20.1–25.8、PABLB→TWKHH 22.1–28.4、COBUN→TWKHH 22.2–28.5、BRSSZ→TWKHH（Dev 測試）25.7–33.0 天（規格原寫 15–40 天）。
+- 告警：每環境 11 → **12**；組織合計 **24**（§5）。
+- 費用（估）：每環境每月約 USD 0.15（告警 0.10；S3 PUT／GET、Lambda、DynamoDB 在免費額度內或 < USD 0.05）。
+
+已驗證：
+- **P2b-1**（2026-11-21，merge `b655e7a`，Deploy run `44873959222`）：**Dev ✅ 625、Prod ✅ 619、0 ❌**；Dev smoke 147/147（新增 19 項訂艙檢查）；`verify-api-stack.sh` 22 條路由、訂艙函數政策模擬 9 項（含覆寫 `LOT#` META → `implicitDeny`）。V1 dry-run（Developer／Admin）：Dev 2026-11-30 → 6 筆訂艙、508 個位置點；Prod 2026-12-15 → 1、192；雜湊＝本機計算值。
+- **P2b-2**（merge `56f8787`，run `44914048557`）：Dev ✅ 689、**❌ 1**（`Detector env LAKE_BUCKET = null`，見教訓）→ Prod 自動跳過。**#85**（merge `915ad92`，run `44916510338`）：**Dev ✅ 689、Prod ✅ 683、0 ❌**（環境變數改為 ℹ️）。
+  - `verify-shipment-stack.sh`（新）：函數設定、保留併發 1、非同步重試 2 → DLQ；規則在預設 bus、pattern（bucket、前綴）、目標、DLQ、重試 3；DLQ SSE-SQS／TLS／0；告警接上；帳號告警 ≤ 13（12）；Glue 表；政策模擬正向 6（讀位置檔、KMS 經 S3、`Query VESSEL#`、`SHIP#` 讀寫、邊只改 `status`）、反向 10（讀 `raw/events/`／`curated/`、寫位置檔、KMS 直接解密、`Query TENANT#`、改邊的其他欄位、`PutItem LOT#`、`DeleteItem`、Scan〔explicitDeny〕、`PutEvents`）。
+  - `verify-lake-stack.sh`：`EventBridge notifications = true`；`verify-events-stack.sh`：過濾 4、`Shipment filter present`；`verify-simulator-stack.sh`：新排程 7 項、執行角色正向 1（`source=sim`）＋反向 4（`source=ais`、`raw/events/`、Get、Delete）。
+  - 手動（Dev Admin，2026-11-21 23:3x）：環境變數 `LAKE_BUCKET`＝lake bucket（反向：不存在的變數 → `None`）；V1 dry-run 改用 WPI 座標後 Dev `711e4977…ac1b`（6、508）、Prod `3003ebf2…eb45`（1、192）＝本機計算值（訂艙與筆數同 P2b-1，只有座標改變）；手動 `{"segment":"positions"}` → `records 0`、`written false`（`startDate` 之前）；`raw/positions/` 0 個物件；`shipment-dlq`、`simulator-dlq` 皆 0（Dev、Prod）。
+  - 2026-11-23 09:40（Dev Admin）：當天 08:05、09:05 兩輪 `shipments` 皆 `due 0`、`created 0`、`violations []`；`VESSEL#SIMV-15` 0 筆（第一筆 17:32 才開放訂艙）。
+  - **V8**（2026-11-23 09:51，Dev Developer）：寫 `raw/positions/source=sim/…` → `AccessDenied`（`no identity-based policy allows`）；對照組寫 `raw/_smoke/…` → 成功。
+  - **V7**（2026-11-23，Dev Admin）：09:51:58 上傳第 2 行不是 JSON 的 `…/dt=2026-11-23/v7-bad-test.jsonl.gz`（第 1 行是沒有貨運的 `SIMV-97`）→ 偵測函數 3 次錯誤 `line 2 is not JSON`（09:51:59、09:52:57、09:54:48，同一個 requestId＝非同步重試 2 次）→ `shipment-dlq` 1 → 約 10:05 告警 `ALARM`、收到 ALARM 信 → `purge-queue`、刪除測試檔（`raw/positions/` 目前版本 0 個）→ 10:21 `OK`。從上傳到告警約 13 分鐘（重試約 3 分鐘＋SQS 指標與 5 分鐘評估）；錯誤日誌不含內容。
+
+#### 運行觀察 / Operational Observation（Dev，2026-11-23～25，完成）
+
+| 里程碑 | 計畫（台北時間，產生器計算） | 實際 |
+|---|---|---|
+| 第一筆訂艙 | 11-23 18:05（L-2026-004、SIMV-15）、19:05（L-2026-001、SIMV-06） | ✅ 18:05 `due 1, created 1`；19:05 `due 2, created 1, replayed 1`（SIMV-15 仍在開放期 → 同一個 key 重送 → 200）；violations 0；shipment ID＝本機計算值 |
+| 第一個位置檔 | 11-24 **18:50**（SIMV-15 進港停泊；`dt=2026-11-24/1000.jsonl.gz`） | ✅ 18:50 寫出（沒有 `0930`：空時間窗不寫）；`wc -l 1`＝`jq 1`；偵測 `1 1 0 1 0 0` |
+| 第一個 `DEPA`／`VesselDeparted` | 11-25 **06:50**（SIMV-15，ETD 05:32） | ✅ 06:50 偵測，`atd 2026-11-24T21:30:00Z`（台北 05:30）；SIMV-06 07:50 偵測、`atd 22:30:00Z` |
+| 第一個 `ARRI`／`VesselArrived` | 11-25 **20:50**（SIMV-06，ETA 19:45） | ✅ `ata 2026-11-25T12:00:00Z`（台北 20:00） |
+| Prod 第一筆訂艙（P1） | 11-29 08:05（L-2026-004、SIMV-14，11-28 22:31 開放，夜間沒有輪次） | ⏳ |
+| Prod 第一個 `DEPA`／`ARRI` | 12-06 約 **12:20**（SIMV-14，ETD 10:31，`atd` 10:30）／12-25 約 **06:20**（**SIMV-11**，L-2026-007 IDBLW→TWKEL，ETD 12-19 00:10、ETA 05:22） | ⏳ |
+
+- 計畫時間更正（2026-11-25）：草稿原寫位置檔 18:20、DEPA 06:20、ARRI 20:20。排程在 `:20`／`:50` 寫的是**上一個完整的 30 分鐘時間窗**，而位置取樣點在 `:00`／`:30` → 每個里程碑都晚 30 分鐘。Prod 列一併以本機模擬重算：第一個 `DEPA` 12-06 11:20 → 12:20（實際時間尺度下離港到 20 km 外要 1 小時以上）；第一個 `ARRI` 原寫 SIMV-05 12-27，但 12-19 出發的 SIMV-11（IDBLW→TWKEL，航程約 6 天）會先在 12-25 抵達。預期值以本機執行同一份產生器＋`advance()`（Dev 種子、×24）算出，實際結果全部相同。
+- **V2**（2026-11-25 21:50，Developer）：`dt=2026-11-24`（台北 11-24 08:00～11-25 08:00）**28 個檔、`wc -l` 85＝`jq` 85**，每艘船筆數＝預測（SIMV-03 9、06 26、09 2、15 28、18 18、21 2），非 synthetic 0。
+- **V3**（同上）：Athena `brewline_raw.positions`（`source='sim'`、`dt='2026-11-24'`）6 列合計 **85**、`count_if(synthetic)`＝`count(*)`；反向 `source='ais'` → 0。
+- **V4**：SIMV-15 `DEPARTED`、EVT 1（`TransportEvent`／`DEPA`／`ACT`／COBUN／`BKG`）；SIMV-06 `ARRIVED`、EVT 2（`DEPA` DJJIB、`ARRI` TWKEL，皆 `ACT`）、TRACK 28 點、兩條邊 `ARRIVED`；尚未離港的 SIMV-18（09:14）、SIMV-10（21:50）仍 `PLANNED`（反向）。`version` 每處理一個位置檔 +1（SIMV-15 11-24 22:13 `8`＝1＋7、11-25 09:14 `30`＝1＋29）。
+- **V5**：bus 稽核日誌 `source=brewline.shipment`：`VesselDeparted` 6、`VesselArrived` 1（21:50）；`occurred_at` 06:50、07:50＝偵測時間；`BLDEMO`／`DMQU`／`SIMV-`／`Demo ` 皆 0；detail 鍵＝白名單 8 個（`at event_id lot_id occurred_at pod pol shipment_id synthetic`）。
+- **V6**（11-25 09:37，Dev Admin）：把觸發 SIMV-15 `DEPA` 的 `dt=2026-11-24/2200.jsonl.gz` 原樣重新上傳 → 偵測 1 次 `4 4 0 0 0 0`（有處理、0 次更新）；META `version` 31＝31、EVT 1＝1、bus `VesselDeparted` 2＝2。在 `:37` 執行，前後沒有排程介入。
+- 健康檢查（11-23、24、25 每次）：5 個告警 `OK`、`simulator-dlq`／`shipment-dlq`／`lake-dlq` 皆 0；三天沒有 `run-errors`。
+- **ETA 觀察**：SIMV-15 離港 3.7 小時後 ETA `23:24Z`（計畫 `19:52Z`，晚 3.4 小時）→ 21:50 收斂到 `19:51:57Z`；SIMV-06 離港 3 小時後誤差 +18 分。原因：E11 用最近 6 小時平均航速，離港後 6 小時內仍包含停泊（0 節）→ 偏晚，之後收斂。不影響 `DEPA`／`ARRI`；P2c 公開頁若顯示 ETA，要考慮離港初期的偏差（例如只用離港後的點）。
+
+教訓 / Lessons：
+- （2026-11-21）**唯讀驗證角色看不到 Lambda 環境變數的值**（回傳 `null`）。A4d 的 `verify-notify-stack.sh` 已有同樣處理，新腳本沒有沿用 → Dev 驗證失敗、Prod 跳過（#84 → #85）。驗證「強制的控制」（IAM 政策模擬）而不是「設定值」；設定值只在看得到時判定，看不到印 ℹ️。新寫驗證腳本前先 `grep` 既有腳本的同類檢查。
+- （2026-11-21）**冪等鍵不含座標，但內容（`planned_arrival`）由座標決定**：開始訂艙後改座標 → 同一個鍵內容不同 → 422 → 違規告警。因此暫定座標時模擬器拒絕訂艙與寫檔（`coordinates_status`），換成 WPI 後才啟動。
+- （2026-11-21）設定 schema 變嚴格時注意部署順序：SSM `config` 多了 `voyages` → `configParam.node.addDependency(runFn)`（函數先更新，舊程式不會讀到新設定）；單元測試斷言依賴存在。
+- （2026-11-21）回放測試的離港時間：「第一筆在 20 km 外」比實際離港晚 40–90 分鐘（Prod 只有 70% 在 1 小時內）→ `atd` 改用最後一筆停泊在 POL 內的時間 → Prod 24/24、Dev ×24 57/60 在 1 小時內。
+- （2026-11-21）CDK L2 `eventBridgeEnabled` 會加 custom resource Lambda → 用 L1 屬性；單元測試斷言沒有 `Custom::S3BucketNotifications`。
+- （2026-11-21）WPI 網站維護中（HTTP 503），但官方維護頁仍提供完整檔案 → 以 Chester 的瀏覽器下載、記錄 Last-Modified 與 sha256；工作區的 shell 被代理擋下時不改用其他方法繞過。
+- （2026-11-21）航線用粗略陸地框抽樣檢查，抓到初版蘇門答臘北端航點穿過陸地。
+- （2026-11-21）asset hash 依整個 `services/` 計算 → 每個 Lambda 在 diff 都顯示 `S3Key` 變更；比較 template 時把 64 位十六進位雜湊正規化，只看真正的資源差異。
+- （2026-11-23～25，運行觀察）檢查指令本身的錯，三次都是「資料正確、檢查失準」：① 空前綴的 `list-objects-v2 --output json` 沒有 `KeyCount` → `jq` 印 `null`（不能當 0）→ 一律 `(.Contents // []) | length`；② EVT 項目的 DCSA 內容在 `event` 欄位（`shipment-repo.ts`）→ 讀頂層全部 `null`，先看資料結構再寫路徑；③ `date +%M` 的 `08`／`09` 在 bash 算術被當八進位 → `$((10#$M))`。新寫的檢查先對已知資料跑一次，確認會印出正確值。
+- （2026-11-23）**Developer 許可集沒有 `cloudwatch:DescribeAlarms`**（`ViewOnlyAccess` 不含）→ 健康檢查的告警用 Dev Admin。是否補進 Developer 待決（§13）。
+- （2026-11-25）V6 冪等測試的干擾：偵測每小時 `:20`／`:50` 處理新檔，`version` 本來就會增加 → 只在 `:00–:12`、`:30–:42` 開始，「前後相同」才只代表冪等。
+- （2026-11-23）反向測試先確認**執行者**：第一次 SSM 解密反向測試在 Admin 分頁執行 → 解密成功、`grep` 過濾後沒有輸出，看起來像「沒被拒」。之後一律檢查角色（`AWSReservedSSO_Developer_`）並讓任何結果都看得見。
+
 ## 11. 新增與修訂的決策 / New & Revised ADRs
 
 | ADR | 標題 | 狀態 | 決策摘要 |
@@ -1012,7 +1084,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ADR-027 | 訂單狀態機與 staff 端點 | Accepted（2026-11-13） | 狀態以 DynamoDB 為準；一個交易＝訂單（樂觀鎖：原狀態）＋庫存；staff 函數不扮演租戶角色、無 Put／Delete（§10.9） |
 | ADR-026 | 事件層：Streams → Lambda → EventBridge | Accepted（2026-11-13） | 台北沒有 Pipes／Archive；自訂 bus、白名單 detail、`event_id` 去重、Logs 規則留存、DLQ SSE-SQS（§10.10） |
 | ADR-031 | 溯源（docs/04）範圍與設計（S2 決策 D1–D9） | Accepted（2026-11-18） | D1 S2＝生豆批次（8 個種子）＋烘焙批次＋QR＋公開頁＋staff 追溯＋召回＋模擬烘焙廠；航程（SHP）、天氣（PRC）、換批、召回寄信延後。D2 公開頁＝S3 預先產生的白名單 JSON 投影（事件觸發），讀取路徑沒有 Lambda／API／DynamoDB。D3 CloudFront 統一費率 **Free 方案**（WAF＋IP 速率限制＋DDoS，`AWS::PricingPlanManager::Subscription`）；快取用 `Cache-Control: max-age=300`；不合格時退回 pay-as-you-go 不掛 WAF。D4 us-east-1 `edge`（ACM、CLOUDFRONT web ACL）→ config → 台北 `trace`（bucket、OAC、distribution、方案訂閱）；describe-type 實測台北可建 Distribution／Subscription、不能建 ACM。D5 鄰接清單，不加 GSI2。D6 `brewline/roastery` scope＋`simulator-roastery` 群組，伺服器端 synthetic 保護。D7 補貨（樂觀鎖）。D8 模擬操作員節奏（同一輪確認 90%、16:05 排烘、隔天烘焙／出貨、2 天後完成）。D9 QR 128-bit、召回 admin only（§10.17）。**2026-11-20 全部實作完成**（S2a–S2d，§10.17–§10.20） |
-| ADR-032 | P2 資料設計（D1–D12）與資料湖基礎 | Accepted（2026-11-20；P2a、P2a-2 已實作） | D1 公開頁海運旅程用模擬航程（真實港口、虛構船名與貨櫃號、`demo`）；D2 aisstream 只在 Dev spike 7 天、不進 Prod；D3 raw → curated 用 Athena UNLOAD（Step Functions Standard，先清分區）；D4 Glue 由 CDK 定義、partition projection、不用 crawler、不開 Lake Formation；D5 SSE-KMS 沿用資料層 CMK＋Bucket Key；D6 訂單事件經 Firehose 進 `raw/events/`；D7 專用 workgroup（強制設定、Prod 1 GB／Dev 100 MB）；**D8（修訂）每模組一個 DLQ＋告警**（lake／shipment／procurement）；D9 aisstream spike 每 30 分、256 MB、120 秒；D10 儀表板預先計算；D11 溯源頁航跡同源 SVG；D12 EDI（IFTSTA）依 UNECE 公開目錄自行設計。另：Glue 目錄不加密（帳號層級單例）；bucket policy 用 `Null`＋`StringNotEquals`；`describe-type` 判讀規則（§2）。P2a-2：input transformer 結尾 `\n`（Dev 實測通過）、只收兩種訂單事件、不新增告警、Bucket Key 的 KMS 加密內容＝bucket ARN。詳見 docs/14（§10.21） |
+| ADR-032 | P2 資料設計（D1–D12）與資料湖基礎 | Accepted（2026-11-20；P2a、P2a-2、P2b 已實作） | D1 公開頁海運旅程用模擬航程（真實港口、虛構船名與貨櫃號、`demo`）；D2 aisstream 只在 Dev spike 7 天、不進 Prod；D3 raw → curated 用 Athena UNLOAD（Step Functions Standard，先清分區）；D4 Glue 由 CDK 定義、partition projection、不用 crawler、不開 Lake Formation；D5 SSE-KMS 沿用資料層 CMK＋Bucket Key；D6 訂單事件經 Firehose 進 `raw/events/`；D7 專用 workgroup（強制設定、Prod 1 GB／Dev 100 MB）；**D8（修訂）每模組一個 DLQ＋告警**（lake／shipment／procurement）；D9 aisstream spike 每 30 分、256 MB、120 秒；D10 儀表板預先計算；D11 溯源頁航跡同源 SVG；D12 EDI（IFTSTA）依 UNECE 公開目錄自行設計。另：Glue 目錄不加密（帳號層級單例）；bucket policy 用 `Null`＋`StringNotEquals`；`describe-type` 判讀規則（§2）。P2a-2：input transformer 結尾 `\n`（Dev 實測通過）、只收兩種訂單事件、不新增告警、Bucket Key 的 KMS 加密內容＝bucket ARN。**P2b 補充 E1–E12（2026-11-21，已實作）**：港口依批次補為 10 個（TW 沒有海運）、只做直航、每批次 28 天一櫃、訂艙走公開 API、位置寫 `raw/positions/source=sim/`、同一個 run 函數＋30 分排程、S3 → EventBridge（L1）、Streams 發布 `Vessel*`、DCSA T&T 2.2.0 只做 `DEPA`／`ARRI`、Dev ×24、虛構識別碼（`DMQU`）、ETA、不回補。詳見 docs/14（§10.21、§10.22） |
 | ADR-030 | 模擬器（docs/07）範圍與設計（S1 決策 D1–D9） | Accepted（2026-11-17） | D1 S1＝租戶＋訂單＋重複下單異常；生豆／烘焙批次 → S2（溯源），貨櫃／DCSA／IFTSTA／EDI 異常 → S3（P2）。D2 專用 `simulator` app client（`ADMIN_USER_PASSWORD_AUTH`）＋每人隨機密碼存 SSM SecureString（CMK）；pre token 限制此 client 只發 scope 給 `simulator` 群組。D3 部署時 custom resource 建 40 個使用者（先啟用 30，每月依日期啟用 1–2）；執行函數只有 `AdminInitiateAuth`。D4 Dev、Prod 都跑（Prod 每天 5–40、Dev 2–6；每筆 1–3 個商品 × 1–5 kg；跳過庫存偏低）；首次部署 `paused`。D5 S1 不推進訂單（逾時取消），S2 再設計烘焙廠操作員。D6 `synthetic: true` 由伺服器依 `cognito:groups` 標記於訂單與事件。D7 `state` 參數只在首次建立時寫入（Dev 可由 Developer 切換）、`config` 由 CDK 管理；`scp-budget-lockdown` 加 `cognito-idp:AdminInitiateAuth`。D8 台北 08:05–19:05 每小時；冪等鍵＝hash(種子, 日期, 小時, 序號)；重現性以 dry-run 計畫雜湊驗證。D9 不建自訂指標；預期失敗即函數錯誤 → `Errors` 告警；每帳號告警 ≤ 10。前置：S0（RSK-017）完成。**D9 修訂（2026-11-20）**：CloudWatch 告警免費額度 10 個是**全組織**共用（含管理帳號；Free Tier 頁 `Global-CW:AlarmMonitorUsage` 實測），每帳號 ≤ 10 的前提不成立 → 改為管控組織總數、告警費預算 ≤ USD 2／月、每環境 ≤ 13（P2 每模組一個 DLQ 告警，ADR-032 D8）；**不合併 DLQ**（§10.20） |
 
 | 風險 | 內容 | L | I | 緩解 |
@@ -1021,7 +1093,7 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | RSK-015 | 撤銷的帳號在 access token 到期前（≤ 15 分）仍可呼叫 API；staff MFA 無法由 Cognito 強制 | M | M | Token **15 分鐘**（A2a，原 60 分）；部署後驗證偵測 staff 未設 TOTP；A2 起高風險操作在 Lambda 再查使用者狀態 |
 | RSK-016 | A3 之前已預留的庫存不會自動釋放；單筆最多預留 500 kg，可能佔滿某商品 | M | M | 不開放註冊；路由限流；**A3c staff 可取消、A3d 未確認訂單自動取消並釋放（Dev 10 分／Prod 48 小時）**；剩餘：48 小時內仍可佔住庫存 |
 | RSK-017 | 自訂 bus 沒有資源政策：同帳號內有 `events:PutEvents` 的身分可偽造 `brewline.ordering` 事件（例如假的 `OrderCreated` 會啟動逾時工作流，但取消前會讀 DynamoDB，影響有限） | L | M | **已緩解（S0，2026-11-17）**：bus 資源政策 Deny 白名單以外的 `PutEvents`（§10.10）。剩餘：SSO Admin 與 CloudFormation 執行角色（可改政策）仍可發布 |
-| RSK-018 | 模擬器帳號 custom resource 有 `AdminCreateUser`／`AdminSetUserPassword`／`AdminAddUserToGroup`（IAM 無法依群組或使用者限制）：能修改此函數或其角色的身分，理論上可以重設 staff 密碼或把帳號加進 staff | L | M | 函數只由 CloudFormation provider 呼叫；修改需要 CI 部署或 Admin；Developer 只在 Dev 且不能改 Lambda／IAM；執行中的模擬器函數**只有** `AdminInitiateAuth`（S1b，政策模擬驗證）；`verify-simulator-stack.sh` 檢查模擬帳號不在 staff 群組 |
+| RSK-018 | 模擬器帳號 custom resource 有 `AdminCreateUser`／`AdminSetUserPassword`／`AdminAddUserToGroup`（IAM 無法依群組或使用者限制）：能修改此函數或其角色的身分，理論上可以重設 staff 密碼或把帳號加進 staff | L | M | 函數只由 CloudFormation provider 呼叫；修改需要 CI 部署或 Admin；Developer 只在 Dev 且不能改 Lambda／IAM；執行中的模擬器函數**只有** `AdminInitiateAuth`（S1b，政策模擬驗證）；P2b 起另有 `s3:PutObject` 只限 `raw/positions/source=sim/*`（不影響 Cognito 權限，政策模擬驗證不能寫 `source=ais/`、`raw/events/`，不能讀或刪）；`verify-simulator-stack.sh` 檢查模擬帳號不在 staff 群組 |
 | RSK-019 | 公開溯源頁若輸出錯誤欄位，可能洩漏租戶或訂單資訊 | L | M | 公開資料只來自寫入時的白名單投影（S2c，以建構而非刪減實作、單元測試搜尋內部欄位）；租戶角色讀不到 `ROAST#`／`LOT#`；公開讀取路徑沒有資料庫權限；驗收搜尋租戶 ID、Email 結果為 0 |
 | RSK-013 | 主要區域無 Macie，無法自動偵測 S3 中的個資 | L | L | 個資只存 DynamoDB；DATA-011/012 設計層預防；資料湖 DQ 檢查加入 Email／電話格式偵測 |
 
@@ -1073,6 +1145,11 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | 11 COST-021 | Dev 月預算 USD 5 → **10**（2026-11-20，§5） |
 | 11、ADR-030 D9 | 「每帳號告警 ≤ 10 免費」改為「免費 10 個是全組織共用；告警費 ≤ USD 2／月、每環境 ≤ 13」 |
 | 07 | 依 ADR-030 分階段：S1 租戶＋訂單＋重複下單；生豆／烘焙批次 → S2（溯源）；貨櫃、DCSA、IFTSTA、EDI 異常、`S3 edi/inbound` → S3（P2）。SIM-F-001 不建聯絡人（simulator 沒有 profile scope）；帳號部署時建立、依日期啟用（取代執行時新增）；SIM-F-010 改為訂單項目的 `synthetic: true`（伺服器依 JWT 判定）；SIM-N-001 開關「下一輪生效」；docs/11「預測 100% 自動暫停」改為 `scp-budget-lockdown` 擋 `AdminInitiateAuth`；服務清單去掉 S3／DynamoDB 直接寫入（S1） |
+| 06 §3 | 港口改為 10 個（ADR-032 補充 E1）：出口 DJJIB、KEMBA、COBUN、**GTPRQ**、**PABLB**、**IDBLW**（依生豆批次產地）、BRSSZ（只給 Dev 測試批次）；進口 TWKEL、TWKHH；VNSGN 只給 P2b-spike；TW 批次沒有海運；座標取自 WPI（§2） |
+| 06 §4 | 流程改為：模擬器每 30 分寫 `raw/positions/source=sim/`（真實 AIS 只在 P2b-spike 寫 `source=ais/`）→ S3 → EventBridge（預設 bus）→ 偵測函數**直接讀 raw JSON**（沒有 Transform Lambda、Parquet 等 P2e 的 curate 工作流）→ DynamoDB → Streams → `VesselDeparted`／`VesselArrived`（§10.22）；SHP-F-001 每 15 分 → 30 分（D9）、SHP-F-003 去重改由偵測器的 `last_position_at` |
+| 06 §8 | `SHIP#<voyage_id>` 改為 `SHIP#<shipment_id>`（**貨運**＝一筆訂艙搭一個航次；航次號是屬性）；不用 MMSI，改 `vessel_id = SIMV-nn`；新增邊 `LOT#…/SHIP#…`、`VESSEL#…/VOY#…`（不加 GSI）；運輸事件依 DCSA T&T 2.2.0（只有 `DEPA`／`ARRI`）；航程 **5–30 天**（直航實際值，規格原寫 15–40 天） |
+| 07 SIM-F-004–006 | SIM-F-004 改為「模擬航程」：虛構船名、決定性種子、每批次 28 天一櫃，訂艙經公開 API（不是附在真實航次上，ADR-032 D1）；SIM-F-005 擁有者代碼 `DMQU`（BIC 公開查詢查無）；SIM-F-006 P2b 只產生位置，偵測器產生 `DEPA`／`ARRI`，設備事件（gate-in、裝船、卸船、gate-out）延到 P2d（IFTSTA） |
+| 12 DS-09、DS-10 | DS-09 UN/LOCODE：只用種子檔的 10 個代碼，並以 WPI 的 UN/LOCODE 欄位交叉比對；DS-10 WPI：實際取得版本與 sha256 記在 §2 與 `ports.json` |
 
 ---
 
@@ -1128,10 +1205,15 @@ GSI1（2026-11-12，訂貨 A1a，PR #13、#16）：
 | ✅ 2026-11-18 | 模擬器 S1d：Prod `state` 改 `running`，16:05 排程自動下第一批 2 筆模擬訂單（§10.16）；**模擬器 S1 完成** |
 | ✅ 2026-11-20 | 溯源 S2d（§10.20，PR #75、#76）：Dev 端到端、Prod 16:05 排烘 9 批、09:05 烘焙 → 9 個公開頁；**溯源 S2 完成、P1 完成** |
 | ✅ 2026-11-19 | FSBP 全面整理（§9）：刪除 Dev／Prod 台北預設 VPC、5 項帳號設定、停用 Inspector.1/.2、6 項 SUPPRESSED → **100%**（2026-11-20） |
-| P2 | 下一步：**P2b 海運追蹤**（docs/06，補 TRC-F-004；航次模型＋模擬航程＋DCSA＋`shipment-dlq`，ADR-032 D1／D11）→ P2b-spike aisstream（Dev 7 天）→ P2c–P2d → 採購分析 P2e–P2f（docs/05；`procurement-dlq`）；curate 工作流（Athena UNLOAD，D3）在 P2e 第一個使用者出現時建立
-| P2b-spike 前 | aisstream API key（需本人以 GitHub 登入建立）→ 密碼管理器；spike 時存 Dev SSM SecureString |
-| 有空時 | 管理帳號 Secrets Manager 的 USD 0.00003 是否只是 API 呼叫（若有 secret 會是每個每月 USD 0.40） |
-| 有空時 | us-east-1 的預設 VPC（Dev、Prod）也刪除（edge stack 不用 VPC；不影響 FSBP，台北以外沒開 Security Hub） |
+| ✅ 2026-11-21 | P2b-1 訂艙 API＋模擬航程產生器（dry-run）、P2b-2 shipment stack＋航程偵測＋位置排程部署 Dev、Prod；驗證腳本修正 #85（§10.22，PR #83、#84、#85） |
+| ✅ 2026-11-25 | P2b Dev 運行觀察：第一筆訂艙、位置檔、`DEPA`、`ARRI` 與 V2–V8 全部通過（§10.22） |
+| 2026-12-06 前後 | P2b Prod 觀察（P1）：第一筆訂艙 11-29 08:05、第一個 `DEPA` 12-06 約 12:20、第一個 `ARRI` 12-25 約 06:20（Prod Admin，只讀；§10.22） |
+| 待決 | 轉運／經停（ADR-032 補充 E8，P2b 只做直航）；庫存與到港連動（E2，目前補貨不看到港） |
+| P2 | 下一步：P2b-spike aisstream（Dev 7 天）→ P2c 公開頁旅程（TRC-F-004，D11）→ P2d IFTSTA（D12）→ 採購分析 P2e–P2f（docs/05；`procurement-dlq`）；curate 工作流（Athena UNLOAD，D3）在 P2e 第一個使用者出現時建立 |
+| ✅ 2026-11-23 | P2b-spike 前置：aisstream API key（本人以 GitHub 登入建立）存 Dev SSM SecureString `/brewline/dev/ais/api-key`（資料層 CMK、Standard、版本 1）；正向 Dev Admin 解密長度正確（不印值）；反向 Developer `--with-decryption` → `kms:Decrypt … no identity-based policy allows`（不解密看得到名稱） |
+| 待決 | Developer 許可集是否加 `cloudwatch:DescribeAlarms`（Dev 限定、只增加；運行觀察時健康檢查需要切換到 Admin） |
+| ✅ 2026-11-23 | 管理帳號 Secrets Manager 的 USD 0.00003：18 個已啟用區域 secret 皆 0（含排定刪除）；費用全是 `APIRequest`（東京 3＋us-east-1 3 次），CloudTrail 顯示是 `resource-explorer-2` 的 `ListSecrets`（管理帳號有 Resource Explorer 索引，免費）→ 不需處理。附帶：Prod 台北每天 4 次 `ListSecrets` 來自 `configLambdaExecution`（FSBP `SecretsManager.*` 的 Config 定期規則），組織 11 月合計約 USD 0.00036 |
+| ✅ 2026-11-23 | us-east-1 的預設 VPC（Dev、Prod）刪除（§9） |
 | ✅ 2026-11-20 | 告警額度：免費 10 個是**全組織**共用（§5）→ ADR-030 D9 修訂（每環境 ≤ 13、告警費 ≤ USD 2／月，**不合併 DLQ**）；目前組織合計 22（Dev 11、Prod 11、管理帳號 0） |
 | ✅ 2026-11-18 | Developer 許可集加上 `ssm:PutParameter`（只限 `/brewline/dev/simulator/state`），Developer 可在 Dev 切換模擬器開關（§3） |
 | ✅ 2026-11-18 | Dependabot 安全警示 2 筆（`minimatch` < 11.0.1，Moderate，只在測試／synth 工具鏈）：PR #63 以 npm `overrides` 升到 11.0.9；`aws-cdk-lib` 內部打包（bundleDependencies）的一份要等新版 |

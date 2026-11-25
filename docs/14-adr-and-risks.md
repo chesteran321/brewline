@@ -337,7 +337,7 @@
 
 ### ADR-032 P2 資料設計與資料湖基礎 / P2 Data Design and Data Lake Foundation
 
-- **狀態 Status**：Accepted（2026-11-20，D1–D12；D8 同日修訂）；P2a（資料湖基礎）已實作（PR #78，status §10.21）；修正 05 PRC-F-002、06 §4／§7、09 §3.4、12 DS-01／09／10；修訂 ADR-030 D9
+- **狀態 Status**：Accepted（2026-11-20，D1–D12；D8 同日修訂）；P2a（資料湖基礎）已實作（PR #78，status §10.21）；**P2b 補充 E1–E12（2026-11-21）已實作**（PR #83–#85，status §10.22）；修正 05 PRC-F-002、06 §4／§7、09 §3.4、12 DS-01／09／10；修訂 ADR-030 D9
 - **背景 Context**：P2 涵蓋資料湖、海運追蹤（06，含 TRC-F-004）與採購分析（05）。查證結果（2026-11-19～20）：aisstream.io **沒有正式使用條款**（官方 2023 年 GitHub 留言表示目前無使用限制、無 SLA），只有岸基 AIS，5 個出口港中 4 個在非洲／南美弱覆蓋區；World Port Index 為公有領域；UN/LOCODE 授權不明確。台北 `describe-type` 對 `AWS::Glue::Database`／`Table` 回 `NON_PROVISIONABLE`，但測試 stack 實際 `CREATE_COMPLETE`（status §2）。免費額度（含 CloudWatch 告警 10 個）是**組織層級**（status §5）。
 - **決策 Decision**：
   - **D1 公開頁海運旅程用模擬航程**：真實港口（UN/LOCODE＋WPI 座標）、虛構船名與 ISO 6346 貨櫃號、決定性種子，頁面標示 `demo`。理由：沒有正式授權；岸基覆蓋撐不起產地 → 台灣的完整航程；真實船＋虛構貨物放公開頁會誤導；可重現、可回放測試（SHP-F-004）。
@@ -361,12 +361,29 @@
     - E1：換行由規則的 **input transformer** 產生（列出 `id`、`detail_type`、`source`、`time`、`detail` 並以 `\n` 結尾），不用 Firehose 資料處理或 Lambda；Dev 實測物件行數＝`jq` 物件數＝Athena 筆數（14＝14＝14）。備案（未使用）：Firehose `AppendDelimiterToRecord`。
     - E2：只收 `OrderCreated`、`OrderStatusChanged`（`StockLow`、`ReplenishmentFailed` 是維運訊號，已有通知）。E3：規則與 Firehose 在 lake stack。E4：不新增告警（規則失敗 → `lake-dlq`；Firehose 失敗由錯誤日誌與部署驗證 `DeliveryToS3.Success` 偵測），保留每環境 ≤ 13 的額度給 `shipment-dlq`、`procurement-dlq`。E5：`brewline_raw.order_events` 在 Dev、Prod 都建。
     - Firehose 角色的 KMS 條件：開了 Bucket Key 時加密內容是 **bucket ARN**。
+  - **P2b 補充決策 E1–E12（2026-11-21，Chester 逐項確認；PR #83、#84、#85）**：
+    - **E1 港口依批次補齊**：生豆批次產地（ET×2、KE、CO、GT、PA、ID、TW）與 docs/06 §3 的 5 個出口港對不上 → 10 個港口：ET→DJJIB、KE→KEMBA、CO→COBUN、GT→GTPRQ、PA→PABLB、ID→IDBLW、BR（Dev 測試批次）→BRSSZ；進口 TWKEL、TWKHH；VNSGN 只給 P2b-spike；**TW 批次沒有海運**（訂艙 400 `no_sea_route`）。未採用：維持 5 個港口（8 個商品只有 4 個有旅程）、改批次產地（改變已公開的內容）。
+    - **E2 滾動貨運**：每個有海運的批次每 28 天一櫃、相位由種子決定；庫存**不**跟到港連動。**E8 只做直航**（每個貨運一個 POL、一個 POD）；轉運需要中途港事件與多段偵測，延後。
+    - **E3 模擬資料經公開入口**（ADR-011）：訂艙＝模擬烘焙廠呼叫 `POST /admin/shipments`；船位＝寫到 `raw/positions/source=sim/`（與 spike 的 `source=ais/` 同一入口）→ 偵測器分不出模擬或真實，持續端到端測試。模擬器角色只能寫 `source=sim/`。
+    - **E4 同一個 `simulator-run`**：每小時那一輪加 `shipments` 段；新排程每 30 分（`:20`／`:50`，24 小時）寫上一個時間窗；共用開關、DLQ、`run-errors` 告警（不新增告警）。
+    - **E5 S3 → EventBridge**：lake bucket 用 L1 `EventBridgeConfiguration`（L2 `eventBridgeEnabled` 會部署 custom resource Lambda）；預設 bus 規則只比對 `raw/positions/`；規則與函數失敗都進 `shipment-dlq`（D8）。
+    - **E6 Outbox**：偵測器只寫 DynamoDB；Streams → 既有發布函數 → `VesselDeparted`／`VesselArrived`（`source=brewline.shipment`）；bus 白名單不變；detail 不含貨櫃號、訂艙號、船 ID。
+    - **E7 DCSA T&T 2.2.0**（公開版；3.0.0 先給會員，依 C-03 不用）：P2b 只有運輸事件 `DEPA`／`ARRI`（ACT）；設備事件 P2d 由 IFTSTA 帶入。
+    - **E9 Dev ×24**（停泊 12 小時不壓縮，偵測器不知道時間被壓縮）；Prod 真實時間。**E12 不回補**：`startDate 2026-11-23`。
+    - **E10 虛構識別碼**：`SIMV-nn`、`Demo <鳥名>`（單字鳥名有真實船舶，一律加前綴）、`BLDEMO…`、`D<nnn>E`；ISO 6346 擁有者代碼 **`DMQU`**（備用 `XBWU`）。BIC 公開查詢（2026-11-21，bic-code.org 以關鍵字篩選）：對照組 `MSKU` → 1 筆（證明查詢有效）；`DMQU`、`XBWU` → 0 筆；另兩個候選代碼已登記，不使用。查無只是當下證據 → 保留 `demo` 標記，貨櫃號不出現在事件、公開頁、日誌。
+    - **E11 ETA 在 P2b-2 一起做**：剩餘航線距離 ÷ 最近 6 小時平均航速（< 5 節用計畫航速），寫在 META，不產生事件。
+  - **實作補充（P2b，2026-11-21）**：
+    - 港口座標：NGA World Port Index（Pub. 150，公有領域）；網站維護中，由官方維護頁的完整檔案取得，版本與 sha256 記在 status §2 與 `ports.json`；代碼與同一列 WPI 的 UN/LOCODE 欄位交叉比對（DS-09）。暫定座標期間模擬器拒絕訂艙與寫檔（冪等鍵不含座標，但 `planned_arrival` 由座標決定）。
+    - 訂艙與偵測函數的邊寫入以 `dynamodb:Attributes` 白名單限制 → 無法覆寫 `LOT#…/META`；偵測器對邊只能改 `status`。
+    - 偵測：geofence 進 15 km／出 20 km（遲滯）；`atd`＝最後一筆停泊在 POL 內的時間（「第一筆在外」會晚 40–90 分鐘）；回放測試誤差 ≤ 1 小時：Prod 24/24、Dev ×24 57/60。
+    - 實際航程 5–30 天（IDBLW→TWKEL 5.1–6.6 天；規格原寫 15–40 天）。
+    - 告警每環境 12（`shipment-dlq-not-empty`），組織 24。
 - **後果 Consequences**：
-  - 告警：P2a 後每環境 11、P2b 後 12、P2e 後 13；組織合計 P2 完成後約 26（每月約 USD 1.6）。ADR-030 D9 改為管控組織總數、告警費 ≤ USD 2／月，`verify-ops-stack.sh` 與 `verify-simulator-stack.sh` 上限 ≤ 13（不變條件，不寫死目前數量）。
+  - 告警：P2a 後每環境 11、P2b 後 12（2026-11-21 實測）、P2e 後 13；組織合計 P2 完成後約 26（每月約 USD 1.6）。ADR-030 D9 改為管控組織總數、告警費 ≤ USD 2／月，`verify-ops-stack.sh` 與 `verify-simulator-stack.sh` 上限 ≤ 13（不變條件，不寫死目前數量）。
   - P2a 本身幾乎不增加費用（告警 +USD 0.10／月／環境）；P2a-2（Firehose）之後增加，開始前先看 Dev 費用（Dev 月預算 2026-11-20 起 USD 10）。
   - Developer 許可集（Dev）新增 Athena（只此 workgroup）、Glue 讀取、lake 讀取、`raw/_smoke/*` 寫入、`kms:ViaService = s3`；Prod 沒有人員查詢路徑。
   - 公開頁的海運資訊全部是模擬資料；真實 AIS 只用於內部覆蓋量測。
-- **替代方案 Alternatives considered**：aisstream 進 Prod 並公開顯示（無授權、覆蓋不足）；Glue crawler（每次至少 10 分鐘計費、schema 漂移）；pyarrow／Glue job（要 Python 或 Glue 費用）；Lake Formation（改變權限模型）；共用一個 DLQ（D8 修訂前的方案，遮蔽失敗）；Glue 目錄加密（帳號層級副作用）。
+- **替代方案 Alternatives considered**：（P2b）模擬器直接寫 DynamoDB（違反 ADR-011）、偵測器自己 `PutEvents`（白名單變寬、雙寫不一致）、每批次一個固定歷史航程（Prod 沒有持續流量）、排程輪詢位置檔（要自己記錄讀取進度）、新建模擬函數（多一個告警）；aisstream 進 Prod 並公開顯示（無授權、覆蓋不足）；Glue crawler（每次至少 10 分鐘計費、schema 漂移）；pyarrow／Glue job（要 Python 或 Glue 費用）；Lake Formation（改變權限模型）；共用一個 DLQ（D8 修訂前的方案，遮蔽失敗）；Glue 目錄加密（帳號層級副作用）。
 
 ### ADR 範本 / ADR Template
 

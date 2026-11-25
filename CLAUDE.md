@@ -112,10 +112,23 @@ BrewLine is a non-commercial AWS Solutions Architect portfolio: a B2B specialty-
 | 帳號 | 部署時由 custom resource 建立 `sim-NNN@example.com`（群組 `simulator`，tenant_id 由 `config.ts` 的 `simulator.seed` 決定）；**改種子會產生新的一批租戶** |
 | 密碼 | SSM `/brewline/<env>/simulator/credentials`（SecureString，CMK）；只有帳號 custom resource 能寫、執行函數能讀；**不要手動讀或印出** |
 | 開關 | SSM `/brewline/<env>/simulator/state`＝`paused`／`running`；只在第一次建立（`paused`），部署不覆蓋；其他值都當成 `paused` |
-| 執行 | `brewline-<env>-simulator-run`，台北 08:05–19:05 每小時；執行角色只有 `AdminInitiateAuth`＋讀 3 個參數（RSK-018 的權限只在帳號 custom resource） |
+| 執行 | `brewline-<env>-simulator-run`，台北 08:05–19:05 每小時（含 `shipments` 段）＋`brewline-<env>-simulator-voyages` 每 30 分（`:20`／`:50`，24 小時，`{"segment":"positions"}`）；執行角色只有 `AdminInitiateAuth`＋讀 3 個參數＋`s3:PutObject` **只限** `raw/positions/source=sim/*`（RSK-018 的 Cognito 管理權限只在帳號 custom resource） |
 | 產生器 | `services/simulator/src/generator.ts`（純函數）：同一組（種子、日期、小時）→ 同一份計畫與冪等鍵；手動 `{"dryRun": true, "date": …}` 回傳計畫雜湊；`{"probe": true}` 只探測。**改季節／星期／小時權重或挑選邏輯會改變冪等鍵以外的內容 → 同一小時重跑會 422** |
 | 規則 | 模擬流量一律走公開 API（ADR-011），不直接寫 DynamoDB；預期沒達成就丟錯（觸發 `Errors` 告警），不用自訂指標 |
 | 模擬烘焙廠（ADR-031 D8，S2d） | `sim-roaster@example.com`（`simulator-roastery`，無租戶）；**同一個** run 函數（方案 A，共用 `run-errors` 告警）：每小時確認 90%、16 時排烘＋補貨、09 時烘焙（QR）、14 時出貨、出貨 2 天後完成（`services/simulator/src/roastery.ts`）；手動 `{"roastery": "<步驟>"}`；**告警已滿 10 個：新增要付費並修訂 ADR-030 D9，不要合併 DLQ** |
+
+### 資料湖與海運追蹤 / Data lake and shipment tracking（ADR-032，status §10.21、§10.22）
+
+| 項目 Item | 值 Value |
+|---|---|
+| Lake | `brewline-<env>-lake`（module `data-lake`）：SSE-KMS（資料層 CMK＋Bucket Key → KMS 加密內容是 **bucket ARN**）；S3 → EventBridge 用 L1 `EventBridgeConfiguration`（**不要**用 L2 `eventBridgeEnabled`：會加 custom resource Lambda）；SSM `/brewline/<env>/lake/*` |
+| 海運 Stack | `brewline-<env>-shipment`（module `shipment`；Prod 終止保護）；部署順序 … → api → lake → **shipment** → simulator → trace |
+| 訂艙 API | `POST /admin/shipments`（`brewline/roastery`、`Idempotency-Key`）、`GET /admin/shipments[?lot=]`、`GET /admin/shipments/{id}`；伺服器依 `lot-routes.json` 決定 POL／POD；TW 批次 400 `no_sea_route` |
+| 資料 | `SHIP#<id>/{META,EVT#…,TRACK}`、邊 `LOT#/SHIP#<出發>#<id>`、`VESSEL#/VOY#<出發>#<id>`；**不加 GSI**；邊的寫入以 `dynamodb:Attributes` 限制（`services/shipment/src/edge-attributes.ts`） |
+| 偵測 | `brewline-<env>-shipment-voyage-detector`（保留併發 1）：預設 bus 規則只比對 `raw/positions/`；DCSA T&T 2.2.0 `DEPA`／`ARRI`；失敗 → `shipment-dlq`（告警，每環境 12 個）；**沒有** `PutEvents`：`VesselDeparted`／`VesselArrived` 由 Streams 發布函數產生 |
+| 種子 | `services/shipment/seed/`：港口 10 個（座標＝World Port Index，`coordinates_status: wpi`；改回 `provisional` 會讓模擬器拒絕訂艙）；**開始訂艙後不要改座標或航點**（`planned_arrival` 改變 → 同一冪等鍵 422） |
+| 虛構識別碼 | 船 `SIMV-nn`／`Demo <鳥名>`、`BLDEMO…`、`D<nnn>E`、貨櫃 `DMQU`（備用 `XBWU`）；貨櫃號、訂艙號不進事件、公開頁、日誌 |
+| 驗證 | 唯讀驗證角色**看不到 Lambda 環境變數的值**：驗證腳本檢查 IAM 政策模擬，環境變數只在看得到時判定 |
 
 ### Lambda 標準 / Lambda standard（ADR-023）
 
