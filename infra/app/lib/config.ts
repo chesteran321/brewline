@@ -304,7 +304,7 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
     },
     // P2b-spike（F2）：台北 2026-11-27 00:00 → 12-04 00:00（7 天）。開始日期待 Chester 確認（前置 4）。
     // Taipei 2026-11-27 00:00 → 12-04 00:00 (7 days); the start date awaits Chester's confirmation.
-    aisSpike: { startDate: '2026-11-26T12:00:00Z', endDate: '2026-12-03T12:00:00Z', collectSeconds: 120 },
+    aisSpike: { startDate: '2026-11-26T12:00:00.000Z', endDate: '2026-12-03T12:00:00.000Z', collectSeconds: 120 },
   },
   prod: {
     name: 'prod',
