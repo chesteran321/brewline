@@ -196,6 +196,18 @@ export interface LakeSettings {
   readonly orderEventsLogRetentionDays: 7 | 30;
 }
 
+/**
+ * aisstream spike（P2b-spike，ADR-032 D2／D9，spike 規格 F1–F3）：**只在 Dev**、7 天。排程以 StartDate／EndDate
+ * 自動開始與停止（F2）；結束後一個 PR 刪除整個 stack。日期是 UTC ISO 字串（台北 00:00 ＝ 前一天 16:00Z）。
+ * Dev-only aisstream spike: the schedule starts and stops on its own (UTC ISO dates); delete the stack afterwards.
+ */
+export interface AisSpikeSettings {
+  readonly startDate: string;
+  readonly endDate: string;
+  /** 每次連線收訊息的秒數（D9：120）/ Seconds of streaming per run. */
+  readonly collectSeconds: number;
+}
+
 export interface BrewlineEnv {
   readonly name: EnvName;
   readonly account: string;
@@ -208,6 +220,8 @@ export interface BrewlineEnv {
   readonly simulator: SimulatorSettings;
   readonly trace: TraceSettings;
   readonly lake: LakeSettings;
+  /** 只有 Dev 設定（F1）；沒有設定 → 不建立 ais-spike stack / Dev only; absent → no ais-spike stack. */
+  readonly aisSpike?: AisSpikeSettings;
 }
 
 /** CloudFront 的憑證與 web ACL 只能在這裡 / CloudFront certificates and web ACLs live here only. */
@@ -288,6 +302,9 @@ export const ENVIRONMENTS: Record<EnvName, BrewlineEnv> = {
       smokeTable: true,
       orderEventsLogRetentionDays: 7,
     },
+    // P2b-spike（F2）：台北 2026-11-27 00:00 → 12-04 00:00（7 天）。開始日期待 Chester 確認（前置 4）。
+    // Taipei 2026-11-27 00:00 → 12-04 00:00 (7 days); the start date awaits Chester's confirmation.
+    aisSpike: { startDate: '2026-11-26T12:00:00Z', endDate: '2026-12-03T12:00:00Z', collectSeconds: 120 },
   },
   prod: {
     name: 'prod',

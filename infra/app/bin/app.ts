@@ -6,6 +6,7 @@ import { ApiGuardrailsChecker } from '../lib/aspects/api-guardrails';
 import { DataProtectionChecker } from '../lib/aspects/data-protection';
 import { LambdaGuardrailsChecker } from '../lib/aspects/lambda-guardrails';
 import { EDGE_REGION, resolveEnv } from '../lib/config';
+import { AisSpikeStack } from '../lib/stacks/ais-spike-stack';
 import { ApiStack } from '../lib/stacks/api-stack';
 import { AuthStack } from '../lib/stacks/auth-stack';
 import { DataStack } from '../lib/stacks/data-stack';
@@ -212,3 +213,21 @@ shipmentStack.addStackDependency(dataStack, 'table and CMK (SSM)');
 shipmentStack.addStackDependency(opsStack, 'DLQ alarm publishes to the ops topic (SSM)');
 shipmentStack.addStackDependency(lakeStack, 'lake bucket with EventBridge notifications and the brewline_raw database (SSM)');
 Tags.of(shipmentStack).add('module', 'shipment', { priority: 200 });
+
+// P2b-spike aisstream（ADR-032 D2／D9，spike 規格 F1）：**只在 Dev**、7 天（排程 StartDate／EndDate）。
+// 寫 lake 的 raw/positions/source=ais/（偵測函數會讀到但沒有對應貨運）；失敗進 shipment-dlq（不新增告警，F7）。
+// Dev-only aisstream spike; writes to the lake, failures go to the existing shipment DLQ.
+if (env.aisSpike) {
+  const aisSpikeStack = new AisSpikeStack(app, `brewline-${env.name}-ais-spike`, {
+    envName: env.name,
+    lambda: env.lambda,
+    spike: env.aisSpike,
+    env: { account: env.account, region: env.region },
+    description: 'BrewLine aisstream spike (Dev only, 7 days, ADR-032 D2): WebSocket sampler, schedule, ais_static table',
+    terminationProtection: false,
+  });
+  aisSpikeStack.addStackDependency(dataStack, 'CMK for the API key SecureString and lake objects (SSM)');
+  aisSpikeStack.addStackDependency(lakeStack, 'lake bucket and the brewline_raw database (SSM)');
+  aisSpikeStack.addStackDependency(shipmentStack, 'shipment-dlq for failed runs (SSM)');
+  Tags.of(aisSpikeStack).add('module', 'shipment', { priority: 200 });
+}

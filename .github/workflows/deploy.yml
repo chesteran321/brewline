@@ -73,7 +73,7 @@ jobs:
 
       - name: cdk deploy (Dev)
         run: >
-          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data brewline-dev-auth brewline-dev-ops brewline-dev-events brewline-dev-api brewline-dev-notify brewline-dev-simulator brewline-dev-edge brewline-dev-trace brewline-dev-lake brewline-dev-shipment
+          npx cdk deploy brewline-dev-pipeline-check brewline-dev-data brewline-dev-auth brewline-dev-ops brewline-dev-events brewline-dev-api brewline-dev-notify brewline-dev-simulator brewline-dev-edge brewline-dev-trace brewline-dev-lake brewline-dev-shipment brewline-dev-ais-spike
           -c env=dev -c commit=${{ github.sha }}
           --require-approval never
           --outputs-file outputs.json
@@ -196,6 +196,15 @@ jobs:
           scripts/verify-shipment-stack.sh dev outputs.json | tee verify-shipment.txt
           rc=${PIPESTATUS[0]}
           { echo "### Shipment stack (Dev)"; echo '```'; cat verify-shipment.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      # P2b-spike（只在 Dev，ADR-032 D2）：取樣函數、排程期間、ais_static 表、政策模擬 / Dev-only aisstream spike.
+      - name: Verify aisstream spike stack (sampler, 7-day schedule, ais_static table, IAM simulations)
+        run: |
+          set +e
+          scripts/verify-ais-spike-stack.sh dev outputs.json | tee verify-ais-spike.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### aisstream spike stack (Dev)"; echo '```'; cat verify-ais-spike.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
 
   deploy-prod:
