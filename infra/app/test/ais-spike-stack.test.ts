@@ -57,7 +57,8 @@ describe('AisSpikeStack (Dev only)', () => {
 
   test('config: Dev has a 7-day window in UTC; Prod has none (F1)', () => {
     expect(ENVIRONMENTS.prod.aisSpike).toBeUndefined();
-    expect(spike.startDate).toMatch(/Z$/);
+    expect(spike.startDate).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(spike.endDate).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     expect(Date.parse(spike.endDate) - Date.parse(spike.startDate)).toBe(7 * 86_400_000);
     expect(spike.collectSeconds).toBe(120);
   });
@@ -175,9 +176,10 @@ describe('AisSpikeStack (Dev only)', () => {
 describe('AisSpikeStack guards', () => {
   test.each([
     ['Prod', () => build(spike, 'prod'), 'Dev-only'],
-    ['more than 7 days', () => build({ ...spike, endDate: '2026-12-04T16:00:01Z' }), 'at most 7 days'],
+    ['more than 7 days', () => build({ ...spike, endDate: '2026-12-03T12:00:01.000Z' }), 'at most 7 days'],
     ['end before start', () => build({ ...spike, endDate: spike.startDate }), 'at most 7 days'],
-    ['not UTC', () => build({ ...spike, startDate: '2026-11-27T00:00:00+08:00' }), 'UTC ISO'],
+    ['not UTC', () => build({ ...spike, startDate: '2026-11-26T20:00:00.000+08:00' }), 'yyyy-MM-ddTHH:mm:ss.SSSZ'],
+    ['no milliseconds (Scheduler rejects it)', () => build({ ...spike, endDate: '2026-12-03T12:00:00Z' }), 'yyyy-MM-ddTHH:mm:ss.SSSZ'],
     ['collect longer than D9', () => build({ ...spike, collectSeconds: 150 }), '30–120'],
   ])('rejects %s', (_name, f, msg) => {
     expect(f).toThrow(msg);

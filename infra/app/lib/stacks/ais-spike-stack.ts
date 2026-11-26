@@ -53,8 +53,10 @@ export class AisSpikeStack extends Stack {
     if (envName !== 'dev') throw new Error('The aisstream spike is Dev-only (ADR-032 D2, F1)');
     const start = Date.parse(spike.startDate);
     const end = Date.parse(spike.endDate);
-    if (Number.isNaN(start) || Number.isNaN(end) || !/Z$/.test(spike.startDate) || !/Z$/.test(spike.endDate)) {
-      throw new Error('aisSpike startDate/endDate must be UTC ISO strings ending in Z');
+    // Scheduler 只接受 yyyy-MM-ddTHH:mm:ss.SSSZ（毫秒必填；沒有毫秒 → CREATE_FAILED）/ Milliseconds are required.
+    const SCHEDULER_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+    if (Number.isNaN(start) || Number.isNaN(end) || !SCHEDULER_DATE.test(spike.startDate) || !SCHEDULER_DATE.test(spike.endDate)) {
+      throw new Error('aisSpike startDate/endDate must be UTC in the Scheduler format yyyy-MM-ddTHH:mm:ss.SSSZ');
     }
     if (end <= start || end - start > 7 * 86_400_000) throw new Error('aisSpike must run for at most 7 days (ADR-032 D2)');
     if (spike.collectSeconds < 30 || spike.collectSeconds > 120) throw new Error('aisSpike collectSeconds must be 30–120 (D9)');
