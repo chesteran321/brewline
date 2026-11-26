@@ -17,7 +17,7 @@ import {
   timestampOf,
   vesselIdOf,
 } from '../src/ais/spike';
-import { Connect, SocketLike, collect, handler, logger, setDepsForTesting } from '../src/handlers/ais-sampler';
+import { Connect, SocketLike, collect, errorCode, handler, logger, setDepsForTesting } from '../src/handlers/ais-sampler';
 import { PositionRecordSchema } from '../src/model';
 import { parsePositions } from '../src/handlers/voyage-detector';
 import { seeds } from '../src/seeds';
@@ -194,6 +194,39 @@ describe('collect()', () => {
     expect(r.frames).toHaveLength(0);
     expect(r.error).toBe('closed_1008');
   });
+
+  // 診斷（2026-11-26：排程執行只記到 "Error"，看不出原因）/ Diagnostics: keep a secret-free reason per attempt.
+  test('handshake refused (unexpected-response) → http_<status>, not opened, with elapsed ms', async () => {
+    const connect: Connect = () => new FakeSocket((s) => s.emit('unexpected-response', {}, { statusCode: 429 }));
+    const r = await collect(connect, 'x', Date.now, Date.now() + 1000);
+    expect(r.error).toBe('http_429');
+    expect(r.opened).toBe(false);
+    expect(typeof r.ms).toBe('number');
+  });
+
+  test('network error keeps its code; a later close does not overwrite it', async () => {
+    const connect: Connect = () =>
+      new FakeSocket((s) => {
+        s.emit('error', Object.assign(new Error('connect ECONNREFUSED 1.2.3.4:443'), { code: 'ECONNREFUSED' }));
+        s.emit('close', 1006);
+      });
+    const r = await collect(connect, 'x', Date.now, Date.now() + 1000);
+    expect(r.error).toBe('ECONNREFUSED');
+  });
+});
+
+describe('errorCode() never returns message text', () => {
+  test.each([
+    [Object.assign(new Error('getaddrinfo ENOTFOUND stream.aisstream.io'), { code: 'ENOTFOUND' }), 'ENOTFOUND'],
+    [Object.assign(new Error('x'), { code: 'ETIMEDOUT' }), 'ETIMEDOUT'],
+    [new Error('Opening handshake has timed out'), 'handshake_timeout'],
+    [new Error('Unexpected server response: 403'), 'http_403'],
+    [Object.assign(new Error('APIKey=secret in url'), { code: 'bad code with spaces' }), 'Error'],
+    [{ name: 'Error: secret', message: 'x' }, 'Error'],
+    [undefined, 'Error'],
+  ])('%#', (err, want) => {
+    expect(errorCode(err)).toBe(want);
+  });
 });
 
 describe('handler', () => {
@@ -281,6 +314,27 @@ describe('handler', () => {
     expect(sockets).toHaveLength(3);
     expect(sleeps).toEqual([1000, 2000]);
     expect(s3.commandCalls(PutObjectCommand)).toHaveLength(0);
+  });
+
+  test('failure log lists each attempt (code, opened, ms) and never the key', async () => {
+    const logs: string[] = [];
+    const spies = (['info', 'warn', 'error'] as const).map((lvl) =>
+      jest.spyOn(logger, lvl).mockImplementation((...args: unknown[]) => void logs.push(JSON.stringify(args))),
+    );
+    run([
+      (s) => s.emit('unexpected-response', {}, { statusCode: 401 }),
+      (s) => s.emit('error', Object.assign(new Error('x'), { code: 'ETIMEDOUT' })),
+      (s) => {
+        s.emit('open');
+        s.emit('close', 1008);
+      },
+    ]);
+    await expect(handler()).rejects.toThrow('no AIS messages after 3 attempt(s): http_401, ETIMEDOUT, closed_1008');
+    const logText = logs.join('');
+    expect(logText).toContain('"attemptLog"');
+    expect(logText).toContain('"opened":true');
+    expect(logText).not.toContain('secret-key-value');
+    for (const sp of spies) sp.mockRestore();
   });
 
   test('second attempt succeeds after one failure', async () => {

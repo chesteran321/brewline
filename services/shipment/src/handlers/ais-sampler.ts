@@ -47,6 +47,8 @@ export interface SocketLike {
   on(event: 'message', cb: (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => void): unknown;
   on(event: 'error', cb: (err: Error) => void): unknown;
   on(event: 'close', cb: (code: number) => void): unknown;
+  /** 握手時伺服器回了 101 以外的狀態（有這個監聽器時 ws 不會再發 error）/ Non-101 handshake response. */
+  on(event: 'unexpected-response', cb: (req: unknown, res: { statusCode?: number }) => void): unknown;
   send(data: string): void;
   close(): void;
   terminate?(): void;
@@ -81,6 +83,23 @@ export interface AttemptResult {
   readonly opened: boolean;
   readonly firstMessageMs?: number;
   readonly error?: string;
+  /** 這次連線花了多久（毫秒）/ How long this attempt took. */
+  readonly ms?: number;
+}
+
+/**
+ * 錯誤 → 不含機密的短代碼（只用固定字彙；不記訊息全文、網址、標頭）。
+ * An error → a short, secret-free code: a Node/OS code (ECONNREFUSED, ETIMEDOUT, ENOTFOUND…),
+ * `handshake_timeout`, or the error class name. The message text itself is never logged.
+ */
+export function errorCode(err: unknown): string {
+  const e = err as { code?: unknown; name?: unknown; message?: unknown } | undefined;
+  if (typeof e?.code === 'string' && /^[A-Z0-9_]{2,40}$/.test(e.code)) return e.code;
+  if (typeof e?.message === 'string' && /handshake has timed out/i.test(e.message)) return 'handshake_timeout';
+  if (typeof e?.message === 'string' && /Unexpected server response: \d{3}/.test(e.message)) {
+    return `http_${/Unexpected server response: (\d{3})/.exec(e.message)![1]}`;
+  }
+  return typeof e?.name === 'string' && /^[A-Za-z]{1,40}$/.test(e.name) ? e.name : 'Error';
 }
 
 /**
@@ -105,15 +124,15 @@ export function collect(connect: Connect, subscribeMsg: string, now: () => numbe
       } catch {
         /* 已關閉 / already closed */
       }
-      resolve({ frames, opened, firstMessageMs, error });
+      resolve({ frames, opened, firstMessageMs, error, ms: now() - started });
     };
     const timer = setTimeout(finish, Math.max(0, deadlineMs - started));
     try {
       socket = connect(AIS_ENDPOINT);
     } catch (err) {
-      error = (err as Error).name;
+      error = errorCode(err);
       clearTimeout(timer);
-      resolve({ frames, opened, error });
+      resolve({ frames, opened, error, ms: now() - started });
       return;
     }
     socket.on('open', () => {
@@ -126,9 +145,14 @@ export function collect(connect: Connect, subscribeMsg: string, now: () => numbe
       const text = Buffer.isBuffer(data) ? data.toString('utf8') : Array.isArray(data) ? Buffer.concat(data).toString('utf8') : Buffer.from(data).toString('utf8');
       frames.push({ data: text, at });
     });
-    // 錯誤訊息可能含網址或標頭 → 只記錯誤類別 / Record only the error class (messages may carry URLs or headers).
+    // 錯誤訊息可能含網址或標頭 → 只記短代碼（errorCode）/ Record a short code only (messages may carry URLs or headers).
     socket.on('error', (err) => {
-      error = err.name || 'Error';
+      error ??= errorCode(err);
+    });
+    // 握手被拒（例如 401／403／429／5xx）：記狀態碼並結束這次連線 / Handshake refused: keep the status, end the attempt.
+    socket.on('unexpected-response', (_req, res) => {
+      error = `http_${res?.statusCode ?? 'unknown'}`;
+      finish();
     });
     socket.on('close', (code) => {
       error ??= frames.length === 0 ? `closed_${code}` : undefined;
@@ -171,15 +195,17 @@ export const handler = async (): Promise<SampleSummary> => {
   let attempts = 0;
   let result: AttemptResult = { frames: [], opened: false };
   const errors: string[] = [];
+  const attemptLog: Array<{ error: string; opened: boolean; ms?: number }> = [];
   while (attempts < MAX_ATTEMPTS && d.now() < deadline) {
     attempts++;
     result = await collect(d.connect, subscribeMsg, d.now, deadline);
     if (result.frames.length > 0) break;
     errors.push(result.error ?? 'no_messages');
+    attemptLog.push({ error: result.error ?? 'no_messages', opened: result.opened, ms: result.ms });
     if (attempts < MAX_ATTEMPTS) await d.sleep(backoffMs(attempts));
   }
   if (result.frames.length === 0) {
-    logger.error('no AIS messages', { attempts, errors });
+    logger.error('no AIS messages', { attempts, errors, attemptLog });
     throw new Error(`no AIS messages after ${attempts} attempt(s): ${errors.join(', ')}`);
   }
 
