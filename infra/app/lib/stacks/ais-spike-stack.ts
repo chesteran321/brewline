@@ -77,7 +77,7 @@ export class AisSpikeStack extends Stack {
       module: 'ais-spike',
       name: 'sampler',
       entry: 'shipment/src/handlers/ais-sampler.ts',
-      description: 'Dev-only aisstream spike: 120 s WebSocket sample of 10 port boxes → raw/positions/source=ais/ and raw/ais-static/',
+      description: 'Dev-only aisstream spike: 120 s WebSocket sample of 10 port boxes -> raw/positions/source=ais/ and raw/ais-static/',
       reservedConcurrency: 1, // 一次只開一個連線（帳號上限 3）/ One connection at a time (account limit 3).
       memorySize: 256, // D9
       timeout: Duration.seconds(150), // 連線 120 秒＋讀參數、寫檔 / 120 s of streaming plus setup and writes.
