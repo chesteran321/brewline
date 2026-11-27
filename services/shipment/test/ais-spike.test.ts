@@ -17,7 +17,7 @@ import {
   timestampOf,
   vesselIdOf,
 } from '../src/ais/spike';
-import { Connect, SocketLike, collect, errorCode, handler, logger, setDepsForTesting } from '../src/handlers/ais-sampler';
+import { Connect, HANDSHAKE_TIMEOUT_MS, SocketLike, collect, errorCode, handler, logger, setDepsForTesting } from '../src/handlers/ais-sampler';
 import { PositionRecordSchema } from '../src/model';
 import { parsePositions } from '../src/handlers/voyage-detector';
 import { seeds } from '../src/seeds';
@@ -185,6 +185,7 @@ describe('collect()', () => {
     expect(sock.sent).toEqual(['{"APIKey":"k"}']);
     expect(r.opened).toBe(true);
     expect(r.frames).toHaveLength(1);
+    expect(typeof r.openMs).toBe('number');
     expect(sock.closed).toBe(true);
   });
 
@@ -201,6 +202,7 @@ describe('collect()', () => {
     const r = await collect(connect, 'x', Date.now, Date.now() + 1000);
     expect(r.error).toBe('http_429');
     expect(r.opened).toBe(false);
+    expect(r.openMs).toBeUndefined();
     expect(typeof r.ms).toBe('number');
   });
 
@@ -349,6 +351,27 @@ describe('handler', () => {
     const out = await handler();
     expect(out.attempts).toBe(2);
     expect(sleeps).toEqual([1000]);
+    // 成功時也保留前面失敗的原因與握手時間 / Keep earlier failures and the handshake time on success.
+    expect(out.failedAttempts).toEqual([expect.objectContaining({ error: 'closed_1006', opened: false })]);
+    expect(typeof out.openMs).toBe('number');
+  });
+
+  test('handshake timeout fits three attempts plus back-off inside the 150 s function timeout', () => {
+    expect(HANDSHAKE_TIMEOUT_MS).toBe(30_000);
+    expect(3 * HANDSHAKE_TIMEOUT_MS + 1000 + 2000).toBeLessThan(150_000 - 20_000); // 20 s for SSM + parse + writes
+  });
+
+  test('a first-try success has no failedAttempts', async () => {
+    run([
+      (s) => {
+        s.emit('open');
+        s.emit('message', frame(position()), true);
+        s.close();
+      },
+    ]);
+    const out = await handler();
+    expect(out.failedAttempts).toBeUndefined();
+    expect(typeof out.openMs).toBe('number');
   });
 
   test('messages but zero usable positions → throws, nothing written', async () => {

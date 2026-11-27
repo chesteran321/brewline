@@ -55,7 +55,14 @@ export interface SocketLike {
 }
 export type Connect = (url: string) => SocketLike;
 
-const realConnect: Connect = (url) => new WebSocket(url, { perMessageDeflate: true, handshakeTimeout: 10_000 }) as unknown as SocketLike;
+/**
+ * 握手逾時 30 秒（2026-11-27：10 秒時排程執行 15/16 次 handshake_timeout；手動成功時約 4 秒內）。
+ * 3 次 × 30 秒＋退避 3 秒 ≈ 93 秒，仍在函數逾時 150 秒內。
+ * Handshake timeout 30 s: at 10 s, 15 of 16 overnight runs timed out in the handshake.
+ */
+export const HANDSHAKE_TIMEOUT_MS = 30_000;
+const realConnect: Connect = (url) =>
+  new WebSocket(url, { perMessageDeflate: true, handshakeTimeout: HANDSHAKE_TIMEOUT_MS }) as unknown as SocketLike;
 
 interface Deps {
   connect: Connect;
@@ -82,6 +89,8 @@ export interface AttemptResult {
   readonly frames: ReadonlyArray<{ readonly data: string; readonly at: number }>;
   readonly opened: boolean;
   readonly firstMessageMs?: number;
+  /** 握手完成（open）花了多久；沒開成就沒有 / Time until the handshake completed (open). */
+  readonly openMs?: number;
   readonly error?: string;
   /** 這次連線花了多久（毫秒）/ How long this attempt took. */
   readonly ms?: number;
@@ -112,6 +121,7 @@ export function collect(connect: Connect, subscribeMsg: string, now: () => numbe
     const started = now();
     let opened = false;
     let firstMessageMs: number | undefined;
+    let openMs: number | undefined;
     let error: string | undefined;
     let done = false;
     let socket: SocketLike;
@@ -124,7 +134,7 @@ export function collect(connect: Connect, subscribeMsg: string, now: () => numbe
       } catch {
         /* 已關閉 / already closed */
       }
-      resolve({ frames, opened, firstMessageMs, error, ms: now() - started });
+      resolve({ frames, opened, openMs, firstMessageMs, error, ms: now() - started });
     };
     const timer = setTimeout(finish, Math.max(0, deadlineMs - started));
     try {
@@ -137,6 +147,7 @@ export function collect(connect: Connect, subscribeMsg: string, now: () => numbe
     }
     socket.on('open', () => {
       opened = true;
+      openMs = now() - started;
       socket.send(subscribeMsg);
     });
     socket.on('message', (data) => {
@@ -171,6 +182,10 @@ export interface SampleSummary {
   readonly skipped: Record<string, number>;
   readonly compression?: boolean;
   readonly firstMessageMs?: number;
+  /** 成功那次連線的握手時間 / Handshake time of the successful attempt. */
+  readonly openMs?: number;
+  /** 之前失敗的連線（重試時）/ Failed attempts before the successful one. */
+  readonly failedAttempts?: ReadonlyArray<{ error: string; opened: boolean; openMs?: number; ms?: number }>;
   readonly connectSeconds: number;
   readonly boxes: ReturnType<typeof boxStats>;
   readonly keys: { positions: string; static?: string };
@@ -195,13 +210,13 @@ export const handler = async (): Promise<SampleSummary> => {
   let attempts = 0;
   let result: AttemptResult = { frames: [], opened: false };
   const errors: string[] = [];
-  const attemptLog: Array<{ error: string; opened: boolean; ms?: number }> = [];
+  const attemptLog: Array<{ error: string; opened: boolean; openMs?: number; ms?: number }> = [];
   while (attempts < MAX_ATTEMPTS && d.now() < deadline) {
     attempts++;
     result = await collect(d.connect, subscribeMsg, d.now, deadline);
     if (result.frames.length > 0) break;
     errors.push(result.error ?? 'no_messages');
-    attemptLog.push({ error: result.error ?? 'no_messages', opened: result.opened, ms: result.ms });
+    attemptLog.push({ error: result.error ?? 'no_messages', opened: result.opened, openMs: result.openMs, ms: result.ms });
     if (attempts < MAX_ATTEMPTS) await d.sleep(backoffMs(attempts));
   }
   if (result.frames.length === 0) {
@@ -255,6 +270,8 @@ export const handler = async (): Promise<SampleSummary> => {
     skipped,
     compression,
     firstMessageMs: result.firstMessageMs,
+    openMs: result.openMs,
+    ...(attemptLog.length > 0 ? { failedAttempts: attemptLog } : {}),
     connectSeconds: Math.round((d.now() - start) / 100) / 10,
     boxes: boxStats(boxes, uniquePositions.map((record) => ({ record, box: boxOf(boxes, record.lat, record.lon) }))),
     keys: { positions: keys.positions, ...(uniqueStatics.length > 0 ? { static: keys.static } : {}) },
